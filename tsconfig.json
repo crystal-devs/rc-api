@@ -1,0 +1,19 @@
+{
+    "compilerOptions": {
+      "module": "NodeNext",
+      "moduleResolution": "nodenext",
+      "baseUrl": "src",
+      "paths": {
+        "@utils/*": ["utils/*"],
+        "@models/*": ["models/*"],
+        "@controllers/*": ["controllers/*"],
+        "@middlewares/*": ["middlewares/*"],
+        "@configs/*": ["configs/*"]
+      },
+      "outDir": "dist",
+      // "sourceMap": true,
+      "noImplicitAny": true
+    },
+    "include": ["src/**/*"]
+  }
+  

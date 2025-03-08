@@ -1,0 +1,53 @@
+{
+  "name": "rc-api",
+  "version": "1.0.0",
+  "description": "api of rose click webapp",
+  "main": "index.ts",
+  "repository": "https://github.com/crystal-devs/rc-api.git",
+  "author": "adwaith,navaneeth",
+  "license": "MIT",
+  "_moduleAliases": {
+    "@utils": "./dist/utils",
+    "@models": "./dist/models",
+    "@controllers": "./dist/controllers",
+    "@middlewares": "./dist/middlewares",
+    "@configs": "./dist/configs"
+  },
+  "scripts": {
+    "dev": "cross-env NODE_ENV=development ts-node-dev --require tsconfig-paths/register src/index.ts",
+    "build": "tsc && tsc-alias",
+    "start": "cross-env NODE_ENV=production node dist/index.js"
+  },
+  "dependencies": {
+    "@types/module-alias": "^2.0.4",
+    "compression": "^1.8.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "cross-env": "^7.0.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "module-alias": "^2.2.3",
+    "mongoose": "^8.12.1",
+    "moongose": "^1.0.0",
+    "morgan": "^1.10.0",
+    "signale": "^1.4.0",
+    "winston": "^3.17.0",
+    "winston-mongodb": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/compression": "^1.7.5",
+    "@types/cookie-parser": "^1.4.8",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/morgan": "^1.9.9",
+    "@types/signale": "^1.4.7",
+    "nodemon": "^3.1.9",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "tsc-alias": "^1.8.11",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.8.2"
+  }
+}
