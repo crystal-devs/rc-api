@@ -4,12 +4,14 @@ import { logger } from "@utils/logger";
 dotenv.config(); // Load .env before anything else
 
 // ✅ Extract environment variables
-export const keys: Record<string, string | number> = {
+export const keys: Record<string, string | number | string[]> = {
   port: process.env.PORT ? Number(process.env.PORT) : 8080, // Ensure it's a number
   nodeEnv: process.env.NODE_ENV || "development",
   mongoURI: process.env.MONGO_URI,
   mongoDBName: process.env.MONGO_DB_NAME,
   appLiveVersion: process.env.VERSION,
+  // ✅ Convert CORS_ORIGINS from a comma-separated string to an array
+  corsOrigins: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(",") : [],
 };
 
 // ✅ Validate environment variables
