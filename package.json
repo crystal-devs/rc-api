@@ -11,7 +11,8 @@
     "@models": "./dist/models",
     "@controllers": "./dist/controllers",
     "@middlewares": "./dist/middlewares",
-    "@configs": "./dist/configs"
+    "@configs": "./dist/configs",
+    "@routes": "./dist/routes"
   },
   "scripts": {
     "dev": "cross-env NODE_ENV=development ts-node-dev --require tsconfig-paths/register src/index.ts",

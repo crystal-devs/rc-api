@@ -9,13 +9,13 @@ export const keys: Record<string, string | number | string[]> = {
   nodeEnv: process.env.NODE_ENV || "development",
   mongoURI: process.env.MONGO_URI,
   mongoDBName: process.env.MONGO_DB_NAME,
-  appLiveVersion: process.env.VERSION,
+  APILiveVersion: process.env.VERSION,
   // ✅ Convert CORS_ORIGINS from a comma-separated string to an array
   corsOrigins: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(",") : [],
 };
 
 // ✅ Validate environment variables
-const requiredKeys = ["port", "mongoURI", "mongoDBName", "appLiveVersion"];
+const requiredKeys = ["port", "mongoURI", "mongoDBName", "APILiveVersion"];
 const missingKeys = requiredKeys.filter((key) => !keys[key]);
 
 if (missingKeys.length) {

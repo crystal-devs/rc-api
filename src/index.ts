@@ -3,6 +3,7 @@ import { keys } from "@configs/dotenv.config";
 import { corsOptions, rateLimiter, securityHeaders } from "@configs/security.config";
 import { gracefulShutdown } from "@configs/shutdown.config";
 import { globalErrorHandler } from "@middlewares/error-handler.middleware";
+import systemRouter from "@routes/system.route";
 import { logGojo } from "@utils/gojo-satoru";
 import { logger, morganMiddleware } from "@utils/logger";
 
@@ -14,9 +15,9 @@ import http from "http";
 
 const app = express();
 const PORT = keys.port;
+const VERSION = keys.APILiveVersion;
 
 //- middlewares 🍉
-
 // 🚀 1️⃣ Performance & Parsing Middlewares
 app.use(compression());// ✅ Compresses Response Data for Faster Load Times
 app.use(cookieParser());// ✅ Parses Cookies in Requests (Required for Authentication)
@@ -44,6 +45,11 @@ function startServer() {
     process.exit(1);
   }
 }
+
+// 🌐 express routes
+app.use("/system", systemRouter)
+
+
 
 connectToMongoDB().then(startServer).catch((err) => {
   logger.error("mongodb connection failed: ", err)
