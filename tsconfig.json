@@ -10,6 +10,7 @@
         "@middlewares/*": ["middlewares/*"],
         "@configs/*": ["configs/*"],
         "@routes/*": ["routes/*"],
+        "@services/*": ["services/*"],
       },
       "outDir": "dist",
       // "sourceMap": true,

@@ -12,6 +12,7 @@ export const keys: Record<string, string | number | string[]> = {
   APILiveVersion: process.env.VERSION,
   // ✅ Convert CORS_ORIGINS from a comma-separated string to an array
   corsOrigins: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(",") : [],
+  jwtSecret: process.env.JWT_SECRET
 };
 
 // ✅ Validate environment variables

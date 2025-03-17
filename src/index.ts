@@ -3,6 +3,7 @@ import { keys } from "@configs/dotenv.config";
 import { corsOptions, rateLimiter, securityHeaders } from "@configs/security.config";
 import { gracefulShutdown } from "@configs/shutdown.config";
 import { globalErrorHandler } from "@middlewares/error-handler.middleware";
+import authRouter from "@routes/auth-router";
 import systemRouter from "@routes/system.route";
 import { logGojo } from "@utils/gojo-satoru";
 import { logger, morganMiddleware } from "@utils/logger";
@@ -48,6 +49,7 @@ function startServer() {
 
 // 🌐 express routes
 app.use("/system", systemRouter)
+app.use("/rc-cam/auth", authRouter)
 
 
 
