@@ -13,6 +13,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
 import http from "http";
+import roleMasterModel from "model/master/role.master.model";
 
 const app = express();
 const PORT = keys.port;
@@ -49,8 +50,9 @@ function startServer() {
 
 // 🌐 express routes
 app.use("/system", systemRouter)
-app.use("/rc-cam/auth", authRouter)
+app.use(`/api/${VERSION}/auth`, authRouter)
 
+roleMasterModel.find()
 
 
 connectToMongoDB().then(startServer).catch((err) => {

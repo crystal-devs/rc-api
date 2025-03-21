@@ -14,6 +14,10 @@ const roleSchema = new mongoose.Schema({
     },
     acces_to_rc_dash: {
         type: Boolean,
+        default: true,
+    },
+    access_to_rc_admin: {
+        type: Boolean,
         default: false,
     }
 })
