@@ -13,7 +13,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
 import http from "http";
-import roleMasterModel from "model/master/role.master.model";
+import roleMasterModel from "@models/master/role.master.model";
 
 const app = express();
 const PORT = keys.port;

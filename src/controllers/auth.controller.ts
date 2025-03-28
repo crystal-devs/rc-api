@@ -31,3 +31,16 @@ export const loginController: RequestHandler = async (req, res, next) => {
         next(err);
     }
 };
+
+
+export const verifyUserController: RequestHandler = async (req, res, next) => {
+    try {
+         res.status(200).json({
+            status: true,
+            message: "User verified successfully",
+        });
+        return // the user will be verified by the middleware
+    } catch (err) {
+        next(err);
+    }
+}

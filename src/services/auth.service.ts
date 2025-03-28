@@ -1,6 +1,6 @@
 import { keys } from "@configs/dotenv.config";
 import jwt from "jsonwebtoken";
-import userModel from "model/user.model";
+import userModel from "@models/user.model";
 import mongoose from "mongoose";
 
 interface LoginData {
@@ -32,7 +32,7 @@ export const loginService = async ({ email, phone_number, name, profile_pic, pro
             user = newUser.toObject(); // Convert Mongoose document to plain object only for new users
         } 
         // Generate JWT Token
-        const token = jwt.sign({userId: user._id}, keys.jwtSecret as string, {
+        const token = jwt.sign({user_id: user._id}, keys.jwtSecret as string, {
             expiresIn: "1200h",
         });
 

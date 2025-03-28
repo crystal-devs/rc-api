@@ -1,6 +1,10 @@
-import mongoose from "mongoose";
+import mongoose, { InferSchemaType } from "mongoose";
 
 const userSchema = new mongoose.Schema({
+    _id: {
+        type: mongoose.Schema.Types.ObjectId,
+        required: true,
+    },
     role_id: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Role",
@@ -21,6 +25,10 @@ const userSchema = new mongoose.Schema({
     phone_number: {
         type: String,
     },
+    provider: {
+        type: String,
+        enum: ["google", "apple", "instagram", "facebook"]
+    },
     country_code: {
         type: String,
         default: "+91"
@@ -28,3 +36,6 @@ const userSchema = new mongoose.Schema({
 }, {timestamps: true})
 
 export default mongoose.model("User", userSchema, "users");
+
+// Infer the TypeScript type from the schema
+export type UserType = InferSchemaType<typeof userSchema>;

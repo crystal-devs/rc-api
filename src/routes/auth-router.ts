@@ -1,9 +1,10 @@
 import express from "express";
-import { loginController } from "@controllers/auth.controller";
-
+import * as authController from "@controllers/auth.controller";
+import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 const authRouter = express.Router();
 
 // Route for login/signup
-authRouter.post("/login", loginController);
+authRouter.post("/login", authController.loginController);
+authRouter.get("/verify-clicky", authMiddleware, authController.verifyUserController);
 
-export default authRouter;
+export default authRouter;  
