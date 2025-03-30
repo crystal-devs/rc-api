@@ -35,6 +35,7 @@ export const loginController: RequestHandler = async (req, res, next) => {
 
 export const verifyUserController: RequestHandler = async (req, res, next) => {
     try {
+        // if album id , then register the user as a viewer against the album 
          res.status(200).json({
             status: true,
             message: "User verified successfully",

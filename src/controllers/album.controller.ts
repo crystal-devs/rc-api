@@ -30,10 +30,31 @@ export const createAlbumController = async (req: injectedRequest, res: Response,
     }
 }
 
+export const getUserAlbumsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try{
+        const user_id = req.user._id.toString(); // we will defenetly get the user id from the auth middleware
+        const response = await albumService.getAlbumsByAlbumIdOrUserId({ user_id });
+        sendResponse(res, response);
+    }catch(_err){
+        next(_err);
+    }
+}
+
+export const getAlbumController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try{
+        const { album_id } = trimObject(req.params);
+        if(!album_id) throw new Error("Album id is required");
+        const response = await albumService.getAlbumsByAlbumIdOrUserId({ album_id });
+        sendResponse(res, response);
+    }catch(_err){
+        next(_err);
+    }
+}
+
 export const updateAlbumController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try{
         const { title, description, start_date, end_date } = trimObject(req.body);
-        const { id } = req.params;
+        const { album_id } = trimObject(req.params);
         // validate the data
         if(!title || !start_date || !end_date) throw new Error("missing required fields");
     

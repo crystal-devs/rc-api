@@ -1,4 +1,5 @@
 import mongoose, { InferSchemaType } from "mongoose";
+import { MODEL_NAMES } from "./names";
 
 const userSchema = new mongoose.Schema({
     _id: {
@@ -7,7 +8,7 @@ const userSchema = new mongoose.Schema({
     },
     role_id: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: "Role",
+        ref: MODEL_NAMES.ROLE,
     },
     name: {
         type: String,
@@ -35,7 +36,7 @@ const userSchema = new mongoose.Schema({
     }
 }, {timestamps: true})
 
-export default mongoose.model("User", userSchema, "users");
+export const User = mongoose.model(MODEL_NAMES.USER, userSchema, MODEL_NAMES.USER);
 
-// Infer the TypeScript type from the schema
 export type UserType = InferSchemaType<typeof userSchema>;
+export type UserCreationType = Omit<UserType, '_id'>;
