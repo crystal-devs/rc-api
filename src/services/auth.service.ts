@@ -1,6 +1,6 @@
 import { keys } from "@configs/dotenv.config";
+import { User } from "@models/user.model";
 import jwt from "jsonwebtoken";
-import userModel from "@models/user.model";
 import mongoose from "mongoose";
 
 interface LoginData {
@@ -13,19 +13,19 @@ interface LoginData {
 
 export const loginService = async ({ email, phone_number, name, profile_pic, provider }: LoginData) => {
     try {
-        let user = await userModel.findOne({
+        let user = await User.findOne({
             $or: [{ email }, { phone_number }],
         }).lean(); // Returns a plain object, no need for `.toObject()`
 
         if (!user) {
             // **Signup Flow**: If user does not exist, create a new one
 
-            const newUser = await userModel.create({
+            const newUser = await User.create({
                 email,
                 phone_number,
                 role_id: new mongoose.Types.ObjectId("67dd8031cd6d859e3813e8bb"),
                 provider,
-                name: name || "Clicky", // Default name if not provided
+                name: name || "Clicky", // Default name if not provided 
                 profile_pic: profile_pic || "",
             });
 
