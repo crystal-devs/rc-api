@@ -5,4 +5,5 @@ export type ServiceResponse<T> = {
     data: T | null;
     other?: any;
     error: { message: string; stack?: string } | null;
+    stack?: any,
 }

@@ -1,5 +1,6 @@
 import mongoose, { InferSchemaType } from "mongoose";
 import { MODEL_NAMES } from "./names";
+
 const albumSchema = new mongoose.Schema({
     _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
     title: { type: String, required: [true, "Title is required"] },
@@ -9,6 +10,7 @@ const albumSchema = new mongoose.Schema({
     end_date: { type: Date, default: null },
     created_at: { type: Date, default: Date.now },
     is_private: { type: Boolean, default: false },
+    thumbnail_pic: { type: String, default: ""}
 });
 
 export const Album = mongoose.model(MODEL_NAMES.ALBUM, albumSchema, MODEL_NAMES.ALBUM);

@@ -17,6 +17,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
 import http from "http";
+import mediaRouter from "@routes/media.router";
 
 const app = express();
 const PORT = keys.port;
@@ -24,18 +25,18 @@ const VERSION = keys.APILiveVersion;
 
 //- middlewares 🍉
 //  Performance & Parsing Middlewares
-app.use(compression());// ✅ Compresses Response Data for Faster Load Times
-app.use(cookieParser());// ✅ Parses Cookies in Requests (Required for Authentication)
-app.use(express.json());// ✅ Parses JSON Request Bodies
-app.use(express.urlencoded({ extended: true }));// ✅ Parses URL-encoded Data (Form Submissions)
+app.use(compression());// Compresses Response Data for Faster Load Times
+app.use(cookieParser());// Parses Cookies in Requests (Required for Authentication)
+app.use(express.json());// Parses JSON Request Bodies
+app.use(express.urlencoded({ extended: true }));// Parses URL-encoded Data (Form Submissions)
 
 // Security Middlewares (Protects the App from Attacks)
-app.use(securityHeaders);// ✅ Security Headers (Prevents Clickjacking, XSS, etc.)
-app.use(rateLimiter);// ✅ Rate Limiting (Prevents API abuse & DDoS)
-app.use(cors(corsOptions));// ✅ Cross-Origin Requests Allowed Only for Trusted Domains
+app.use(securityHeaders);// Security Headers (Prevents Clickjacking, XSS, etc.)
+app.use(rateLimiter);// Rate Limiting (Prevents API abuse & DDoS)
+app.use(cors(corsOptions));// Cross-Origin Requests Allowed Only for Trusted Domains
 
 // Logging & Debugging
-app.use(morganMiddleware); // ✅ Structured Logging for Debugging & Monitoring
+app.use(morganMiddleware); // Structured Logging for Debugging & Monitoring
 
 const server = http.createServer(app);
 
@@ -43,6 +44,7 @@ const server = http.createServer(app);
 app.use("/system", systemRouter)
 app.use(`/api/${VERSION}/auth`, authRouter)
 app.use(`/api/${VERSION}/album`, albumRouter)
+app.use(`/api/${VERSION}/media`, mediaRouter)
 
 
 connectToMongoDB().then(startServer).catch((err) => {
@@ -54,7 +56,7 @@ connectToMongoDB().then(startServer).catch((err) => {
 function startServer() {
   try {
     server.listen(PORT, () => {
-      logger.info(`🚀 Server running at http://localhost:${PORT}/`);
+      logger.info(`Server running at http://localhost:${PORT}/`);
       if (keys.nodeEnv === "development") logGojo(); // 🔥 YEYE GOJO TIME!
     });
   } catch (error) {

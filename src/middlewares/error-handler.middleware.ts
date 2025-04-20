@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { logger } from "@utils/logger";
+import { sendResponse } from "@utils/express.util";
 
 // Standard Error Response Format
 interface ErrorResponse {
@@ -13,22 +14,16 @@ interface ErrorResponse {
 export const globalErrorHandler = (err: any, req: Request, res: Response, next: NextFunction) => {
   logger.error("❌ Global Error Caught:", err);
 
-  // Check if the error has an explicit status code (e.g., thrown manually)
-  const statusCode = err.status || 500;
-  const errorMessage = err.message || "Internal Server Error";
-
-  // Construct response object
-  const response: ErrorResponse = {
-    success: false,
-    message: errorMessage,
-    status: statusCode,
-  };
-
-  // Show stack trace ONLY in development mode (hide in production) 
-  if (process.env.NODE_ENV === "development") {
-    response.stack = err.stack;
-  }
+  if(process.env.NODE_ENV === "development") logger.error(err.stack);
 
   // Send JSON response
-  res.status(statusCode).json(response);
+  sendResponse(res, {
+    status: false,
+    code: err.status || 500,
+    data: null,
+    error: err,
+    message: err.message || "Internal Server error",
+    other: null,
+    stack: process.env.NODE_ENV === "development" ? err.stack : null,
+  })
 };

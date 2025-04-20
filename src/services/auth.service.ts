@@ -13,9 +13,13 @@ interface LoginData {
 
 export const loginService = async ({ email, phone_number, name, profile_pic, provider }: LoginData) => {
     try {
-        let user = await User.findOne({
-            $or: [{ email }, { phone_number }],
-        }).lean(); // Returns a plain object, no need for `.toObject()`
+        const query: any = {};
+        if (email) query.email = email;
+        if (phone_number) query.phone_number = phone_number;
+        
+        let user = await User.findOne(query).lean();        
+
+        console.log(user, "is the user")
 
         if (!user) {
             // **Signup Flow**: If user does not exist, create a new one
