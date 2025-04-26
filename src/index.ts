@@ -43,7 +43,7 @@ const server = http.createServer(app);
 // 🌐 express routes
 app.use("/system", systemRouter)
 app.use(`/api/${VERSION}/auth`, authRouter)
-app.use(`/api/${VERSION}/album`, eventRouter)
+app.use(`/api/${VERSION}/event`, eventRouter)
 app.use(`/api/${VERSION}/media`, mediaRouter)
 
 
