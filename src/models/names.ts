@@ -1,8 +1,8 @@
 export const MODEL_NAMES = {
     USER: "users",
     ROLE: "roles",
+    EVENT: "events",
     ALBUM: "albums",
-    PAGE: "pages",
     MEDIA: "medias",
     ACCESS_CONTROL: "access-controls",
     ACTIVITY_LOG: "activity-logs",

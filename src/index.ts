@@ -7,17 +7,17 @@ import { logGojo } from "@utils/gojo-satoru";
 import { logger, morganMiddleware } from "@utils/logger";
 
 //route imports
-import albumRouter from "@routes/album.router";
 import authRouter from "@routes/auth-router";
 import systemRouter from "@routes/system.route";
 
 // packages
+import eventRouter from "@routes/event.router";
+import mediaRouter from "@routes/media.router";
 import compression from "compression";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
 import http from "http";
-import mediaRouter from "@routes/media.router";
 
 const app = express();
 const PORT = keys.port;
@@ -43,7 +43,7 @@ const server = http.createServer(app);
 // 🌐 express routes
 app.use("/system", systemRouter)
 app.use(`/api/${VERSION}/auth`, authRouter)
-app.use(`/api/${VERSION}/album`, albumRouter)
+app.use(`/api/${VERSION}/album`, eventRouter)
 app.use(`/api/${VERSION}/media`, mediaRouter)
 
 

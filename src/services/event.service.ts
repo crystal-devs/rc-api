@@ -1,34 +1,34 @@
 import { AccessControl } from "@models/access.model";
 import { ActivityLog } from "@models/activity-log.model";
-import { Album, AlbumCreationType, AlbumType } from "@models/album.model";
+import { Event, EventCreationType, EventType } from "@models/event.model";
 import { MODEL_NAMES } from "@models/names";
 import { logger } from "@utils/logger";
 import mongoose from "mongoose";
 import { ServiceResponse } from "types/service.types";
 
 
-export const createAlbumService = async (albumData: AlbumCreationType): Promise<ServiceResponse<AlbumType>> => {
+export const createEventService = async (eventData: EventCreationType): Promise<ServiceResponse<EventType>> => {
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
 
-        const album = await Album.create([albumData], { session });
+        const event = await Event.create([eventData], { session });
 
-        if (!album[0]?._id || !albumData?.created_by) throw new Error("Invalid album or creator ID");
+        if (!event[0]?._id || !eventData?.created_by) throw new Error("Invalid event or creator ID");
 
         await AccessControl.create([{
-            resource_id: new mongoose.Types.ObjectId(album[0]._id),
-            resource_type: "album",
+            resource_id: new mongoose.Types.ObjectId(event[0]._id),
+            resource_type: "event",
             permissions: [{
-                user_id: new mongoose.Types.ObjectId(albumData.created_by),
+                user_id: new mongoose.Types.ObjectId(eventData.created_by),
                 role: "owner",
             }],
         }], { session });
 
         await ActivityLog.create([{
-            user_id: new mongoose.Types.ObjectId(albumData.created_by),
-            resource_id: new mongoose.Types.ObjectId(album[0]._id),
-            resource_type: "album",
+            user_id: new mongoose.Types.ObjectId(eventData.created_by),
+            resource_id: new mongoose.Types.ObjectId(event[0]._id),
+            resource_type: "event",
             action: "created",
         }], { session });
 
@@ -38,8 +38,8 @@ export const createAlbumService = async (albumData: AlbumCreationType): Promise<
         return {
             status: true,
             code: 201,
-            message: "Album created successfully",
-            data: album[0],
+            message: "event created successfully",
+            data: event[0],
             error: null,
             other: null
         };
@@ -49,7 +49,7 @@ export const createAlbumService = async (albumData: AlbumCreationType): Promise<
         return {
             status: false,
             code: 500,
-            message: "Failed to create album",
+            message: "Failed to create event",
             data: null,
             error: {
                 message: err.message,
@@ -62,56 +62,56 @@ export const createAlbumService = async (albumData: AlbumCreationType): Promise<
     }
 }
 
-export const getAlbumsByAlbumIdOrUserId =
-    async ({ album_id, user_id }: { album_id?: string, user_id?: string })
-        : Promise<ServiceResponse<AlbumType[]>> => {
+export const geteventsByeventIdOrUserId =
+    async ({ event_id, user_id }: { event_id?: string, user_id?: string })
+        : Promise<ServiceResponse<EventType[]>> => {
         try {
-            let albums: AlbumType[] = [];
+            let events: EventType[] = [];
 
             if (user_id) {
-                albums = await AccessControl.aggregate([
+                events = await AccessControl.aggregate([
                     {
                         $match: {
                             "permissions.user_id": new mongoose.Types.ObjectId(user_id),
                             // "permissions.role": { $in: ["owner", "viewer"] },
-                            resource_type: "album"
+                            resource_type: "event"
                         }
                     },
                     {
                         $lookup: {
-                            from: MODEL_NAMES.ALBUM,
+                            from: MODEL_NAMES.EVENT,
                             localField: "resource_id",
                             foreignField: "_id",
-                            as: "albumData"
+                            as: "eventData"
                         }
                     },
-                    { $unwind: "$albumData" },
-                    { $replaceRoot: { newRoot: "$albumData" } },
+                    { $unwind: "$eventData" },
+                    { $replaceRoot: { newRoot: "$eventData" } },
                 ]);
             }
 
-            if (album_id) {
-                const album = await Album.findById(album_id).lean();
-                if (album) albums.push(album);
+            if (event_id) {
+                const event = await Event.findById(event_id).lean();
+                if (event) events.push(event);
             }
 
             return {
                 status: true,
                 code: 200,
-                message: "Albums fetched successfully",
-                data: albums,
+                message: "events fetched successfully",
+                data: events,
                 error: null,
                 other: null
             };
 
         } catch (err: any) {
-            logger.error(`[getAlbumService] Error fetching albums: ${err.message}`);
+            logger.error(`[geteventService] Error fetching events: ${err.message}`);
             if (process.env.NODE_ENV === "development") console.error(err.stack);
 
             return {
                 status: false,
                 code: 500,
-                message: "Failed to get album",
+                message: "Failed to get event",
                 data: null,
                 error: {
                     message: err.message,
@@ -122,25 +122,25 @@ export const getAlbumsByAlbumIdOrUserId =
         }
     }
 
-export const updateAlbumService = async (
-    album_id: string,
+export const updateeventService = async (
+    event_id: string,
     datatoupdate: Record<string, any>
-): Promise<ServiceResponse<AlbumType>> => {
+): Promise<ServiceResponse<EventType>> => {
     try {
-        const objectId = new mongoose.Types.ObjectId(album_id);
+        const objectId = new mongoose.Types.ObjectId(event_id);
 
         // Use findOneAndUpdate with correct parameters
-        const album = await Album.findOneAndUpdate(
+        const event = await Event.findOneAndUpdate(
             { _id: objectId },
             { $set: datatoupdate }, // Update operation
             { new: true } // return the updated document
         );
 
-        if (!album) {
+        if (!event) {
             return {
                 status: false,
                 code: 404,
-                message: "Album not found",
+                message: "event not found",
                 data: null,
                 error: null,
                 other: null
@@ -150,8 +150,8 @@ export const updateAlbumService = async (
         return {
             status: true,
             code: 200,
-            message: "Album updated successfully",
-            data: album,
+            message: "event updated successfully",
+            data: event,
             error: null,
             other: null
         };
@@ -159,7 +159,7 @@ export const updateAlbumService = async (
         return {
             status: false,
             code: 500,
-            message: "Failed to update album",
+            message: "Failed to update event",
             data: null,
             error: {
                 message: err.message,

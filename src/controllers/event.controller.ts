@@ -1,11 +1,11 @@
 import { trimObject } from "@utils/sanitizers.util";
 import { NextFunction, Response } from "express"
 import { injectedRequest } from "types/injected-types"
-import * as albumService from "@services/album.service";
+import * as eventService from "@services/event.service";
 import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
 
-export const createAlbumController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+export const createeventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         let { title, description, start_date, end_date, is_private = false } = trimObject(req.body);
 
@@ -31,7 +31,7 @@ export const createAlbumController = async (req: injectedRequest, res: Response,
             throw new Error("Invalid data type for end_date");
         }
 
-        const response = await albumService.createAlbumService({
+        const response = await eventService.createEventService({
             title,
             description,
             start_date,
@@ -47,34 +47,34 @@ export const createAlbumController = async (req: injectedRequest, res: Response,
     }
 }
 
-export const getUserAlbumsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+export const getUsereventsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const user_id = req.user._id.toString(); // we will defenetly get the user id from the auth middleware
-        const response = await albumService.getAlbumsByAlbumIdOrUserId({ user_id });
+        const response = await eventService.geteventsByeventIdOrUserId({ user_id });
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
     }
 }
 
-export const getAlbumController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+export const geteventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
-        const { album_id } = trimObject(req.params);
-        if (!album_id) throw new Error("Album id is required");
-        const response = await albumService.getAlbumsByAlbumIdOrUserId({ album_id });
+        const { event_id } = trimObject(req.params);
+        if (!event_id) throw new Error("event id is required");
+        const response = await eventService.geteventsByeventIdOrUserId({ event_id });
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
     }
 }
 
-export const updateAlbumController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+export const updateeventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         let { title, description, start_date, end_date } = trimObject(req.body);
-        const { album_id } = trimObject(req.params);
+        const { event_id } = trimObject(req.params);
 
-        // Validate album_id
-        if (!album_id) throw new Error("Album ID is required");
+        // Validate event_id
+        if (!event_id) throw new Error("event ID is required");
 
         // Initialize update object
         const updateData: any = {};
@@ -105,7 +105,7 @@ export const updateAlbumController = async (req: injectedRequest, res: Response,
         }
 
         // Perform the update
-        const response = await albumService.updateAlbumService(album_id, updateData);
+        const response = await eventService.updateeventService(event_id, updateData);
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
