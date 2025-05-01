@@ -5,7 +5,7 @@ import multer from "multer";
 import { uploadMediaController, uploadCoverImageController } from "@controllers/media.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 
-const router = express.Router();
+const mediaRouter = express.Router();
 
 // Configure multer for file uploads
 const upload = multer({ 
@@ -16,12 +16,12 @@ const upload = multer({
 });
 
 // Apply authentication middleware to all routes
-router.use(authMiddleware);
+mediaRouter.use(authMiddleware);
 
 // Upload media to an album
-router.post("/upload", upload.single('image'), uploadMediaController);
+mediaRouter.post("/upload", upload.single('image'), uploadMediaController);
 
 // Upload a cover image for an event or album
-router.post("/upload-cover", upload.single('image'), uploadCoverImageController);
+mediaRouter.post("/upload-cover", upload.single('image'), uploadCoverImageController);
 
-export default router;
+export default mediaRouter;

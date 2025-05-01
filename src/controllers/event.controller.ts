@@ -7,8 +7,7 @@ import { sendResponse } from "@utils/express.util";
 
 export const createeventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
-        let { title, description, start_date, end_date, is_private = false, coverImage, location, template, accessType, access_code } = trimObject(req.body);
-
+        let { title, description, start_date, end_date, is_private = false, cover_image, location, template, accessType, access_code } = trimObject(req.body);
         // Validate required fields
         if (!title) throw new Error("Title is a required field");
 
@@ -39,7 +38,7 @@ export const createeventController = async (req: injectedRequest, res: Response,
             created_by: new mongoose.Types.ObjectId(req.user._id),
             is_private,
             created_at: new Date(),
-            cover_image: coverImage || "",
+            cover_image: cover_image || "",
             location: location || "",
             template: template || "custom",
             access_code: access_code || "",
