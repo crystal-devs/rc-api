@@ -18,6 +18,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
 import http from "http";
+import albumRouter from "@routes/album.router";
 
 const app = express();
 const PORT = keys.port;
@@ -44,6 +45,7 @@ const server = http.createServer(app);
 app.use("/system", systemRouter)
 app.use(`/api/${VERSION}/auth`, authRouter)
 app.use(`/api/${VERSION}/event`, eventRouter)
+app.use(`/api/${VERSION}/album`, albumRouter)
 app.use(`/api/${VERSION}/media`, mediaRouter)
 
 

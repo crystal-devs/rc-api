@@ -5,7 +5,7 @@ import { MODEL_NAMES } from "./names";
 const activityLogSchema = new mongoose.Schema({
     _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
     resource_id: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
-    resource_type: { type: String, enum: ["album", "page", "media"], required: true },
+    resource_type: { type: String, enum: ["album", "page", "media", "event"], required: true },
     user_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: true, index: true },
     action: { 
         type: String,

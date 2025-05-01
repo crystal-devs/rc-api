@@ -1,10 +1,27 @@
+// routes/media.routes.ts
+
 import express from "express";
-import { uploadMediaToImageKitController } from "@controllers/media.controller";
-import { upload } from "@middlewares/multer.middleware";
+import multer from "multer";
+import { uploadMediaController, uploadCoverImageController } from "@controllers/media.controller";
+import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 
-const mediaRouter = express.Router();
+const router = express.Router();
 
-// Single file upload: field name = "file"
-mediaRouter.post("/upload", upload.single("file"), uploadMediaToImageKitController);
+// Configure multer for file uploads
+const upload = multer({ 
+    dest: 'uploads/',
+    limits: { 
+        fileSize: 10 * 1024 * 1024 // 10MB limit
+    }
+});
 
-export default mediaRouter;
+// Apply authentication middleware to all routes
+router.use(authMiddleware);
+
+// Upload media to an album
+router.post("/upload", upload.single('image'), uploadMediaController);
+
+// Upload a cover image for an event or album
+router.post("/upload-cover", upload.single('image'), uploadCoverImageController);
+
+export default router;

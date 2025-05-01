@@ -12,8 +12,9 @@ export const createEventService = async (eventData: EventCreationType): Promise<
     session.startTransaction();
     try {
 
+        console.log(eventData, 'event created')
         const event = await Event.create([eventData], { session });
-
+        console.log(event, 'event created')
         if (!event[0]?._id || !eventData?.created_by) throw new Error("Invalid event or creator ID");
 
         await AccessControl.create([{

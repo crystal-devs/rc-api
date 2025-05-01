@@ -5,7 +5,7 @@ import { MODEL_NAMES } from "./names";
 const accessControlSchema = new mongoose.Schema({
     _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
     resource_id: { type: mongoose.Schema.Types.ObjectId, required: true, index: true }, // Album or Page ID
-    resource_type: { type: String, enum: ["album", "page"], required: true },
+    resource_type: { type: String, enum: ["event", "album", "page"], required: true },
     permissions: [{
         user_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: false }, // User-based access
         role: { 

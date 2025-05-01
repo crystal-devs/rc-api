@@ -10,7 +10,10 @@ const eventSchema = new mongoose.Schema({
     end_date: { type: Date, default: null },
     created_at: { type: Date, default: Date.now },
     is_private: { type: Boolean, default: false },
-    thumbnail_pic: { type: String, default: ""}
+    cover_image: { type: String, default: "" },
+    location: { type: String, default: "" },
+    template: { type: String, enum: ['wedding', 'birthday', 'concert', 'corporate', 'vacation', 'custom'], default: 'custom' },
+    access_code: { type: String, default: "" }
 });
 
 export const Event = mongoose.model(MODEL_NAMES.EVENT, eventSchema, MODEL_NAMES.EVENT);
