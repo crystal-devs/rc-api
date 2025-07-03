@@ -1,4 +1,4 @@
-// services/album.service.ts
+// services/album.service.ts (updated with default album functionality)
 
 import { AccessControl } from "@models/access.model";
 import { ActivityLog } from "@models/activity-log.model";
@@ -72,6 +72,111 @@ export const createAlbumService = async (albumData: AlbumCreationType): Promise<
         };
     } finally {
         await session.endSession();
+    }
+};
+
+/**
+ * Create a default album for an event
+ * @param event_id ID of the event
+ * @param user_id ID of the user creating the album
+ * @returns Service response with created default album or error
+ */
+export const createDefaultAlbumForEvent = async (
+    event_id: string,
+    user_id: string
+): Promise<ServiceResponse<AlbumType>> => {
+    try {
+        // Check if a default album already exists for this event
+        const existingDefaultAlbum = await Album.findOne({
+            event_id: new mongoose.Types.ObjectId(event_id),
+            is_default: true
+        });
+
+        if (existingDefaultAlbum) {
+            return {
+                status: true,
+                code: 200,
+                message: "Default album already exists",
+                data: existingDefaultAlbum,
+                error: null,
+                other: null
+            };
+        }
+
+        // Create a new default album
+        const defaultAlbumData: AlbumCreationType = {
+            title: "All Photos",
+            description: "Default album for event photos",
+            event_id: new mongoose.Types.ObjectId(event_id),
+            created_by: new mongoose.Types.ObjectId(user_id),
+            created_at: new Date(),
+            is_private: false,
+            is_default: true,
+            cover_image: ""
+        };
+
+        return await createAlbumService(defaultAlbumData);
+    } catch (err) {
+        logger.error(`[createDefaultAlbumForEvent] Error creating default album: ${err.message}`);
+        
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to create default album",
+            data: null,
+            error: {
+                message: err.message,
+                stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+            },
+            other: null
+        };
+    }
+};
+
+/**
+ * Get or create a default album for an event
+ * @param event_id ID of the event
+ * @param user_id ID of the user
+ * @returns Service response with default album or error
+ */
+export const getOrCreateDefaultAlbum = async (
+    event_id: string,
+    user_id: string
+): Promise<ServiceResponse<AlbumType>> => {
+    try {
+        // First try to find an existing default album
+        const defaultAlbum = await Album.findOne({
+            event_id: new mongoose.Types.ObjectId(event_id),
+            is_default: true
+        });
+
+        if (defaultAlbum) {
+            return {
+                status: true,
+                code: 200,
+                message: "Default album found",
+                data: defaultAlbum,
+                error: null,
+                other: null
+            };
+        }
+
+        // If no default album exists, create one
+        return await createDefaultAlbumForEvent(event_id, user_id);
+    } catch (err) {
+        logger.error(`[getOrCreateDefaultAlbum] Error getting or creating default album: ${err.message}`);
+        
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to get or create default album",
+            data: null,
+            error: {
+                message: err.message,
+                stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+            },
+            other: null
+        };
     }
 };
 
@@ -165,6 +270,57 @@ export const getAlbumsByParams = async ({
             status: false,
             code: 500,
             message: "Failed to get albums",
+            data: null,
+            error: {
+                message: err.message,
+                stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+            },
+            other: null
+        };
+    }
+};
+
+/**
+ * Get default album for an event or create one if it doesn't exist
+ * @param event_id ID of the event
+ * @param user_id ID of the user
+ * @returns Service response with default album or error
+ */
+export const getDefaultAlbum = async (
+    event_id: string
+): Promise<ServiceResponse<AlbumType | null>> => {
+    try {
+        const defaultAlbum = await Album.findOne({
+            event_id: new mongoose.Types.ObjectId(event_id),
+            is_default: true
+        });
+
+        if (!defaultAlbum) {
+            return {
+                status: false,
+                code: 404,
+                message: "Default album not found",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        return {
+            status: true,
+            code: 200,
+            message: "Default album found",
+            data: defaultAlbum,
+            error: null,
+            other: null
+        };
+    } catch (err) {
+        logger.error(`[getDefaultAlbum] Error getting default album: ${err.message}`);
+        
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to get default album",
             data: null,
             error: {
                 message: err.message,
@@ -311,6 +467,18 @@ export const deleteAlbumService = async (
                 status: false,
                 code: 404,
                 message: "Album not found",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Check if this is a default album - don't allow deleting default albums
+        if (album.is_default) {
+            return {
+                status: false,
+                code: 400,
+                message: "Cannot delete the default album",
                 data: null,
                 error: null,
                 other: null

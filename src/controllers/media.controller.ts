@@ -1,9 +1,11 @@
 // controllers/media.controller.ts
 
-import { uploadMediaService, uploadCoverImageService } from "@services/media.service";
+import { getOrCreateDefaultAlbum } from "@services/album.service";
+import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService } from "@services/media.service";
 import { sendResponse } from "@utils/express.util";
 import { NextFunction, RequestHandler, Response } from "express";
 import { injectedRequest } from "types/injected-types";
+import mongoose from "mongoose";
 
 /**
  * Regular media upload controller
@@ -11,9 +13,15 @@ import { injectedRequest } from "types/injected-types";
 export const uploadMediaController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
         const file = req.file;
-        const { album_id } = req.body;
+        let { album_id, event_id } = req.body;
         const user_id = req.user._id;
 
+        console.log('Media upload request:', {
+            file: file ? 'File present' : 'No file',
+            album_id: album_id ? 'Album ID present'  : 'No album ID',
+            event_id: event_id ? 'Event ID present' : 'No event ID',
+            user_id: user_id ? 'User ID present' : 'No user ID',
+        });
         if (!file) {
             res.status(400).json({
                 status: false,
@@ -23,16 +31,36 @@ export const uploadMediaController: RequestHandler = async (req: injectedRequest
             return;
         }
 
-        if (!album_id) {
+        if (!event_id) {
             res.status(400).json({
                 status: false,
-                message: "Missing album_id",
-                error: { message: "album_id is required" },
+                message: "Missing event_id",
+                error: { message: "event_id is required" },
             });
             return;
         }
 
-        const response = await uploadMediaService(file, user_id.toString(), album_id);
+        // If no album_id is provided, get or create a default album
+        if (!album_id) {
+            const defaultAlbumResponse = await getOrCreateDefaultAlbum(
+                event_id,
+                user_id.toString()
+            );
+
+            if (!defaultAlbumResponse.status || !defaultAlbumResponse.data) {
+                res.status(500).json({
+                    status: false,
+                    message: "Failed to get or create default album",
+                    error: { message: "Could not create or find default album" },
+                });
+                return;
+            }
+
+            album_id = defaultAlbumResponse.data._id.toString();
+        }
+
+        // Now proceed with the media upload
+        const response = await uploadMediaService(file, user_id.toString(), album_id, event_id);
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
@@ -69,6 +97,58 @@ export const uploadCoverImageController: RequestHandler = async (req: injectedRe
         sendResponse(res, response);
     } catch (_err) {
         console.error('Error in uploadCoverImageController:', _err);
+        next(_err);
+    }
+};
+
+/**
+ * Get all media for a specific event
+ */
+export const getMediaByEventController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+        const { event_id } = req.params;
+
+        // Validate event_id
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            res.status(400).json({
+                status: false,
+                message: "Invalid event ID",
+                error: { message: "A valid event ID is required" },
+            });
+            return;
+        }
+
+        // Fetch media for the event
+        const response = await getMediaByEventService(event_id);
+        sendResponse(res, response);
+    } catch (_err) {
+        console.error('Error in getMediaByEventController:', _err);
+        next(_err);
+    }
+};
+
+/**
+ * Get all media for a specific album
+ */
+export const getMediaByAlbumController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+        const { album_id } = req.params;
+
+        // Validate album_id
+        if (!album_id || !mongoose.Types.ObjectId.isValid(album_id)) {
+            res.status(400).json({
+                status: false,
+                message: "Invalid album ID",
+                error: { message: "A valid album ID is required" },
+            });
+            return;
+        }
+
+        // Fetch media for the album
+        const response = await getMediaByAlbumService(album_id);
+        sendResponse(res, response);
+    } catch (_err) {
+        console.error('Error in getMediaByAlbumController:', _err);
         next(_err);
     }
 };

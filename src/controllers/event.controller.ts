@@ -4,6 +4,7 @@ import { injectedRequest } from "types/injected-types"
 import * as eventService from "@services/event.service";
 import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
+import { createDefaultAlbumForEvent } from "@services/album.service";
 
 export const createeventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
@@ -17,7 +18,6 @@ export const createeventController = async (req: injectedRequest, res: Response,
         }
         else if (start_date) start_date = new Date(start_date)
         else if (end_date) end_date = new Date(end_date)
-
 
         // Type checking
         if (typeof title !== "string" || typeof description !== "string") {
@@ -43,6 +43,15 @@ export const createeventController = async (req: injectedRequest, res: Response,
             template: template || "custom",
             access_code: access_code || "",
         });
+
+        // If event created successfully, create a default album
+        if (response.status && response.data && response.data._id) {
+            await createDefaultAlbumForEvent(
+                response.data._id.toString(),
+                req.user._id.toString()
+            );
+        }
+
         sendResponse(res, response);
     } catch (_err) {
         next(_err)

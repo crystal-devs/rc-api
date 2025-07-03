@@ -35,9 +35,11 @@ export const createAlbumController = async (req: injectedRequest, res: Response,
             created_by: new mongoose.Types.ObjectId(req.user._id),
             created_at: new Date(),
             cover_image: cover_image || "",
-            is_private: !!is_private
+            is_private: !!is_private,
+            is_default: false
         });
 
+        console.log("Album created successfully:", response);
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
@@ -178,6 +180,26 @@ export const deleteAlbumController = async (req: injectedRequest, res: Response,
         // Perform the deletion
         const response = await albumService.deleteAlbumService(
             album_id,
+            req.user._id.toString()
+        );
+        
+        sendResponse(res, response);
+    } catch (_err) {
+        next(_err);
+    }
+};
+
+export const getOrCreateDefaultAlbumController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        
+        if (!event_id) throw new Error("Event ID is required");
+        if (!mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Invalid event ID format");
+        }
+        
+        const response = await albumService.getOrCreateDefaultAlbum(
+            event_id,
             req.user._id.toString()
         );
         

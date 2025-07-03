@@ -18,7 +18,8 @@ const imagekit = new ImageKit({
 export const uploadMediaService = async (
     file: Express.Multer.File,
     user_id: string,
-    album_id: string
+    album_id: string,
+    event_id: string
 ): Promise<ServiceResponse<MediaCreationType>> => {
     try {
         const fileBuffer = await fs.readFile(file.path);
@@ -45,7 +46,7 @@ export const uploadMediaService = async (
         const uploadResult = await imagekit.upload({
             file: fileBuffer,
             fileName: `${Date.now()}_${file.originalname}`,
-            folder: `/album_${album_id}`,
+            folder: `/media`,
         });
 
         await fs.unlink(file.path); // Always clean up
@@ -55,6 +56,7 @@ export const uploadMediaService = async (
             url: uploadResult.url,
             type: fileType,
             album_id: new mongoose.Types.ObjectId(album_id),
+            event_id: new mongoose.Types.ObjectId(event_id),
             uploaded_by: new mongoose.Types.ObjectId(user_id),
         });
 
@@ -133,6 +135,72 @@ export const uploadCoverImageService = async (
             status: false,
             code: 500,
             message: "Failed to upload cover image",
+            data: null,
+            error: {
+                message: err.message,
+                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+            },
+            other: null,
+        };
+    }
+};
+
+/**
+ * Get all media for a specific event
+ */
+export const getMediaByEventService = async (
+    event_id: string
+): Promise<ServiceResponse<any[]>> => {
+    try {
+        const media = await Media.find({ event_id: new mongoose.Types.ObjectId(event_id) })
+            .sort({ created_at: -1 });
+
+        return {
+            status: true,
+            code: 200,
+            message: "Media retrieved successfully",
+            data: media,
+            error: null,
+            other: null,
+        };
+    } catch (err: any) {
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to retrieve media",
+            data: null,
+            error: {
+                message: err.message,
+                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+            },
+            other: null,
+        };
+    }
+};
+
+/**
+ * Get all media for a specific album
+ */
+export const getMediaByAlbumService = async (
+    album_id: string
+): Promise<ServiceResponse<any[]>> => {
+    try {
+        const media = await Media.find({ album_id: new mongoose.Types.ObjectId(album_id) })
+            .sort({ created_at: -1 });
+
+        return {
+            status: true,
+            code: 200,
+            message: "Media retrieved successfully",
+            data: media,
+            error: null,
+            other: null,
+        };
+    } catch (err: any) {
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to retrieve media",
             data: null,
             error: {
                 message: err.message,

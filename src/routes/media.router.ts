@@ -2,7 +2,7 @@
 
 import express from "express";
 import multer from "multer";
-import { uploadMediaController, uploadCoverImageController } from "@controllers/media.controller";
+import { uploadMediaController, uploadCoverImageController, getMediaByEventController, getMediaByAlbumController } from "@controllers/media.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 
 const mediaRouter = express.Router();
@@ -23,5 +23,11 @@ mediaRouter.post("/upload", upload.single('image'), uploadMediaController);
 
 // Upload a cover image for an event or album
 mediaRouter.post("/upload-cover", upload.single('image'), uploadCoverImageController);
+
+// Get media by event ID
+mediaRouter.get("/event/:event_id", getMediaByEventController);
+
+// Get media by album ID
+mediaRouter.get("/album/:album_id", getMediaByAlbumController);
 
 export default mediaRouter;
