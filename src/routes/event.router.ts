@@ -1,5 +1,6 @@
 import express from "express";
 import * as eventController from "@controllers/event.controller";
+import { createEventShareTokenController } from "@controllers/share-token.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 
 const eventRouter = express.Router();
@@ -10,5 +11,6 @@ eventRouter.get("/", eventController.getUsereventsController);
 eventRouter.get("/:event_id", eventController.geteventController);
 eventRouter.post("/", eventController.createeventController);
 eventRouter.patch("/:event_id", eventController.updateeventController);
+eventRouter.post("/:eventId/share", createEventShareTokenController); // Add endpoint for frontend share functionality
 
 export default eventRouter;

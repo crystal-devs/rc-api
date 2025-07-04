@@ -5,6 +5,7 @@ import { gracefulShutdown } from "@configs/shutdown.config";
 import { globalErrorHandler } from "@middlewares/error-handler.middleware";
 import { logGojo } from "@utils/gojo-satoru";
 import { logger, morganMiddleware } from "@utils/logger";
+import { monitorShareTokens } from "@models/monitor-share-tokens";
 
 //route imports
 import authRouter from "@routes/auth-router";
@@ -13,6 +14,8 @@ import systemRouter from "@routes/system.route";
 // packages
 import eventRouter from "@routes/event.router";
 import mediaRouter from "@routes/media.router";
+import shareRouter from "@routes/share-token.router";
+import eventShareRouter from "@routes/event-share.router";
 import compression from "compression";
 import cookieParser from "cookie-parser";
 import cors from "cors";
@@ -47,9 +50,15 @@ app.use(`/api/${VERSION}/auth`, authRouter)
 app.use(`/api/${VERSION}/event`, eventRouter)
 app.use(`/api/${VERSION}/album`, albumRouter)
 app.use(`/api/${VERSION}/media`, mediaRouter)
+app.use(`/api/${VERSION}/share`, shareRouter)
+app.use(`/api/${VERSION}/event`, eventShareRouter) // Handle frontend event share endpoints
+app.use(`/api/${VERSION}/events`, eventShareRouter) // Also support "events" plural
 
 
-connectToMongoDB().then(startServer).catch((err) => {
+connectToMongoDB().then(async () => {
+  await monitorShareTokens(); // Start monitoring share token creation
+  startServer();
+}).catch((err) => {
   logger.error("mongodb connection failed: ", err)
   process.exit(1); // 💀 No point in running the server if DB is dead
 })
