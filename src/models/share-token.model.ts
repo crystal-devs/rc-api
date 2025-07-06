@@ -2,6 +2,14 @@ import mongoose, { InferSchemaType } from "mongoose";
 import { MODEL_NAMES } from "./names";
 import crypto from "crypto";
 
+// Define guest schema
+const guestSchema = new mongoose.Schema({
+    email: { type: String, required: true },
+    invited_at: { type: Date, default: Date.now },
+    accessed_at: { type: Date, default: null },
+    user_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, default: null }, // Will be populated when the user logs in
+}, { _id: false });
+
 // Define permissions schema
 const permissionsSchema = new mongoose.Schema({
     view: { type: Boolean, default: true },
@@ -30,6 +38,10 @@ const shareTokenSchema = new mongoose.Schema({
     revoked: { type: Boolean, default: false },
     revoked_at: { type: Date, default: null },
     revoked_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, default: null },
+    
+    // Guest access control fields
+    is_restricted_to_guests: { type: Boolean, default: false }, // If true, only invited guests can access
+    invited_guests: { type: [guestSchema], default: [] },       // List of invited guests
 });
 
 // Create indexes for better performance

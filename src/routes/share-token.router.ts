@@ -11,6 +11,11 @@ shareRouter.post('/events/:eventId/share', authMiddleware, shareTokenController.
 shareRouter.get('/event/:event_id', authMiddleware, shareTokenController.getEventShareTokensController);
 shareRouter.delete('/:token_id/revoke', authMiddleware, shareTokenController.revokeShareTokenController);
 
+// Guest management routes
+shareRouter.post('/:token_id/guests', authMiddleware, shareTokenController.addInvitedGuestsController);
+shareRouter.delete('/:token_id/guests', authMiddleware, shareTokenController.removeInvitedGuestsController);
+shareRouter.post('/:token_id/guests/check', shareTokenController.checkGuestAccessController);
+
 // Public routes (no authentication required)
 shareRouter.post('/validate', shareTokenController.validateShareTokenController);
 shareRouter.post('/shared/:token', shareTokenController.getSharedEventController);

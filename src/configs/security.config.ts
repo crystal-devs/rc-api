@@ -48,14 +48,20 @@ export const rateLimiter = rateLimit({
  * - Prevents unauthorized cross-origin access
  */
 export const corsOptions: CorsOptions = {
-    origin: function (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
-      if (!origin || (Array.isArray(keys.corsOrigins) && keys.corsOrigins.includes(origin))) {
-        callback(null, true);
-      } else {
-        callback(new Error("❌ Not allowed by CORS"));
-      }
-    },
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true, // ✅ Allow cookies & auth headers
-  };
+  origin: function (
+    origin: string | undefined,
+    callback: (err: Error | null, allow?: boolean) => void
+  ) {
+    if (!origin || (Array.isArray(keys.corsOrigins) && keys.corsOrigins.includes(origin))) {
+      // ✅ Allowed origin (including non-browser tools like curl/Postman)
+      callback(null, true);
+    } else {
+      // ❌ Not allowed
+      callback(new Error("❌ Not allowed by CORS"));
+    }
+  },
+
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true, // ✅ Allow cookies & auth headers
+};

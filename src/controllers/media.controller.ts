@@ -1,7 +1,7 @@
 // controllers/media.controller.ts
 
 import { getOrCreateDefaultAlbum } from "@services/album.service";
-import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService } from "@services/media.service";
+import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService, deleteMediaService } from "@services/media.service";
 import { sendResponse } from "@utils/express.util";
 import { NextFunction, RequestHandler, Response } from "express";
 import { injectedRequest } from "types/injected-types";
@@ -149,6 +149,33 @@ export const getMediaByAlbumController: RequestHandler = async (req: injectedReq
         sendResponse(res, response);
     } catch (_err) {
         console.error('Error in getMediaByAlbumController:', _err);
+        next(_err);
+    }
+};
+
+/**
+ * Delete a media item
+ */
+export const deleteMediaController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+        const { media_id } = req.params;
+        const user_id = req.user._id;
+
+        // Validate media_id
+        if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
+            res.status(400).json({
+                status: false,
+                message: "Invalid media ID",
+                error: { message: "A valid media ID is required" },
+            });
+            return;
+        }
+
+        // Delete the media
+        const response = await deleteMediaService(media_id, user_id.toString());
+        sendResponse(res, response);
+    } catch (_err) {
+        console.error('Error in deleteMediaController:', _err);
         next(_err);
     }
 };

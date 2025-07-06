@@ -8,6 +8,7 @@ const mediaSchema = new mongoose.Schema({
     album_id: { type: mongoose.Schema.Types.ObjectId, ref:   MODEL_NAMES.ALBUM , required: true },
     event_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.EVENT, required: true },
     uploaded_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: true },
+    size_mb: { type: Number, default: 0 }, // File size in MB
     created_at: { type: Date, default: Date.now },
 });
 

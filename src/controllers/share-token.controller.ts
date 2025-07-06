@@ -92,7 +92,10 @@ export const validateShareTokenController = async (req: Request, res: Response, 
             });
         }
         
-        const response = await shareTokenService.validateShareTokenService(token, password);
+        // Get user_id from authenticated user if available
+        const user_id = (req as any).user?._id?.toString();
+        
+        const response = await shareTokenService.validateShareTokenService(token, password, user_id);
         sendResponse(res, response);
     } catch (err) {
         next(err);
@@ -227,7 +230,7 @@ export const createEventShareTokenController = async (req: injectedRequest, res:
         
         // Get eventId from either params or body to support all frontend endpoints
         const eventId = req.params.eventId || req.body.eventId || req.body.event_id;
-        const { type, albumId, permissions, expiresAt, password } = req.body;
+        const { type, albumId, permissions, expiresAt, password, isRestrictedToGuests, invitedGuests } = req.body;
         
         console.log("Using eventId:", eventId);
         
@@ -256,7 +259,9 @@ export const createEventShareTokenController = async (req: injectedRequest, res:
             album_id: albumId,
             permissions: mappedPermissions,
             expires_at: expiresAt ? new Date(expiresAt) : undefined,
-            password
+            password,
+            is_restricted_to_guests: isRestrictedToGuests === true,
+            invited_guests: Array.isArray(invitedGuests) ? invitedGuests : undefined
         }, req.user._id.toString());
         
         console.log("Share token created:", response.status);
@@ -303,5 +308,120 @@ export const createEventShareTokenController = async (req: injectedRequest, res:
             message: "Failed to create share token",
             error: err instanceof Error ? err.message : "Unknown error"
         });
+    }
+};
+
+// Add invited guests to a share token
+export const addInvitedGuestsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { token_id } = trimObject(req.params);
+        const { guests } = trimObject(req.body);
+        
+        if (!token_id || !mongoose.Types.ObjectId.isValid(token_id)) {
+            return sendResponse(res, {
+                status: false,
+                code: 400,
+                message: "Invalid token ID",
+                data: null,
+                error: { message: "A valid token ID is required" },
+                other: null
+            });
+        }
+        
+        if (!Array.isArray(guests) || guests.length === 0) {
+            return sendResponse(res, {
+                status: false,
+                code: 400,
+                message: "Invalid guests list",
+                data: null,
+                error: { message: "A valid list of guest emails is required" },
+                other: null
+            });
+        }
+        
+        const response = await shareTokenService.addInvitedGuestsToShareTokenService(
+            token_id,
+            req.user._id.toString(),
+            guests
+        );
+        
+        sendResponse(res, response);
+    } catch (err) {
+        next(err);
+    }
+};
+
+// Remove invited guests from a share token
+export const removeInvitedGuestsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { token_id } = trimObject(req.params);
+        const { guests } = trimObject(req.body);
+        
+        if (!token_id || !mongoose.Types.ObjectId.isValid(token_id)) {
+            return sendResponse(res, {
+                status: false,
+                code: 400,
+                message: "Invalid token ID",
+                data: null,
+                error: { message: "A valid token ID is required" },
+                other: null
+            });
+        }
+        
+        if (!Array.isArray(guests) || guests.length === 0) {
+            return sendResponse(res, {
+                status: false,
+                code: 400,
+                message: "Invalid guests list",
+                data: null,
+                error: { message: "A valid list of guest emails is required" },
+                other: null
+            });
+        }
+        
+        const response = await shareTokenService.removeInvitedGuestsFromShareTokenService(
+            token_id,
+            req.user._id.toString(),
+            guests
+        );
+        
+        sendResponse(res, response);
+    } catch (err) {
+        next(err);
+    }
+};
+
+// Check if a guest has access to a share token
+export const checkGuestAccessController = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { token_id } = trimObject(req.params);
+        const { email } = trimObject(req.body);
+        
+        if (!token_id || !mongoose.Types.ObjectId.isValid(token_id)) {
+            return sendResponse(res, {
+                status: false,
+                code: 400,
+                message: "Invalid token ID",
+                data: null,
+                error: { message: "A valid token ID is required" },
+                other: null
+            });
+        }
+        
+        if (!email || typeof email !== 'string') {
+            return sendResponse(res, {
+                status: false,
+                code: 400,
+                message: "Invalid email",
+                data: null,
+                error: { message: "A valid email address is required" },
+                other: null
+            });
+        }
+        
+        const response = await shareTokenService.checkGuestAccessToShareTokenService(token_id, email);
+        sendResponse(res, response);
+    } catch (err) {
+        next(err);
     }
 };

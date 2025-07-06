@@ -6,6 +6,8 @@ import { globalErrorHandler } from "@middlewares/error-handler.middleware";
 import { logGojo } from "@utils/gojo-satoru";
 import { logger, morganMiddleware } from "@utils/logger";
 import { monitorShareTokens } from "@models/monitor-share-tokens";
+import { updateAllEventsSharingStatus } from "@services/share-token.service";
+import { createDefaultPlans } from "@models/subscription-plan.model";
 
 //route imports
 import authRouter from "@routes/auth-router";
@@ -16,6 +18,7 @@ import eventRouter from "@routes/event.router";
 import mediaRouter from "@routes/media.router";
 import shareRouter from "@routes/share-token.router";
 import eventShareRouter from "@routes/event-share.router";
+import userRouter from "@routes/user.router";
 import compression from "compression";
 import cookieParser from "cookie-parser";
 import cors from "cors";
@@ -51,12 +54,15 @@ app.use(`/api/${VERSION}/event`, eventRouter)
 app.use(`/api/${VERSION}/album`, albumRouter)
 app.use(`/api/${VERSION}/media`, mediaRouter)
 app.use(`/api/${VERSION}/share`, shareRouter)
-app.use(`/api/${VERSION}/event`, eventShareRouter) // Handle frontend event share endpoints
-app.use(`/api/${VERSION}/events`, eventShareRouter) // Also support "events" plural
-
+app.use(`/api/${VERSION}/user`, userRouter)
+// Handle shared event endpoints separately
+app.use(`/api/${VERSION}/event-share`, eventShareRouter) 
+app.use(`/api/${VERSION}/events-share`, eventShareRouter) // Also support "events" plural
 
 connectToMongoDB().then(async () => {
   await monitorShareTokens(); // Start monitoring share token creation
+  await createDefaultPlans(); // Create default subscription plans if they don't exist
+  await updateAllEventsSharingStatus(); // Update sharing status for all events
   startServer();
 }).catch((err) => {
   logger.error("mongodb connection failed: ", err)

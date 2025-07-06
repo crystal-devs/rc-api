@@ -5,6 +5,7 @@ import * as eventService from "@services/event.service";
 import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
 import { createDefaultAlbumForEvent } from "@services/album.service";
+import { getEventSharingStatusService } from "@services/share-token.service";
 
 export const createeventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
@@ -37,6 +38,7 @@ export const createeventController = async (req: injectedRequest, res: Response,
             end_date,
             created_by: new mongoose.Types.ObjectId(req.user._id),
             is_private,
+            is_shared: false,
             created_at: new Date(),
             cover_image: cover_image || "",
             location: location || "",
@@ -124,3 +126,50 @@ export const updateeventController = async (req: injectedRequest, res: Response,
         next(_err);
     }
 }
+
+export const deleteEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        
+        // Validate event_id
+        if (!event_id) {
+            throw new Error("Event ID is required");
+        }
+        
+        const user_id = req.user._id.toString();
+        
+        console.log(`[deleteEventController] Deleting event: ${event_id} by user: ${user_id}`);
+        
+        // Call the delete event service
+        const response = await eventService.deleteEventService(event_id, user_id);
+        
+        console.log(`[deleteEventController] Delete response: ${JSON.stringify(response)}`);
+        
+        sendResponse(res, response);
+    } catch (_err) {
+        next(_err);
+    }
+}
+
+// Get event sharing status
+export const getEventSharingStatusController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            return sendResponse(res, {
+                status: false,
+                code: 400,
+                message: "Invalid event ID",
+                data: null,
+                error: { message: "A valid event ID is required" },
+                other: null
+            });
+        }
+        
+        const response = await getEventSharingStatusService(event_id, req.user._id.toString());
+        sendResponse(res, response);
+    } catch (err) {
+        next(err);
+    }
+};

@@ -7,6 +7,9 @@ export const MODEL_NAMES = {
     ACCESS_CONTROL: "access-controls",
     ACTIVITY_LOG: "activity-logs",
     SHARE_TOKEN: "share-tokens",
+    USER_SUBSCRIPTION: "user-subscriptions",
+    USER_USAGE: "user-usages",
+    SUBSCRIPTION_PLAN: "subscription-plans",
 } as const;
 
 export const getModelName = (model: keyof typeof MODEL_NAMES) => MODEL_NAMES[model];

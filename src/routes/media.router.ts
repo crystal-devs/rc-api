@@ -2,7 +2,13 @@
 
 import express from "express";
 import multer from "multer";
-import { uploadMediaController, uploadCoverImageController, getMediaByEventController, getMediaByAlbumController } from "@controllers/media.controller";
+import { 
+    uploadMediaController, 
+    uploadCoverImageController, 
+    getMediaByEventController, 
+    getMediaByAlbumController,
+    deleteMediaController
+} from "@controllers/media.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 
 const mediaRouter = express.Router();
@@ -29,5 +35,8 @@ mediaRouter.get("/event/:event_id", getMediaByEventController);
 
 // Get media by album ID
 mediaRouter.get("/album/:album_id", getMediaByAlbumController);
+
+// Delete media by ID
+mediaRouter.delete("/:media_id", deleteMediaController);
 
 export default mediaRouter;
