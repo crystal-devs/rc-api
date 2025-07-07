@@ -9,7 +9,7 @@ import { getEventSharingStatusService } from "@services/share-token.service";
 
 export const createeventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
-        let { title, description, start_date, end_date, is_private = false, cover_image, location, template, accessType, access_code } = trimObject(req.body);
+        let { title, description, start_date, end_date, is_private = false, cover_image, location, template, accessType } = trimObject(req.body);
         // Validate required fields
         if (!title) throw new Error("Title is a required field");
 
@@ -43,7 +43,6 @@ export const createeventController = async (req: injectedRequest, res: Response,
             cover_image: cover_image || "",
             location: location || "",
             template: template || "custom",
-            access_code: access_code || "",
         });
 
         // If event created successfully, create a default album
@@ -85,9 +84,9 @@ export const geteventController = async (req: injectedRequest, res: Response, ne
 
 export const updateeventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
-        let { title, description, start_date, end_date } = trimObject(req.body);
+        let { title, description, start_date, end_date, is_private, share_settings } = trimObject(req.body);
         const { event_id } = trimObject(req.params);
-
+        console.log(req.body, 'req.body');
         // Validate event_id
         if (!event_id) throw new Error("event ID is required");
 
@@ -118,7 +117,9 @@ export const updateeventController = async (req: injectedRequest, res: Response,
         if (updateData.start_date && updateData.end_date && updateData.start_date > updateData.end_date) {
             throw new Error("Start date must be before end date");
         }
-
+        updateData.is_private = is_private !== undefined ? is_private : false;
+        if (share_settings) updateData.share_settings = share_settings;
+        console.log(updateData, 'updateData')
         // Perform the update
         const response = await eventService.updateeventService(event_id, updateData);
         sendResponse(res, response);
@@ -130,21 +131,21 @@ export const updateeventController = async (req: injectedRequest, res: Response,
 export const deleteEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const { event_id } = trimObject(req.params);
-        
+
         // Validate event_id
         if (!event_id) {
             throw new Error("Event ID is required");
         }
-        
+
         const user_id = req.user._id.toString();
-        
+
         console.log(`[deleteEventController] Deleting event: ${event_id} by user: ${user_id}`);
-        
+
         // Call the delete event service
         const response = await eventService.deleteEventService(event_id, user_id);
-        
+
         console.log(`[deleteEventController] Delete response: ${JSON.stringify(response)}`);
-        
+
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
@@ -155,7 +156,7 @@ export const deleteEventController = async (req: injectedRequest, res: Response,
 export const getEventSharingStatusController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const { event_id } = trimObject(req.params);
-        
+
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
             return sendResponse(res, {
                 status: false,
@@ -166,7 +167,7 @@ export const getEventSharingStatusController = async (req: injectedRequest, res:
                 other: null
             });
         }
-        
+
         const response = await getEventSharingStatusService(event_id, req.user._id.toString());
         sendResponse(res, response);
     } catch (err) {

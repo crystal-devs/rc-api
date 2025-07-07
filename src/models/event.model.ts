@@ -13,7 +13,6 @@ const eventSchema = new mongoose.Schema({
     cover_image: { type: String, default: "" },
     location: { type: String, default: "" },
     template: { type: String, enum: ['wedding', 'birthday', 'concert', 'corporate', 'vacation', 'custom'], default: 'custom' },
-    access_code: { type: String, default: "" },
     
     // Sharing-related fields
     is_shared: { type: Boolean, default: false }, // Indicates if the event has any active share tokens

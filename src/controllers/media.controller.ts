@@ -17,10 +17,11 @@ export const uploadMediaController: RequestHandler = async (req: injectedRequest
         const user_id = req.user._id;
 
         console.log('Media upload request:', {
-            file: file ? 'File present' : 'No file',
-            album_id: album_id ? 'Album ID present'  : 'No album ID',
-            event_id: event_id ? 'Event ID present' : 'No event ID',
-            user_id: user_id ? 'User ID present' : 'No user ID',
+            file: file ? `File present: ${file.originalname}` : 'No file',
+            album_id: album_id ? `Album ID: ${album_id}` : 'No album ID',
+            event_id: event_id ? `Event ID: ${event_id}` : 'No event ID',
+            user_id: user_id ? `User ID: ${user_id}` : 'No user ID',
+            body: JSON.stringify(req.body)
         });
         if (!file) {
             res.status(400).json({
