@@ -33,14 +33,6 @@ mediaRouter.use(authMiddleware);
 mediaRouter.post(
     "/upload", 
     upload.single('image'), 
-    // (req, res, next) => {
-    //     // Debug middleware to log request body before processing
-    //     console.log('===== UPLOAD REQUEST =====');
-    //     console.log('Request body before middleware:', req.body);
-    //     console.log('Event ID in body:', req.body.event_id);
-    //     console.log('File info:', req.file ? `${req.file.originalname} (${req.file.size} bytes)` : 'No file');
-    //     next();
-    // },
     checkFileSizeLimitMiddleware as RequestHandler,
     checkStorageLimitMiddleware as RequestHandler,
     checkEventPhotoLimitMiddleware as RequestHandler,

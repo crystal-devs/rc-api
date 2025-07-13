@@ -1,6 +1,5 @@
-// ================================================================
 // controllers/event.controller.ts
-// ================================================================
+
 
 import { trimObject } from "@utils/sanitizers.util";
 import { NextFunction, Response } from "express";
@@ -9,26 +8,25 @@ import * as eventService from "@services/event.service";
 import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
 import { createDefaultAlbumForEvent } from "@services/album.service";
+import { Event } from "@models/event.model";
 
 // ============= CORE EVENT OPERATIONS =============
 
-export const createEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+export const createEventController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
-        const { 
-            title, 
-            description, 
-            start_date, 
-            end_date, 
-            timezone = "UTC",
+        const {
+            title,
+            description,
+            start_date,
+            end_date,
+            timezone = "Asia/Kolkata",
             location,
             cover_image,
             template = "custom",
-            tags = [],
             privacy,
-            default_guest_permissions,
-            co_hosts = []
+            default_guest_permissions
         } = trimObject(req.body);
-        
+
         // Enhanced validation
         if (!title?.trim()) throw new Error("Event title is required");
         if (title.length > 100) throw new Error("Event title must be less than 100 characters");
@@ -37,126 +35,191 @@ export const createEventController = async (req: injectedRequest, res: Response,
         // Advanced date validation
         const startDate = start_date ? new Date(start_date) : new Date();
         const endDate = end_date ? new Date(end_date) : null;
-        
+
         if (startDate && isNaN(startDate.getTime())) throw new Error("Invalid start date");
         if (endDate && isNaN(endDate.getTime())) throw new Error("Invalid end date");
         if (startDate && endDate && startDate >= endDate) throw new Error("End date must be after start date");
 
-        // Generate unique slug with better collision handling
-        const baseSlug = title
-            .toLowerCase()
-            .replace(/[^\w\s-]/g, '')
-            .replace(/\s+/g, '-')
-            .substring(0, 50);
-        
-        const slug = await eventService.generateUniqueSlug(baseSlug);
-        
+        // Generate unique event_code for easier sharing
+        const eventCode = await generateUniqueEventCode(template);
+
         // Enhanced location processing
         const locationObj = eventService.processLocationData(location);
-        
+
         // Enhanced cover image processing
         const coverImageObj = eventService.processCoverImageData(cover_image, req.user._id.toString());
-
-        // Validate co-hosts
-        const validCoHosts = await eventService.validateCoHosts(co_hosts);
 
         const eventData: eventService.EventCreationData = {
             title: title.trim(),
             description: description?.trim() || "",
-            slug,
+            event_code: eventCode,
             created_by: new mongoose.Types.ObjectId(req.user._id),
-            co_hosts: validCoHosts,
+
+            // Initialize empty co-hosts array
+            co_hosts: [] as any,
+            co_host_invite: null,
+
             start_date: startDate,
             end_date: endDate,
             timezone,
-            location: locationObj || null,
-            cover_image: coverImageObj,
+
+            location: locationObj ? {
+                name: locationObj.name ?? "",
+                address: locationObj.address ?? "",
+                coordinates: locationObj.coordinates ?? []
+            } : {
+                name: "",
+                address: "",
+                coordinates: []
+            },
+
+            cover_image: coverImageObj ? {
+                url: coverImageObj.url ?? "",
+                public_id: coverImageObj.public_id ?? "",
+                uploaded_by: coverImageObj.uploaded_by ?? req.user._id,
+                thumbnail_url: (coverImageObj as any).thumbnail_url ?? "",
+                compressed_url: (coverImageObj as any).compressed_url ?? ""
+            } : {
+                url: "",
+                public_id: "",
+                uploaded_by: null,
+                thumbnail_url: "",
+                compressed_url: ""
+            },
+
             template,
-            tags: Array.isArray(tags) ? tags.filter(tag => tag && tag.trim()) : [],
-            
-            // Enhanced privacy settings
+
+            // Simplified privacy settings
             privacy: {
                 visibility: privacy?.visibility || 'private',
-                discoverable: privacy?.discoverable || false,
                 guest_management: {
-                    anyone_can_invite: privacy?.guest_management?.anyone_can_invite || false,
-                    require_approval: privacy?.guest_management?.require_approval || true,
-                    auto_approve_domains: privacy?.guest_management?.auto_approve_domains || [],
-                    max_guests: privacy?.guest_management?.max_guests || 500,
-                    allow_anonymous: privacy?.guest_management?.allow_anonymous || false
+                    require_approval: privacy?.guest_management?.require_approval ?? true,
+                    max_guests: privacy?.guest_management?.max_guests ?? 500,
+                    allow_anonymous: privacy?.guest_management?.allow_anonymous ?? (privacy?.visibility === 'unlisted'),
+                    auto_approve_invited: privacy?.guest_management?.auto_approve_invited ?? true,
+                    anonymous_transition_policy: privacy?.guest_management?.anonymous_transition_policy || 'grace_period',
+                    grace_period_hours: privacy?.guest_management?.grace_period_hours ?? 24,
+                    anonymous_content_policy: privacy?.guest_management?.anonymous_content_policy || 'preserve_and_transfer'
                 },
                 content_controls: {
-                    allow_downloads: privacy?.content_controls?.allow_downloads || true,
-                    allow_sharing: privacy?.content_controls?.allow_sharing || false,
-                    require_watermark: privacy?.content_controls?.require_watermark || false,
-                    content_moderation: privacy?.content_controls?.content_moderation || 'auto'
+                    allow_downloads: privacy?.content_controls?.allow_downloads ?? true,
+                    allow_sharing: privacy?.content_controls?.allow_sharing ?? false,
+                    require_watermark: privacy?.content_controls?.require_watermark ?? false,
+                    approval_mode: privacy?.content_controls?.approval_mode || 'auto',
+                    auto_compress_uploads: privacy?.content_controls?.auto_compress_uploads ?? true,
+                    max_file_size_mb: privacy?.content_controls?.max_file_size_mb ?? 50,
+                    allowed_media_types: {
+                        images: privacy?.content_controls?.allowed_media_types?.images ?? true,
+                        videos: privacy?.content_controls?.allowed_media_types?.videos ?? true
+                    }
                 }
             },
-            
-            // Enhanced default permissions
+
             default_guest_permissions: {
                 view: default_guest_permissions?.view ?? true,
                 upload: default_guest_permissions?.upload ?? false,
                 download: default_guest_permissions?.download ?? false,
-                comment: default_guest_permissions?.comment ?? true,
                 share: default_guest_permissions?.share ?? false,
                 create_albums: default_guest_permissions?.create_albums ?? false
             },
-            
-            // Initialize stats
+
+            anonymous_sessions: [] as any,
+
             stats: {
-                participants: { 
-                    total: 1, // Creator is first participant
-                    active: 0, 
-                    pending_invites: 0, 
-                    co_hosts: validCoHosts.length 
+                participants: {
+                    total: 1,
+                    co_hosts: 0,
+                    anonymous_sessions: 0,
+                    registered_users: 1
                 },
-                content: { 
-                    photos: 0, 
-                    videos: 0, 
-                    total_size_mb: 0, 
-                    comments: 0 
+                content: {
+                    photos: 0,
+                    videos: 0,
+                    total_size_mb: 0,
+                    comments: 0,
+                    pending_approval: 0
                 },
-                engagement: { 
-                    total_views: 0, 
-                    unique_viewers: 0, 
+                engagement: {
+                    total_views: 0,
+                    unique_viewers: 0,
                     average_session_duration: 0,
                     last_activity: new Date()
                 },
-                sharing: { 
-                    active_tokens: 0, 
-                    total_shares: 0, 
-                    external_shares: 0 
+                sharing: {
+                    total_shares: 0,
+                    qr_scans: 0
                 }
             },
 
-            // Add missing required fields for EventCreationType
-            // albums: [],
-            is_private: privacy?.visibility === 'private',
-            is_shared: false,
-            
-            // Metadata
             created_at: new Date(),
             updated_at: new Date(),
             archived_at: null,
             featured: false
         };
-        
+
         const response = await eventService.createEventService(eventData);
+
+        // Check if response has proper structure
+        if (!response || typeof response.status === 'undefined') {
+            console.error('Invalid response from createEventService:', response);
+            res.status(500).json({
+                status: false,
+                message: 'Internal server error - invalid service response',
+                data: null
+            });
+            return;
+        }
 
         // Create default album and add creator as participant
         if (response.status && response.data?._id) {
-            await Promise.all([
-                createDefaultAlbumForEvent(response.data._id.toString(), req.user._id.toString()),
-                eventService.addCreatorAsParticipant(response.data._id.toString(), req.user._id.toString())
-            ]);
+            try {
+                await Promise.all([
+                    createDefaultAlbumForEvent(response.data._id.toString(), req.user._id.toString()),
+                    eventService.addCreatorAsParticipant(response.data._id.toString(), req.user._id.toString())
+                ]);
+            } catch (albumError) {
+                console.error('Error creating default album:', albumError);
+                // Continue even if album creation fails
+            }
         }
 
-        sendResponse(res, response);
+        // Send proper response
+        if (response.status) {
+            res.status(201).json(response);
+        } else {
+            res.status(400).json(response);
+        }
     } catch (error) {
-        next(error);
+        console.error('Error in createEventController:', error);
+        res.status(500).json({
+            status: false,
+            message: error.message || 'Internal server error',
+            data: null
+        });
     }
 };
+
+
+// // Helper function to generate unique event code
+const generateUniqueEventCode = async (template: string): Promise<string> => {
+    let attempts = 0;
+    const maxAttempts = 5;
+
+    while (attempts < maxAttempts) {
+        const code = `${template.toUpperCase()}-${Date.now().toString(36)}-${Math.random().toString(36).substr(2, 5)}`;
+
+        // Check if code already exists
+        const existingEvent = await Event.findOne({ event_code: code });
+        if (!existingEvent) {
+            return code;
+        }
+        attempts++;
+    }
+
+    // Fallback with timestamp if all attempts fail
+    return `${template.toUpperCase()}-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
+};
+
 
 export const getUserEventsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
@@ -196,7 +259,7 @@ export const getEventController = async (req: injectedRequest, res: Response, ne
     try {
         const { event_id } = trimObject(req.params);
         const userId = req.user._id.toString();
-        
+
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
             throw new Error("Valid event ID is required");
         }
@@ -208,31 +271,109 @@ export const getEventController = async (req: injectedRequest, res: Response, ne
     }
 };
 
-export const updateEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+export const updateEventController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
         const { event_id } = trimObject(req.params);
         const userId = req.user._id.toString();
         const updateData = trimObject(req.body);
 
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
-            throw new Error("Valid event ID is required");
+            res.status(400).json({
+                status: false,
+                message: 'Valid event ID is required',
+                data: null
+            });
+            return;
         }
 
         // Validate update permissions
         const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
         if (!hasPermission) {
-            throw new Error("You don't have permission to update this event");
+            res.status(403).json({
+                status: false,
+                message: "You don't have permission to update this event",
+                data: null
+            });
+            return;
         }
 
+        // Get current event for visibility transition handling
+        const currentEvent = await Event.findById(event_id);
+        if (!currentEvent) {
+            res.status(404).json({
+                status: false,
+                message: 'Event not found',
+                data: null
+            });
+            return;
+        }
+
+        // Define fields that can be updated
+        const fieldsToProcess = [
+            'title',
+            'description',
+            'start_date',
+            'end_date',
+            'location',
+            'privacy',
+            'default_guest_permissions'
+        ];
+
         // Process and validate update data
-        const processedUpdateData = await eventService.processEventUpdateData(updateData);
+        const processedUpdateData = await eventService.processEventUpdateData(updateData, fieldsToProcess);
+
+        // Handle visibility transitions if privacy is being updated
+        let transitionResult = null;
+        if (processedUpdateData.privacy?.visibility &&
+            processedUpdateData.privacy.visibility !== currentEvent.privacy.visibility) {
+
+            try {
+                transitionResult = await eventService.handleVisibilityTransition(
+                    event_id,
+                    currentEvent.privacy.visibility,
+                    processedUpdateData.privacy.visibility,
+                    userId
+                );
+            } catch (transitionError) {
+                console.error('Error handling visibility transition:', transitionError);
+                // Continue with update even if transition handling fails
+            }
+        }
 
         const response = await eventService.updateEventService(event_id, processedUpdateData, userId);
-        sendResponse(res, response);
+
+        // Check if response has proper structure
+        if (!response || typeof response.status === 'undefined') {
+            console.error('Invalid response from updateEventService:', response);
+            res.status(500).json({
+                status: false,
+                message: 'Internal server error - invalid service response',
+                data: null
+            });
+            return;
+        }
+
+        // Include transition result in response if applicable
+        if (transitionResult) {
+            response.visibility_transition = transitionResult;
+        }
+
+        // Send proper response
+        if (response.status) {
+            res.status(200).json(response);
+        } else {
+            res.status(400).json(response);
+        }
     } catch (error) {
-        next(error);
+        console.error('Error in updateEventController:', error);
+        res.status(500).json({
+            status: false,
+            message: error.message || 'Internal server error',
+            data: null
+        });
     }
 };
+
 
 export const deleteEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
@@ -281,7 +422,7 @@ export const getEventsByTagController = async (req: injectedRequest, res: Respon
         //     page: parseInt(page as string),
         //     limit: parseInt(limit as string)
         // });
-        
+
         // sendResponse(res, response);
     } catch (error) {
         next(error);
@@ -291,12 +432,12 @@ export const getEventsByTagController = async (req: injectedRequest, res: Respon
 export const getFeaturedEventsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const { page = 1, limit = 10 } = trimObject(req.query);
-        
+
         // const response = await eventService.getFeaturedEventsService({
         //     page: parseInt(page as string),
         //     limit: parseInt(limit as string)
         // });
-        
+
         // sendResponse(res, response);
     } catch (error) {
         next(error);
@@ -309,7 +450,7 @@ export const getEventAnalyticsController = async (req: injectedRequest, res: Res
     try {
         const { event_id } = trimObject(req.params);
         const userId = req.user._id.toString();
-        const { 
+        const {
             period = '7d', // '24h', '7d', '30d', '90d', 'all'
             metrics = 'all' // 'engagement', 'content', 'participants', 'all'
         } = trimObject(req.query);
@@ -324,7 +465,7 @@ export const getEventAnalyticsController = async (req: injectedRequest, res: Res
         //     period: period as string,
         //     metrics: metrics as string
         // });
-        
+
         // sendResponse(res, response);
     } catch (error) {
         next(error);
@@ -335,8 +476,8 @@ export const getEventActivityController = async (req: injectedRequest, res: Resp
     try {
         const { event_id } = trimObject(req.params);
         const userId = req.user._id.toString();
-        const { 
-            page = 1, 
+        const {
+            page = 1,
             limit = 20,
             type = 'all' // 'upload', 'view', 'comment', 'join', 'all'
         } = trimObject(req.query);
@@ -352,7 +493,7 @@ export const getEventActivityController = async (req: injectedRequest, res: Resp
         //     limit: parseInt(limit as string),
         //     type: type as string
         // });
-        
+
         // sendResponse(res, response);
     } catch (error) {
         next(error);
@@ -395,7 +536,7 @@ export const createEventAlbumController = async (req: injectedRequest, res: Resp
         //     description: description?.trim() || "",
         //     isPrivate: is_private
         // });
-        
+
         // sendResponse(res, response);
     } catch (error) {
         next(error);

@@ -1,7 +1,7 @@
 // services/event.service.ts
 import { AccessControl } from "@models/access.model";
 import { ActivityLog } from "@models/activity-log.model";
-import { Event, EventCreationType, EventType } from "@models/event.model";
+import { Event } from "@models/event.model";
 import { EventParticipant } from "@models/event-participant.model";
 import { EventSession } from "@models/event-session.model";
 import { User } from "@models/user.model";
@@ -11,8 +11,9 @@ import { logger } from "@utils/logger";
 import mongoose from "mongoose";
 import { ServiceResponse } from "types/service.types";
 
-// Export type alias for use in controllers
-export type EventCreationData = EventCreationType;
+// Type aliases for event creation and event type
+export type EventCreationData = typeof Event.schema extends mongoose.Schema<infer T> ? Omit<T, '_id'> : never;
+export type EventType = typeof Event.schema extends mongoose.Schema<infer T> ? T : never;
 
 // ============= CORE EVENT OPERATIONS =============
 
@@ -44,7 +45,10 @@ export const createEventService = async (eventData: EventCreationData): Promise<
 
         // Add co-hosts to access control
         if (eventData.co_hosts && eventData.co_hosts.length > 0) {
-            const coHostPermissions = eventData.co_hosts.map(coHostId => ({
+            const coHostIds: mongoose.Types.ObjectId[] = eventData.co_hosts.map((id: any) =>
+                mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
+            );
+            const coHostPermissions = coHostIds.map((coHostId: mongoose.Types.ObjectId) => ({
                 resource_id: eventId,
                 resource_type: "event",
                 permissions: [{
@@ -533,94 +537,6 @@ export const getEventDetailService = async (eventId: string, userId: string): Pr
     }
 };
 
-export const updateEventService = async (
-    eventId: string,
-    updateData: Record<string, any>,
-    userId: string
-): Promise<ServiceResponse<EventType>> => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    console.log(updateData, 'updateDataupdateData')
-    try {
-        // Verify update permissions
-        const hasPermission = await checkUpdatePermission(eventId, userId);
-        if (!hasPermission) {
-            await session.abortTransaction();
-            return {
-                status: false,
-                code: 403,
-                message: "You don't have permission to update this event",
-                data: null,
-                error: null,
-                other: null
-            };
-        }
-
-        // Add updated timestamp
-        updateData.updated_at = new Date();
-
-        // Update the event
-        const updatedEvent = await Event.findOneAndUpdate(
-            { _id: new mongoose.Types.ObjectId(eventId) },
-            { $set: updateData },
-            { new: true, session }
-        );
-
-        if (!updatedEvent) {
-            await session.abortTransaction();
-            return {
-                status: false,
-                code: 404,
-                message: "Event not found",
-                data: null,
-                error: null,
-                other: null
-            };
-        }
-
-        // Log the update activity
-        await ActivityLog.create([{
-            user_id: new mongoose.Types.ObjectId(userId),
-            resource_id: new mongoose.Types.ObjectId(eventId),
-            resource_type: "event",
-            action: "edited",
-            details: {
-                updated_fields: Object.keys(updateData),
-                event_title: updatedEvent.title
-            }
-        }], { session });
-
-        await session.commitTransaction();
-
-        return {
-            status: true,
-            code: 200,
-            message: "Event updated successfully",
-            data: updatedEvent,
-            error: null,
-            other: null
-        };
-    } catch (error) {
-        logger.error(`[updateEventService] Error: ${error.message}`);
-        await session.abortTransaction();
-
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to update event",
-            data: null,
-            error: {
-                message: error.message,
-                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-            },
-            other: null
-        };
-    } finally {
-        await session.endSession();
-    }
-};
-
 export const deleteEventService = async (
     eventId: string,
     userId: string
@@ -872,58 +788,323 @@ export const checkUpdatePermission = async (eventId: string, userId: string): Pr
     return !!access;
 };
 
-export const processEventUpdateData = async (updateData: any): Promise<Record<string, any>> => {
+export const processEventUpdateData = async (
+    updateData: any,
+    processFields: string[] = [
+        'title',
+        'description',
+        'start_date',
+        'end_date',
+        'location',
+        'privacy',
+        'default_guest_permissions'
+    ]
+): Promise<Record<string, any>> => {
     const processed: Record<string, any> = {};
 
-    // Handle title
-    if (updateData.title) {
+    // Process specified fields
+    if (processFields.includes('title') && updateData.title) {
         if (typeof updateData.title !== 'string' || !updateData.title.trim()) {
-            throw new Error("Invalid title");
+            throw new Error('Invalid title');
+        }
+        if (updateData.title.length > 100) {
+            throw new Error('Title must be less than 100 characters');
         }
         processed.title = updateData.title.trim();
     }
 
-    // Handle description
-    if (updateData.description !== undefined) {
-        processed.description = updateData.description?.trim() || "";
+    if (processFields.includes('description') && updateData.description !== undefined) {
+        if (updateData.description && updateData.description.length > 1000) {
+            throw new Error('Description must be less than 1000 characters');
+        }
+        processed.description = updateData.description?.trim() || '';
     }
 
-    // Handle dates
-    if (updateData.start_date) {
+    if (processFields.includes('start_date') && updateData.start_date) {
         const startDate = new Date(updateData.start_date);
-        if (isNaN(startDate.getTime())) throw new Error("Invalid start date");
+        if (isNaN(startDate.getTime())) throw new Error('Invalid start date');
         processed.start_date = startDate;
     }
 
-    if (updateData.end_date) {
+    if (processFields.includes('end_date') && updateData.end_date) {
         const endDate = new Date(updateData.end_date);
-        if (isNaN(endDate.getTime())) throw new Error("Invalid end date");
+        if (isNaN(endDate.getTime())) throw new Error('Invalid end date');
         processed.end_date = endDate;
     }
 
     // Validate date logic
     if (processed.start_date && processed.end_date && processed.start_date >= processed.end_date) {
-        throw new Error("End date must be after start date");
+        throw new Error('End date must be after start date');
     }
 
-    // Handle other fields
-    if (updateData.location) {
+    if (processFields.includes('location') && updateData.location) {
         processed.location = processLocationData(updateData.location);
     }
 
-    if (updateData.privacy) {
-        processed.privacy = updateData.privacy;
+    if (processFields.includes('privacy') && updateData.privacy) {
+        processed.privacy = await processPrivacyUpdateData(updateData.privacy);
     }
 
-    if (updateData.default_guest_permissions) {
-        processed.default_guest_permissions = updateData.default_guest_permissions;
+    if (processFields.includes('default_guest_permissions') && updateData.default_guest_permissions) {
+        processed.default_guest_permissions = processGuestPermissions(updateData.default_guest_permissions);
     }
 
-    if (updateData.tags) {
-        processed.tags = Array.isArray(updateData.tags) ? updateData.tags : [];
+    // Always update the updated_at timestamp
+    processed.updated_at = new Date();
+
+    return processed;
+};
+
+const processPrivacyUpdateData = async (privacyData: any): Promise<any> => {
+    const processed: any = {};
+
+    // Validate visibility
+    if (privacyData.visibility) {
+        const validVisibilities = ['unlisted', 'restricted', 'private'];
+        if (!validVisibilities.includes(privacyData.visibility)) {
+            throw new Error('Invalid visibility setting');
+        }
+        processed.visibility = privacyData.visibility;
+    }
+
+    // Process guest management settings
+    if (privacyData.guest_management) {
+        processed.guest_management = {};
+        const gm = privacyData.guest_management;
+
+        if (gm.require_approval !== undefined) {
+            processed.guest_management.require_approval = Boolean(gm.require_approval);
+        }
+        if (gm.max_guests !== undefined) {
+            const maxGuests = parseInt(gm.max_guests);
+            if (maxGuests < 1 || maxGuests > 10000) {
+                throw new Error('Max guests must be between 1 and 10000');
+            }
+            processed.guest_management.max_guests = maxGuests;
+        }
+        if (gm.allow_anonymous !== undefined) {
+            processed.guest_management.allow_anonymous = Boolean(gm.allow_anonymous);
+        }
+        if (gm.auto_approve_invited !== undefined) {
+            processed.guest_management.auto_approve_invited = Boolean(gm.auto_approve_invited);
+        }
+        if (gm.anonymous_transition_policy) {
+            const validPolicies = ['block_all', 'grace_period', 'force_login'];
+            if (!validPolicies.includes(gm.anonymous_transition_policy)) {
+                throw new Error('Invalid anonymous transition policy');
+            }
+            processed.guest_management.anonymous_transition_policy = gm.anonymous_transition_policy;
+        }
+        if (gm.grace_period_hours !== undefined) {
+            const hours = parseInt(gm.grace_period_hours);
+            if (hours < 1 || hours > 168) { // 1 hour to 1 week
+                throw new Error('Grace period must be between 1 and 168 hours');
+            }
+            processed.guest_management.grace_period_hours = hours;
+        }
+        if (gm.anonymous_content_policy) {
+            const validPolicies = ['preserve_and_transfer', 'preserve_as_anonymous', 'delete_on_expire'];
+            if (!validPolicies.includes(gm.anonymous_content_policy)) {
+                throw new Error('Invalid anonymous content policy');
+            }
+            processed.guest_management.anonymous_content_policy = gm.anonymous_content_policy;
+        }
+    }
+
+    // Process content controls
+    if (privacyData.content_controls) {
+        processed.content_controls = {};
+        const cc = privacyData.content_controls;
+
+        if (cc.allow_downloads !== undefined) {
+            processed.content_controls.allow_downloads = Boolean(cc.allow_downloads);
+        }
+        if (cc.allow_sharing !== undefined) {
+            processed.content_controls.allow_sharing = Boolean(cc.allow_sharing);
+        }
+        if (cc.require_watermark !== undefined) {
+            processed.content_controls.require_watermark = Boolean(cc.require_watermark);
+        }
+        if (cc.approval_mode) {
+            const validModes = ['auto', 'manual', 'ai_assisted'];
+            if (!validModes.includes(cc.approval_mode)) {
+                throw new Error('Invalid approval mode');
+            }
+            processed.content_controls.approval_mode = cc.approval_mode;
+        }
+        if (cc.max_file_size_mb !== undefined) {
+            const size = parseInt(cc.max_file_size_mb);
+            if (size < 1 || size > 500) {
+                throw new Error('File size limit must be between 1 and 500 MB');
+            }
+            processed.content_controls.max_file_size_mb = size;
+        }
+        if (cc.auto_compress_uploads !== undefined) {
+            processed.content_controls.auto_compress_uploads = Boolean(cc.auto_compress_uploads);
+        }
+        if (cc.allowed_media_types) {
+            processed.content_controls.allowed_media_types = {
+                images: Boolean(cc.allowed_media_types.images ?? true),
+                videos: Boolean(cc.allowed_media_types.videos ?? true)
+            };
+        }
     }
 
     return processed;
+};
+
+const processGuestPermissions = (permissions: any): any => {
+    return {
+        view: Boolean(permissions.view ?? true),
+        upload: Boolean(permissions.upload ?? false),
+        download: Boolean(permissions.download ?? false),
+        comment: Boolean(permissions.comment ?? true),
+        share: Boolean(permissions.share ?? false),
+        create_albums: Boolean(permissions.create_albums ?? false)
+    };
+};
+
+// Handle visibility transitions
+export const handleVisibilityTransition = async (
+    eventId: string,
+    oldVisibility: string,
+    newVisibility: string,
+    userId: string
+): Promise<any> => {
+    const event = await Event.findById(eventId);
+    if (!event) {
+        throw new Error('Event not found');
+    }
+
+    const result = {
+        from: oldVisibility,
+        to: newVisibility,
+        anonymous_users_affected: 0,
+        actions_taken: [] as any
+    };
+
+    // Handle transitions involving anonymous users
+    if (oldVisibility === 'unlisted' && (newVisibility === 'private' || newVisibility === 'restricted')) {
+        const anonymousCount = event.anonymous_sessions.length;
+        result.anonymous_users_affected = anonymousCount;
+
+        if (anonymousCount > 0) {
+            const policy = event.privacy.guest_management.anonymous_transition_policy;
+            const graceHours = event.privacy.guest_management.grace_period_hours;
+
+            switch (policy) {
+                case 'block_all':
+                    // Expire all sessions immediately
+                    await Event.updateOne(
+                        { _id: eventId },
+                        {
+                            $set: {
+                                'anonymous_sessions.$[].grace_period_expires': new Date()
+                            }
+                        }
+                    );
+                    result.actions_taken.push('All anonymous users blocked immediately');
+                    break;
+
+                case 'grace_period':
+                    // Set grace period for all sessions
+                    const graceExpiry = new Date(Date.now() + (graceHours * 60 * 60 * 1000));
+                    await Event.updateOne(
+                        { _id: eventId },
+                        {
+                            $set: {
+                                'anonymous_sessions.$[elem].grace_period_expires': graceExpiry
+                            }
+                        },
+                        {
+                            arrayFilters: [{ 'elem.grace_period_expires': { $exists: false } }]
+                        }
+                    );
+                    result.actions_taken.push(`${graceHours}h grace period set for ${anonymousCount} anonymous users`);
+                    break;
+
+                case 'force_login':
+                    // Set 1 hour grace period and mark for notification
+                    const loginExpiry = new Date(Date.now() + (1 * 60 * 60 * 1000));
+                    await Event.updateOne(
+                        { _id: eventId },
+                        {
+                            $set: {
+                                'anonymous_sessions.$[].grace_period_expires': loginExpiry,
+                                'anonymous_sessions.$[].transition_notified': true
+                            }
+                        }
+                    );
+                    result.actions_taken.push(`Force login notification sent to ${anonymousCount} anonymous users`);
+                    break;
+            }
+
+            // Update stats
+            await Event.updateOne(
+                { _id: eventId },
+                {
+                    $set: {
+                        'privacy.previous_visibility': oldVisibility,
+                        'privacy.visibility_changed_at': new Date()
+                    }
+                }
+            );
+        }
+    }
+
+    // Handle other transition scenarios
+    if (newVisibility === 'unlisted' && oldVisibility !== 'unlisted') {
+        result.actions_taken.push('Event is now accessible via link without login');
+    }
+
+    if (newVisibility === 'restricted' && oldVisibility !== 'restricted') {
+        result.actions_taken.push('Event now requires approval for new guests');
+    }
+
+    if (newVisibility === 'private' && oldVisibility !== 'private') {
+        result.actions_taken.push('Event is now invitation-only');
+    }
+
+    return result;
+};
+
+// Update the main service method
+export const updateEventService = async (
+    eventId: string,
+    updateData: any,
+    userId: string
+): Promise<any> => {
+    try {
+        const updatedEvent = await Event.findByIdAndUpdate(
+            eventId,
+            { $set: updateData },
+            {
+                new: true,
+                runValidators: true
+            }
+        ).populate('created_by', 'name email avatar')
+            .populate('co_hosts.user_id', 'name email avatar');
+
+        if (!updatedEvent) {
+            return {
+                status: false,
+                message: 'Event not found',
+                data: null
+            };
+        }
+
+        return {
+            status: true,
+            message: 'Event updated successfully',
+            data: updatedEvent
+        };
+    } catch (error) {
+        return {
+            status: false,
+            message: error.message || 'Failed to update event',
+            data: null
+        };
+    }
 };
 
 export const getUserEventStats = async (userId: string) => {
@@ -1008,3 +1189,4 @@ export const recordEventActivity = async (eventId: string, userId: string, actio
         logger.error(`[recordEventActivity] Error: ${error.message}`);
     }
 };
+
