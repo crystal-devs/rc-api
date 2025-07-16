@@ -105,26 +105,56 @@ export const uploadCoverImageController: RequestHandler = async (req: injectedRe
 /**
  * Get all media for a specific event
  */
-export const getMediaByEventController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+export const getMediaByEventController: RequestHandler = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
     try {
         const { event_id } = req.params;
+        const userId = req.user?._id?.toString();
+        const {
+            include_processing,
+            include_pending,
+            page,
+            limit,
+            quality,
+            since,
+        } = req.query;
 
         // Validate event_id
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
             res.status(400).json({
                 status: false,
-                message: "Invalid event ID",
-                error: { message: "A valid event ID is required" },
+                message: 'Invalid event ID',
+                error: { message: 'A valid event ID is required' },
             });
             return;
         }
 
-        // Fetch media for the event
-        const response = await getMediaByEventService(event_id);
+        // Parse query parameters
+        const options: {
+            includeProcessing?: boolean;
+            includePending?: boolean;
+            page?: number;
+            limit?: number;
+            quality?: 'thumbnail' | 'display' | 'full';
+            since?: string;
+        } = {
+            includeProcessing: include_processing === 'true',
+            includePending: include_pending === 'true',
+            page: page ? parseInt(page as string, 10) : undefined,
+            limit: limit ? parseInt(limit as string, 10) : undefined,
+            quality: quality as 'thumbnail' | 'display' | 'full',
+            since: since as string,
+        };
+
+        // Fetch media
+        const response = await getMediaByEventService(event_id, options, userId);
         sendResponse(res, response);
-    } catch (_err) {
-        console.error('Error in getMediaByEventController:', _err);
-        next(_err);
+    } catch (err) {
+        console.error('Error in getMediaByEventController:', err);
+        next(err);
     }
 };
 

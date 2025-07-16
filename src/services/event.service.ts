@@ -120,43 +120,79 @@ export const getUserEventsService = async (filters: {
     try {
         const { userId, page, limit, sort, status, privacy, template, search, tags } = filters;
 
-        // Build aggregation pipeline
+        // Build aggregation pipeline starting from Event collection
         const pipeline: any[] = [
-            // Match user's accessible events
+            // Match events where user is creator or approved co-host
             {
                 $match: {
-                    "permissions.user_id": new mongoose.Types.ObjectId(userId),
-                    resource_type: "event"
+                    $or: [
+                        { created_by: new mongoose.Types.ObjectId(userId) },
+                        {
+                            "co_hosts.user_id": new mongoose.Types.ObjectId(userId),
+                            "co_hosts.status": "approved"
+                        }
+                    ]
                 }
             },
-            // Lookup event details
+            // Lookup AccessControl permissions (optional, for additional roles)
             {
                 $lookup: {
-                    from: MODEL_NAMES.EVENT,
-                    localField: "resource_id",
-                    foreignField: "_id",
-                    as: "eventData"
+                    from: MODEL_NAMES.ACCESS_CONTROL,
+                    let: { eventId: "$_id" },
+                    pipeline: [
+                        {
+                            $match: {
+                                $expr: {
+                                    $and: [
+                                        { $eq: ["$resource_id", "$$eventId"] },
+                                        { $eq: ["$resource_type", "event"] },
+                                        { $eq: ["$user_id", new mongoose.Types.ObjectId(userId)] }
+                                    ]
+                                }
+                            }
+                        }
+                    ],
+                    as: "permissions"
                 }
             },
-            { $unwind: "$eventData" },
-
-            // Add user role to event data
+            // Add user role
             {
                 $addFields: {
-                    "eventData.user_role": {
-                        $arrayElemAt: [
-                            {
-                                $filter: {
-                                    input: "$permissions",
-                                    cond: { $eq: ["$$this.user_id", new mongoose.Types.ObjectId(userId)] }
+                    user_role: {
+                        $cond: {
+                            if: { $eq: ["$created_by", new mongoose.Types.ObjectId(userId)] },
+                            then: "creator",
+                            else: {
+                                $cond: {
+                                    if: {
+                                        $and: [
+                                            { $in: [new mongoose.Types.ObjectId(userId), "$co_hosts.user_id"] },
+                                            {
+                                                $eq: [
+                                                    {
+                                                        $arrayElemAt: [
+                                                            "$co_hosts.status",
+                                                            {
+                                                                $indexOfArray: [
+                                                                    "$co_hosts.user_id",
+                                                                    new mongoose.Types.ObjectId(userId)
+                                                                ]
+                                                            }
+                                                        ]
+                                                    },
+                                                    "approved"
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    then: "co-host",
+                                    else: { $arrayElemAt: ["$permissions.role", 0] } // Fallback to AccessControl role or null
                                 }
-                            },
-                            0
-                        ]
+                            }
+                        }
                     }
                 }
-            },
-            { $replaceRoot: { newRoot: "$eventData" } }
+            }
         ];
 
         // Apply filters
@@ -211,7 +247,7 @@ export const getUserEventsService = async (filters: {
 
         // Count total documents
         const countPipeline = [...pipeline, { $count: "total" }];
-        const totalResult = await AccessControl.aggregate(countPipeline);
+        const totalResult = await Event.aggregate(countPipeline);
         const total = totalResult[0]?.total || 0;
 
         // Add pagination
@@ -237,7 +273,7 @@ export const getUserEventsService = async (filters: {
                     from: MODEL_NAMES.EVENT_SESSION,
                     let: { eventId: "$_id" },
                     pipeline: [
-                        { $match: { $expr: { $eq: ["$event_id", "$eventId"] } } },
+                        { $match: { $expr: { $eq: ["$event_id", "$$eventId"] } } },
                         { $sort: { "session.last_activity_at": -1 } },
                         { $limit: 5 }
                     ],
@@ -270,7 +306,7 @@ export const getUserEventsService = async (filters: {
             }
         );
 
-        const events = await AccessControl.aggregate(pipeline);
+        const events = await Event.aggregate(pipeline);
 
         // Calculate pagination info
         const totalPages = Math.ceil(total / limit);
@@ -316,88 +352,92 @@ export const getUserEventsService = async (filters: {
     }
 };
 
-export const getEventDetailService = async (eventId: string, userId: string): Promise<ServiceResponse<EventType>> => {
+
+export const getEventDetailService = async (
+    eventId: string,
+    userId: string
+): Promise<ServiceResponse<EventType & { user_role?: string; user_permissions?: Record<string, boolean> | null }>> => {
     try {
-        // Check user access to event
-        const hasAccess = await checkEventAccess(eventId, userId);
-        if (!hasAccess) {
+        // Validate inputs
+        if (!mongoose.Types.ObjectId.isValid(eventId) || !mongoose.Types.ObjectId.isValid(userId)) {
             return {
                 status: false,
-                code: 403,
-                message: "You don't have access to this event",
+                code: 400,
+                message: 'Invalid event ID or user ID',
                 data: null,
-                error: null,
-                other: null
+                error: { message: 'Invalid ObjectId format' },
+                other: null,
             };
         }
 
-        const pipeline = [
+        const pipeline: mongoose.PipelineStage[] = [
             { $match: { _id: new mongoose.Types.ObjectId(eventId) } },
 
             // Get creator details
             {
                 $lookup: {
                     from: MODEL_NAMES.USER,
-                    localField: "created_by",
-                    foreignField: "_id",
-                    as: "creator_info",
-                    pipeline: [
-                        { $project: { name: 1, email: 1, avatar_url: 1 } }
-                    ]
-                }
+                    localField: 'created_by',
+                    foreignField: '_id',
+                    as: 'creator_info',
+                    pipeline: [{ $project: { name: 1, email: 1, avatar_url: 1 } }],
+                },
             },
 
             // Get co-hosts details
             {
                 $lookup: {
                     from: MODEL_NAMES.USER,
-                    localField: "co_hosts",
-                    foreignField: "_id",
-                    as: "co_hosts_info",
-                    pipeline: [
-                        { $project: { name: 1, email: 1, avatar_url: 1 } }
-                    ]
-                }
+                    localField: 'co_hosts.user_id',
+                    foreignField: '_id',
+                    as: 'co_hosts_info',
+                    pipeline: [{ $project: { name: 1, email: 1, avatar_url: 1 } }],
+                },
             },
 
             // Get participants summary
             {
                 $lookup: {
                     from: MODEL_NAMES.EVENT_PARTICIPANT,
-                    localField: "_id",
-                    foreignField: "event_id",
-                    as: "participants_summary",
+                    localField: '_id',
+                    foreignField: 'event_id',
+                    as: 'participants_summary',
                     pipeline: [
                         {
                             $group: {
-                                _id: "$participation.status",
+                                _id: '$participation.status',
                                 count: { $sum: 1 },
                                 recent_participants: {
                                     $push: {
                                         $cond: [
-                                            { $lt: ["$participation.joined_at", new Date(Date.now() - 24 * 60 * 60 * 1000)] },
+                                            {
+                                                $lt: [
+                                                    '$participation.joined_at',
+                                                    new Date(Date.now() - 24 * 60 * 60 * 1000),
+                                                ],
+                                            },
                                             null,
                                             {
-                                                name: "$identity.name",
-                                                avatar: "$identity.avatar_url",
-                                                joined_at: "$participation.joined_at"
-                                            }
-                                        ]
-                                    }
-                                }
-                            }
-                        }
-                    ]
-                }
+                                                name: '$identity.name',
+                                                avatar: '$identity.avatar_url',
+                                                joined_at: '$participation.joined_at',
+                                            },
+                                        ],
+                                    },
+                                },
+                            },
+                        },
+                    ],
+                },
             },
 
             // Get albums
             {
                 $lookup: {
                     from: MODEL_NAMES.ALBUM,
-                    localField: "_id",
-                    foreignField: "event_id",
-                    as: "albums_detail",
+                    localField: '_id',
+                    foreignField: 'event_id',
+                    as: 'albums_detail',
                     pipeline: [
                         {
                             $project: {
@@ -406,26 +446,35 @@ export const getEventDetailService = async (eventId: string, userId: string): Pr
                                 cover_photo: 1,
                                 photo_count: 1,
                                 is_private: 1,
-                                created_at: 1
-                            }
+                                created_at: 1,
+                            },
                         },
-                        { $sort: { created_at: 1 } }
-                    ]
-                }
+                        { $sort: { created_at: 1 } },
+                    ],
+                },
             },
 
-            // Get user's role and permissions
+            // Get AccessControl permissions (optional, for non-creator/co-host roles)
             {
                 $lookup: {
                     from: MODEL_NAMES.ACCESS_CONTROL,
-                    let: { eventId: "$_id" },
+                    let: { eventId: '$_id' },
                     pipeline: [
                         {
                             $match: {
-                                $expr: { $eq: ["$resource_id", "$eventId"] },
-                                resource_type: "event",
-                                "permissions.user_id": new mongoose.Types.ObjectId(userId)
-                            }
+                                $expr: {
+                                    $and: [
+                                        { $eq: ['$resource_id', '$$eventId'] },
+                                        { $eq: ['$resource_type', 'event'] },
+                                        {
+                                            $eq: [
+                                                '$permissions.user_id',
+                                                new mongoose.Types.ObjectId(userId),
+                                            ],
+                                        },
+                                    ],
+                                },
+                            },
                         },
                         {
                             $project: {
@@ -435,53 +484,137 @@ export const getEventDetailService = async (eventId: string, userId: string): Pr
                                             $map: {
                                                 input: {
                                                     $filter: {
-                                                        input: "$permissions",
-                                                        cond: { $eq: ["$this.user_id", new mongoose.Types.ObjectId(userId)] }
-                                                    }
+                                                        input: '$permissions',
+                                                        cond: {
+                                                            $eq: [
+                                                                '$$this.user_id',
+                                                                new mongoose.Types.ObjectId(userId),
+                                                            ],
+                                                        },
+                                                    },
                                                 },
-                                                as: "perm",
-                                                in: "$perm.role"
-                                            }
+                                                as: 'perm',
+                                                in: '$$perm.role',
+                                            },
                                         },
-                                        0
-                                    ]
-                                }
-                            }
-                        }
+                                        0,
+                                    ],
+                                },
+                            },
+                        },
                     ],
-                    as: "user_access"
-                }
+                    as: 'user_access',
+                },
             },
 
             // Format the response
             {
                 $addFields: {
-                    creator: { $arrayElemAt: ["$creator_info", 0] },
-                    co_hosts: "$co_hosts_info",
-                    albums: "$albums_detail",
+                    creator: { $arrayElemAt: ['$creator_info', 0] },
+                    co_hosts: '$co_hosts_info',
+                    albums: '$albums_detail',
                     user_role: {
-                        $arrayElemAt: ["$user_access.role", 0]
+                        $cond: {
+                            if: { $eq: ['$created_by', new mongoose.Types.ObjectId(userId)] },
+                            then: 'owner',
+                            else: {
+                                $cond: {
+                                    if: {
+                                        $and: [
+                                            {
+                                                $in: [
+                                                    new mongoose.Types.ObjectId(userId),
+                                                    '$co_hosts.user_id',
+                                                ],
+                                            },
+                                            {
+                                                $eq: [
+                                                    {
+                                                        $arrayElemAt: [
+                                                            '$co_hosts.status',
+                                                            {
+                                                                $indexOfArray: [
+                                                                    '$co_hosts.user_id',
+                                                                    new mongoose.Types.ObjectId(userId),
+                                                                ],
+                                                            },
+                                                        ],
+                                                    },
+                                                    'approved',
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    then: 'co_host',
+                                    else: { $ifNull: [{ $arrayElemAt: ['$user_access.role', 0] }, null] },
+                                },
+                            },
+                        },
+                    },
+                    user_permissions: {
+                        $cond: {
+                            if: { $eq: ['$created_by', new mongoose.Types.ObjectId(userId)] },
+                            then: {
+                                manage_content: true,
+                                manage_guests: true,
+                                manage_settings: true,
+                                approve_content: true,
+                            },
+                            else: {
+                                $cond: {
+                                    if: {
+                                        $in: [
+                                            new mongoose.Types.ObjectId(userId),
+                                            '$co_hosts.user_id',
+                                        ],
+                                    },
+                                    then: {
+                                        $arrayElemAt: [
+                                            '$co_hosts.permissions',
+                                            {
+                                                $indexOfArray: [
+                                                    '$co_hosts.user_id',
+                                                    new mongoose.Types.ObjectId(userId),
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    else: null,
+                                },
+                            },
+                        },
                     },
                     participants_stats: {
                         $arrayToObject: {
                             $map: {
-                                input: "$participants_summary",
-                                as: "stat",
+                                input: '$participants_summary',
+                                as: 'stat',
                                 in: {
-                                    k: "$stat._id",
-                                    v: "$stat.count"
-                                }
-                            }
-                        }
+                                    k: '$stat._id',
+                                    v: '$stat.count',
+                                },
+                            },
+                        },
                     },
                     recent_joiners: {
                         $reduce: {
-                            input: "$participants_summary.recent_participants",
-                            initialValue: [] as any[],
-                            in: { $concatArrays: ["$value", "$this"] }
-                        }
-                    }
-                }
+                            input: '$participants_summary.recent_participants',
+                            initialValue: [],
+                            in: {
+                                $concatArrays: [
+                                    '$$value',
+                                    {
+                                        $cond: [
+                                            { $eq: ['$$this', null] },
+                                            [],
+                                            ['$$this'],
+                                        ],
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
             },
 
             // Clean up temporary fields
@@ -491,22 +624,22 @@ export const getEventDetailService = async (eventId: string, userId: string): Pr
                     co_hosts_info: 0,
                     albums_detail: 0,
                     participants_summary: 0,
-                    user_access: 0
-                }
-            }
+                    user_access: 0,
+                },
+            },
         ];
 
-        const result = await Event.aggregate(pipeline as mongoose.PipelineStage[]);
+        const result = await Event.aggregate(pipeline);
         const event = result[0];
 
         if (!event) {
             return {
                 status: false,
                 code: 404,
-                message: "Event not found",
+                message: 'Event not found',
                 data: null,
                 error: null,
-                other: null
+                other: null,
             };
         }
 
@@ -516,23 +649,23 @@ export const getEventDetailService = async (eventId: string, userId: string): Pr
         return {
             status: true,
             code: 200,
-            message: "Event details fetched successfully",
+            message: 'Event details fetched successfully',
             data: event,
             error: null,
-            other: null
+            other: null,
         };
     } catch (error) {
-        logger.error(`[getEventDetailService] Error: ${error.message}`);
+        logger.error(`[getEventDetailService] Error: ${(error as Error).message}`);
         return {
             status: false,
             code: 500,
-            message: "Failed to fetch event details",
+            message: 'Failed to fetch event details',
             data: null,
             error: {
-                message: error.message,
-                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+                message: (error as Error).message,
+                stack: process.env.NODE_ENV === 'development' ? (error as Error).stack : undefined,
             },
-            other: null
+            other: null,
         };
     }
 };

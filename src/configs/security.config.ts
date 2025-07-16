@@ -62,6 +62,6 @@ export const corsOptions: CorsOptions = {
   },
 
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "If-Modified-Since"],
   credentials: true, // ✅ Allow cookies & auth headers
 };

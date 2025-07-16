@@ -44,13 +44,13 @@ export const uploadMediaService = async (
                 other: null,
             };
         }
-        
+
         // Calculate file size in MB
         const fileSizeInMB = file.size / (1024 * 1024);
-        
+
         // Check if user has enough storage in their subscription
         const canUpload = await checkUserLimitsService(user_id, 'storage', fileSizeInMB);
-        
+
         if (!canUpload) {
             await fs.unlink(file.path);
             return {
@@ -58,8 +58,8 @@ export const uploadMediaService = async (
                 code: 403,
                 message: "Storage limit exceeded",
                 data: null,
-                error: { 
-                    message: "You have reached your storage limit. Please upgrade your subscription to upload more files." 
+                error: {
+                    message: "You have reached your storage limit. Please upgrade your subscription to upload more files."
                 },
                 other: null,
             };
@@ -103,8 +103,8 @@ export const uploadMediaService = async (
         };
 
     } catch (err: any) {
-        if (file?.path) await fs.unlink(file.path).catch(() => {});
-        
+        if (file?.path) await fs.unlink(file.path).catch(() => { });
+
         return {
             status: false,
             code: 500,
@@ -162,8 +162,8 @@ export const uploadCoverImageService = async (
         };
 
     } catch (err: any) {
-        if (file?.path) await fs.unlink(file.path).catch(() => {});
-        
+        if (file?.path) await fs.unlink(file.path).catch(() => { });
+
         return {
             status: false,
             code: 500,
@@ -182,35 +182,134 @@ export const uploadCoverImageService = async (
  * Get all media for a specific event
  */
 export const getMediaByEventService = async (
-    event_id: string
+    eventId: string,
+    options: {
+        includeProcessing?: boolean;
+        includePending?: boolean;
+        page?: number;
+        limit?: number;
+        quality?: 'thumbnail' | 'display' | 'full';
+        since?: string;
+    } = {},
+    userId?: string // Optional, for permission checks
 ): Promise<ServiceResponse<any[]>> => {
     try {
-        const media = await Media.find({ event_id: new mongoose.Types.ObjectId(event_id) })
-            .sort({ created_at: -1 });
+        // Validate event_id
+        if (!mongoose.Types.ObjectId.isValid(eventId)) {
+            return {
+                status: false,
+                code: 400,
+                message: 'Invalid event ID',
+                data: null,
+                error: { message: 'Invalid ObjectId format' },
+                other: null,
+            };
+        }
+
+        // Build query
+        const query: any = { event_id: new mongoose.Types.ObjectId(eventId) };
+
+        // Filter by approval status
+        if (!options.includePending) {
+            query['approval.status'] = { $in: ['approved', 'auto_approved'] };
+        }
+
+        // Filter by processing status
+        if (!options.includeProcessing) {
+            query['processing.status'] = 'completed';
+        }
+
+        // Filter by since date
+        if (options.since) {
+            query.updated_at = { $gt: new Date(options.since) };
+        }
+
+        // Build aggregation pipeline
+        const pipeline: mongoose.PipelineStage[] = [
+            { $match: query },
+            { $sort: { created_at: -1 } },
+        ];
+
+        // Handle pagination
+        const page = options.page || 1;
+        const limit = options.limit || 20;
+        if (page && limit) {
+            pipeline.push(
+                { $skip: (page - 1) * limit },
+                { $limit: limit }
+            );
+        }
+
+        // Project fields based on quality
+        const projection: any = {
+            url: 1,
+            public_id: 1,
+            type: 1,
+            album_id: 1,
+            event_id: 1,
+            uploaded_by: 1,
+            original_filename: 1,
+            size_mb: 1,
+            format: 1,
+            approval: 1,
+            processing: 1,
+            metadata: 1,
+            stats: 1,
+            content_flags: 1,
+            created_at: 1,
+            updated_at: 1,
+        };
+
+        if (options.quality) {
+            if (options.quality === 'thumbnail') {
+                projection.url = '$processing.compressed_versions.url';
+                projection['processing.compressed_versions'] = {
+                    $filter: {
+                        input: '$processing.compressed_versions',
+                        as: 'version',
+                        cond: { $eq: ['$$version.quality', 'low'] },
+                    },
+                };
+            } else if (options.quality === 'display') {
+                projection.url = '$processing.compressed_versions.url';
+                projection['processing.compressed_versions'] = {
+                    $filter: {
+                        input: '$processing.compressed_versions',
+                        as: 'version',
+                        cond: { $eq: ['$$version.quality', 'medium'] },
+                    },
+                };
+            }
+            // 'full' uses the original url, so no change needed
+        }
+
+        pipeline.push({ $project: projection });
+
+        const media = await Media.aggregate(pipeline);
 
         return {
             status: true,
             code: 200,
-            message: "Media retrieved successfully",
+            message: 'Media retrieved successfully',
             data: media,
             error: null,
             other: null,
         };
     } catch (err: any) {
+        console.error(`[getMediaByEventService] Error: ${err.message}`);
         return {
             status: false,
             code: 500,
-            message: "Failed to retrieve media",
+            message: 'Failed to retrieve media',
             data: null,
             error: {
                 message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+                stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
             },
             other: null,
         };
     }
 };
-
 /**
  * Get all media for a specific album
  */
@@ -254,7 +353,7 @@ export const deleteMediaService = async (
     try {
         // Find the media to get its size before deletion
         const media = await Media.findById(media_id);
-        
+
         if (!media) {
             return {
                 status: false,
@@ -265,11 +364,11 @@ export const deleteMediaService = async (
                 other: null,
             };
         }
-        
+
         // Check if the user is authorized to delete this media
         // This could be expanded to check if user is event owner or has admin permissions
         const isAuthorized = media.uploaded_by.toString() === user_id;
-        
+
         if (!isAuthorized) {
             return {
                 status: false,
@@ -280,17 +379,17 @@ export const deleteMediaService = async (
                 other: null,
             };
         }
-        
+
         // Get the media size or default to 0 if not recorded
         const mediaSizeMB = media.size_mb || 0;
-        
+
         // Delete from imagekit if needed (this would require parsing the URL to get the file ID)
         // Example: const fileId = getFileIdFromUrl(media.url);
         // await imagekit.deleteFile(fileId);
-        
+
         // Delete the media record
         await Media.findByIdAndDelete(media_id);
-        
+
         // Update user usage metrics
         try {
             if (mediaSizeMB > 0) {
@@ -301,7 +400,7 @@ export const deleteMediaService = async (
             logger.error(`Failed to update usage for user ${user_id}: ${usageError}`);
             // Don't fail the deletion if usage tracking fails
         }
-        
+
         return {
             status: true,
             code: 200,

@@ -6,6 +6,7 @@ import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
 import { logger } from "@utils/logger";
 import { MODEL_NAMES } from "@models/names";
+import { Event } from "@models/event.model";
 
 /**
  * Middleware to check if user has access to an event
@@ -32,31 +33,53 @@ export const eventAccessMiddleware = async (
             });
         }
 
-        // Check user access to event
-        const accessControl = await AccessControl.findOne({
-            resource_id: new mongoose.Types.ObjectId(event_id),
-            resource_type: "event",
-            "permissions.user_id": new mongoose.Types.ObjectId(userId)
+        // Check if user is the creator or an approved co-host in the Event collection
+        const event = await Event.findOne({
+            _id: new mongoose.Types.ObjectId(event_id),
+            $or: [
+                { created_by: new mongoose.Types.ObjectId(userId) },
+                { "co_hosts.user_id": new mongoose.Types.ObjectId(userId), "co_hosts.status": "approved" }
+            ]
         }).lean();
 
-        if (!accessControl) {
-            logger.warn(`[eventAccessMiddleware] User ${userId} attempted to access event ${event_id} without permission`);
-            return sendResponse(res, {
-                status: false,
-                code: 403,
-                message: "You don't have access to this event",
-                data: null,
-                error: { message: "Access denied" },
-                other: null
-            });
+        let userPermission: any = null;
+        let role: 'owner' | 'co_host' | 'guest' | 'viewer' | null = null;
+
+        if (event) {
+            // Determine role based on Event collection
+            if (event.created_by.toString() === userId) {
+                role = "owner"; // Align with your middleware's terminology
+            } else if (event.co_hosts.some(co => co.user_id.toString() === userId && co.status === "approved")) {
+                role = "co_host";
+                userPermission = event.co_hosts.find(co => co.user_id.toString() === userId);
+            }
+        } else {
+            // Fallback to AccessControl for other roles (e.g., guests)
+            const accessControl = await AccessControl.findOne({
+                resource_id: new mongoose.Types.ObjectId(event_id),
+                resource_type: "event",
+                "permissions.user_id": new mongoose.Types.ObjectId(userId)
+            }).lean();
+
+            if (!accessControl) {
+                logger.warn(`[eventAccessMiddleware] User ${userId} attempted to access event ${event_id} without permission`);
+                return sendResponse(res, {
+                    status: false,
+                    code: 403,
+                    message: "You don't have access to this event",
+                    data: null,
+                    error: { message: "Access denied" },
+                    other: null
+                });
+            }
+
+            userPermission = accessControl.permissions.find(
+                p => p.user_id.toString() === userId
+            );
+            role = userPermission?.role;
         }
 
-        // Extract user's role and permissions for this event
-        const userPermission = accessControl.permissions.find(
-            p => p.user_id.toString() === userId
-        );
-
-        if (!userPermission) {
+        if (!role) {
             return sendResponse(res, {
                 status: false,
                 code: 403,
@@ -70,12 +93,12 @@ export const eventAccessMiddleware = async (
         // Add event access info to request
         req.eventAccess = {
             eventId: event_id,
-            role: userPermission.role,
-            canView: true, // If they have access, they can view
-            canEdit: ['owner', 'co_host'].includes(userPermission.role),
-            canDelete: userPermission.role === 'owner',
-            canManageGuests: ['owner', 'co_host'].includes(userPermission.role),
-            canManageContent: ['owner', 'co_host', 'moderator'].includes(userPermission.role)
+            role,
+            canView: true,
+            canEdit: ['owner', 'co_host'].includes(role),
+            canDelete: role === 'owner',
+            canManageGuests: ['owner', 'co_host'].includes(role) && (!userPermission || userPermission?.permissions?.manage_guests !== false),
+            canManageContent: ['owner', 'co_host', 'moderator'].includes(role) && (!userPermission || userPermission?.permissions?.manage_content !== false)
         };
 
         next();

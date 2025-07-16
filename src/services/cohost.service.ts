@@ -67,7 +67,7 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<any> 
         const newCoHost = {
             user_id: new mongoose.Types.ObjectId(userId),
             invited_by: event.co_host_invite.created_by,
-            status: 'pending',
+            status: 'approved',
             permissions: {
                 manage_content: true,
                 manage_guests: false,
@@ -96,11 +96,11 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<any> 
 
         return {
             status: true,
-            message: 'Successfully joined as co-host. Waiting for admin approval.',
+            message: 'Successfully joined as co-host.',
             data: {
                 event_id: event._id,
                 event_title: event.title,
-                status: 'pending',
+                status: 'approved',
                 co_host: newCoHost
             }
         };
