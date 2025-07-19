@@ -66,31 +66,38 @@ export const createShareTokenController = async (req: injectedRequest, res: Resp
     }
 };
 
-export const getShareTokenDetailsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+export const getShareTokenDetailsController = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+) => {
     try {
         const { token_id } = trimObject(req.params);
-        
-        console.log('===== GET SHARE TOKEN DETAILS REQUEST =====', token_id);
-        console.log('===== GET SHARE TOKEN DETAILS REQUEST =====', token_id);
-        console.log('===== GET SHARE TOKEN DETAILS REQUEST =====', req.user?._id.toString());
-        
+
+        console.info(`[getShareTokenDetailsController] Fetching details for token ${token_id}`);
+
         if (!token_id) {
-            throw new Error("Valid token ID is required");
+            throw new Error('Valid token ID is required');
         }
-        
-        console.log('===== GET SHARE TOKEN DETAILS REQUEST =====', token_id);
+
         const response = await shareTokenService.getShareTokenDetailsService({
             tokenId: token_id,
-            requesterId: req.user?._id.toString()
+            requesterId: req.user?._id?.toString(),
         });
-        console.log('===== GET SHARE TOKEN DETAILS REQUEST =====', token_id);
 
         sendResponse(res, response);
     } catch (error) {
-        next(error);
+        console.error(`[getShareTokenDetailsController] Error: ${error.message}`);
+        sendResponse(res, {
+            status: false,
+            code: 500,
+            message: 'Failed to get share token details',
+            data: null,
+            error: { message: error.message },
+            other: null,
+        });
     }
 };
-
 export const updateShareTokenController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const { token_id } = trimObject(req.params);

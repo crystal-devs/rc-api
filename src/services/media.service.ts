@@ -191,7 +191,7 @@ export const getMediaByEventService = async (
         quality?: 'thumbnail' | 'display' | 'full';
         since?: string;
     } = {},
-    userId?: string // Optional, for permission checks
+    userId?: string
 ): Promise<ServiceResponse<any[]>> => {
     try {
         // Validate event_id
@@ -206,86 +206,115 @@ export const getMediaByEventService = async (
             };
         }
 
-        // Build query
-        const query: any = { event_id: new mongoose.Types.ObjectId(eventId) };
+        // Debug: Log the eventId being searched
+        console.log('Searching for media with event_id:', eventId);
 
-        // Filter by approval status
-        if (!options.includePending) {
-            query['approval.status'] = { $in: ['approved', 'auto_approved'] };
-        }
-
-        // Filter by processing status
-        if (!options.includeProcessing) {
-            query['processing.status'] = 'completed';
-        }
-
-        // Filter by since date
-        if (options.since) {
-            query.updated_at = { $gt: new Date(options.since) };
-        }
-
-        // Build aggregation pipeline
-        const pipeline: mongoose.PipelineStage[] = [
-            { $match: query },
-            { $sort: { created_at: -1 } },
-        ];
-
-        // Handle pagination
-        const page = options.page || 1;
-        const limit = options.limit || 20;
-        if (page && limit) {
-            pipeline.push(
-                { $skip: (page - 1) * limit },
-                { $limit: limit }
-            );
-        }
-
-        // Project fields based on quality
-        const projection: any = {
-            url: 1,
-            public_id: 1,
-            type: 1,
-            album_id: 1,
-            event_id: 1,
-            uploaded_by: 1,
-            original_filename: 1,
-            size_mb: 1,
-            format: 1,
-            approval: 1,
-            processing: 1,
-            metadata: 1,
-            stats: 1,
-            content_flags: 1,
-            created_at: 1,
-            updated_at: 1,
+        // Build base query
+        const query: any = { 
+            event_id: new mongoose.Types.ObjectId(eventId) 
         };
 
-        if (options.quality) {
-            if (options.quality === 'thumbnail') {
-                projection.url = '$processing.compressed_versions.url';
-                projection['processing.compressed_versions'] = {
-                    $filter: {
-                        input: '$processing.compressed_versions',
-                        as: 'version',
-                        cond: { $eq: ['$$version.quality', 'low'] },
-                    },
-                };
-            } else if (options.quality === 'display') {
-                projection.url = '$processing.compressed_versions.url';
-                projection['processing.compressed_versions'] = {
-                    $filter: {
-                        input: '$processing.compressed_versions',
-                        as: 'version',
-                        cond: { $eq: ['$$version.quality', 'medium'] },
-                    },
-                };
-            }
-            // 'full' uses the original url, so no change needed
+        // FIXED: Apply filters only when explicitly set to false
+        // Default behavior should be inclusive unless specified otherwise
+        if (options.includePending === false) {
+            query['approval.status'] = { $in: ['approved', 'auto_approved'] };
+            console.log('Applied approval filter:', query['approval.status']);
         }
 
-        pipeline.push({ $project: projection });
+        if (options.includeProcessing === false) {
+            query['processing.status'] = 'completed';
+            console.log('Applied processing filter:', query['processing.status']);
+        }
 
-        const media = await Media.aggregate(pipeline);
+        if (options.since) {
+            try {
+                const sinceDate = new Date(options.since);
+                if (isNaN(sinceDate.getTime())) {
+                    throw new Error('Invalid date format');
+                }
+                query.updated_at = { $gt: sinceDate };
+                console.log('Applied date filter:', options.since);
+            } catch (dateError) {
+                console.warn('Invalid since date provided:', options.since);
+            }
+        }
+
+        console.log('Final query:', JSON.stringify(query, null, 2));
+
+        // Debug: Check total count without filters first
+        const totalCount = await Media.countDocuments({ 
+            event_id: new mongoose.Types.ObjectId(eventId) 
+        });
+        console.log('Total media count for event (no filters):', totalCount);
+
+        // Check count with filters
+        const filteredCount = await Media.countDocuments(query);
+        console.log('Filtered media count:', filteredCount);
+
+        if (filteredCount === 0) {
+            return {
+                status: true,
+                code: 200,
+                message: 'No media found for this event with the given filters',
+                data: [],
+                error: null,
+                other: { 
+                    totalCount, 
+                    filteredCount: 0,
+                    appliedFilters: {
+                        includePending: options.includePending,
+                        includeProcessing: options.includeProcessing,
+                        since: options.since
+                    }
+                },
+            };
+        }
+
+        // Handle pagination
+        const page = Math.max(1, options.page || 1);
+        const limit = Math.max(1, Math.min(100, options.limit || 20)); // Cap at 100
+        const skip = (page - 1) * limit;
+
+        // SIMPLIFIED: Use find() instead of aggregation for better debugging
+        let mediaQuery = Media.find(query)
+            .sort({ created_at: -1 })
+            .skip(skip)
+            .limit(limit)
+            .lean(); // Use lean() for better performance
+
+        let media = await mediaQuery.exec();
+        
+        console.log('Found media count:', media.length);
+        
+        // Post-process for quality requirements
+        if (options.quality && options.quality !== 'full' && media.length > 0) {
+            media = media.map(item => {
+                const processedItem = { ...item };
+                
+                if (options.quality === 'thumbnail') {
+                    const thumbnail = item.processing?.compressed_versions?.find(
+                        (v: any) => v.quality === 'low'
+                    );
+                    if (thumbnail?.url) {
+                        processedItem.url = thumbnail.url;
+                    }
+                } else if (options.quality === 'display') {
+                    const display = item.processing?.compressed_versions?.find(
+                        (v: any) => v.quality === 'medium'
+                    );
+                    if (display?.url) {
+                        processedItem.url = display.url;
+                    }
+                }
+                
+                return processedItem;
+            });
+        }
+
+        // Calculate total pages for pagination info
+        const totalPages = Math.ceil(filteredCount / limit);
+        const hasNext = page < totalPages;
+        const hasPrev = page > 1;
 
         return {
             status: true,
@@ -293,10 +322,32 @@ export const getMediaByEventService = async (
             message: 'Media retrieved successfully',
             data: media,
             error: null,
-            other: null,
+            other: {
+                pagination: {
+                    page,
+                    limit,
+                    totalCount: filteredCount,
+                    totalPages,
+                    hasNext,
+                    hasPrev
+                },
+                appliedFilters: {
+                    includePending: options.includePending,
+                    includeProcessing: options.includeProcessing,
+                    quality: options.quality,
+                    since: options.since
+                }
+            },
         };
+
     } catch (err: any) {
-        console.error(`[getMediaByEventService] Error: ${err.message}`);
+        console.error(`[getMediaByEventService] Error:`, {
+            message: err.message,
+            stack: err.stack,
+            eventId,
+            options
+        });
+        
         return {
             status: false,
             code: 500,
@@ -310,6 +361,7 @@ export const getMediaByEventService = async (
         };
     }
 };
+
 /**
  * Get all media for a specific album
  */

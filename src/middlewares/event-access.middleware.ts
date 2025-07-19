@@ -289,13 +289,12 @@ export const tokenBasedEventAccessMiddleware = async (
  * Middleware to check token access with relaxed rules for unlisted events
  * This will bypass authentication for unlisted events
  */
-export const publicTokenAccessMiddleware = async (
+export const tokenAccessMiddleware = async (
     req: injectedRequest,
     res: Response,
     next: NextFunction
 ) => {
     try {
-
         const { token_id } = req.params;
 
         // Validate token_id
@@ -303,59 +302,82 @@ export const publicTokenAccessMiddleware = async (
             return sendResponse(res, {
                 status: false,
                 code: 400,
-                message: "Valid token ID is required",
+                message: 'Valid token ID is required',
                 data: null,
-                error: { message: "Invalid or missing token ID" },
-                other: null
+                error: { message: 'Invalid or missing token ID' },
+                other: null,
             });
         }
 
-        // Find token to get event ID
-        const shareToken = await mongoose.model(MODEL_NAMES.SHARE_TOKEN).findOne({ token: token_id })
-            .populate({
-                path: 'event_id',
-                select: 'privacy.visibility'
-            });
+        // Find event by share_token
+        const event = await Event.findOne({ share_token: token_id }).select(
+            '_id visibility share_settings permissions'
+        );
 
-        if (!shareToken) {
+        if (!event) {
+            logger.warn(`[tokenAccessMiddleware] Share token ${token_id} not found`);
             return sendResponse(res, {
                 status: false,
                 code: 404,
-                message: "Share token not found",
+                message: 'Share token not found',
                 data: null,
-                error: { message: "Token not found" },
-                other: null
+                error: { message: 'Token not found' },
+                other: null,
             });
         }
 
-        // Get the event ID and check if it's unlisted
-        const event_id = shareToken.event_id._id.toString();
-        const isUnlisted = shareToken.event_id.privacy?.visibility === 'unlisted';
+        const eventId = event._id.toString();
 
-        // If unlisted, allow access without authentication
-        if (isUnlisted) {
-            // Add basic event access info to request
+        // Check share_settings
+        if (!event.share_settings.is_active) {
+            logger.warn(`[tokenAccessMiddleware] Share token ${token_id} is inactive for event ${eventId}`);
+            return sendResponse(res, {
+                status: false,
+                code: 403,
+                message: 'Share token is inactive',
+                data: null,
+                error: { message: 'Token is inactive' },
+                other: null,
+            });
+        }
+
+        if (event.share_settings.expires_at && new Date(event.share_settings.expires_at) < new Date()) {
+            logger.warn(`[tokenAccessMiddleware] Share token ${token_id} has expired for event ${eventId}`);
+            return sendResponse(res, {
+                status: false,
+                code: 403,
+                message: 'Share token has expired',
+                data: null,
+                error: { message: 'Token has expired' },
+                other: null,
+            });
+        }
+
+        // If visibility is anyone_with_link, allow access without authentication
+        if (event.visibility === 'anyone_with_link') {
             req.eventAccess = {
-                eventId: event_id,
+                eventId,
                 role: 'viewer',
-                canView: true,
+                canView: event.permissions.can_view,
                 canEdit: false,
                 canDelete: false,
                 canManageGuests: false,
-                canManageContent: false
+                canManageContent: false,
             };
+            logger.info(`[tokenAccessMiddleware] Granted viewer access for token ${token_id} (anyone_with_link)`);
             return next();
         }
 
-        // For non-unlisted events, require authentication
-        if (!req.user) {
+        // For invited_only or private, require authentication
+        if (!req.user || !req.user._id) {
+            logger.warn(`[tokenAccessMiddleware] Authentication required for token ${token_id}`);
             return sendResponse(res, {
                 status: false,
                 code: 401,
-                message: "Authentication required",
+                message: 'Authentication required',
                 data: null,
-                error: { message: "You must be logged in to access this resource" },
-                other: null
+                error: { message: 'You must be logged in to access this resource' },
+                other: null,
             });
         }
 
@@ -363,63 +385,65 @@ export const publicTokenAccessMiddleware = async (
 
         // Check user access to event
         const accessControl = await AccessControl.findOne({
-            resource_id: new mongoose.Types.ObjectId(event_id),
-            resource_type: "event",
-            "permissions.user_id": new mongoose.Types.ObjectId(userId)
+            resource_id: new mongoose.Types.ObjectId(eventId),
+            resource_type: 'event',
+            'permissions.user_id': new mongoose.Types.ObjectId(userId),
         }).lean();
 
         if (!accessControl) {
-            logger.warn(`[publicTokenAccessMiddleware] User ${userId} attempted to access event ${event_id} via token ${token_id} without permission`);
+            logger.warn(`[tokenAccessMiddleware] User ${userId} has no access to event ${eventId} via token ${token_id}`);
             return sendResponse(res, {
                 status: false,
                 code: 403,
                 message: "You don't have access to this event",
                 data: null,
-                error: { message: "Access denied" },
-                other: null
+                error: { message: 'Access denied' },
+                other: null,
             });
         }
 
-        // Extract user's role and permissions for this event
+        // Extract user's role and permissions
         const userPermission = accessControl.permissions.find(
-            p => p.user_id.toString() === userId
+            (p) => p.user_id.toString() === userId
         );
 
         if (!userPermission) {
+            logger.warn(`[tokenAccessMiddleware] No permissions found for user ${userId} in event ${eventId}`);
             return sendResponse(res, {
                 status: false,
                 code: 403,
                 message: "You don't have access to this event",
                 data: null,
-                error: { message: "Access denied" },
-                other: null
+                error: { message: 'Access denied' },
+                other: null,
             });
         }
 
         // Add event access info to request
         req.eventAccess = {
-            eventId: event_id,
+            eventId,
             role: userPermission.role,
-            canView: true, // If they have access, they can view
+            canView: event.permissions.can_view,
             canEdit: ['owner', 'co_host'].includes(userPermission.role),
             canDelete: userPermission.role === 'owner',
             canManageGuests: ['owner', 'co_host'].includes(userPermission.role),
-            canManageContent: ['owner', 'co_host', 'moderator'].includes(userPermission.role)
+            canManageContent: ['owner', 'co_host', 'moderator'].includes(userPermission.role),
         };
 
+        logger.info(`[tokenAccessMiddleware] Granted access for user ${userId} to event ${eventId} with role ${userPermission.role}`);
         next();
     } catch (error) {
-        logger.error(`[publicTokenAccessMiddleware] Error: ${error.message}`);
+        logger.error(`[tokenAccessMiddleware] Error: ${error.message}`);
         return sendResponse(res, {
             status: false,
             code: 500,
-            message: "Error checking token access",
+            message: 'Error checking token access',
             data: null,
             error: {
                 message: error.message,
-                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
             },
-            other: null
+            other: null,
         });
     }
 };

@@ -5,36 +5,22 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<any> 
     try {
         console.log('🔄 Backend: joinAsCoHost called with:', { token, userId });
 
-        // Find event with the token
+        // Find event with the token - Simply check if token exists
         const event = await Event.findOne({
-            'co_host_invite.token': token,
-            'co_host_invite.is_active': true,
-            'co_host_invite.expires_at': { $gt: new Date() }
+            'co_host_invite_token.token': token
         });
 
         console.log('🔍 Backend: Event lookup result:', {
             found: !!event,
             eventId: event?._id,
-            eventTitle: event?.title,
-            tokenActive: event?.co_host_invite?.is_active,
-            tokenExpiry: event?.co_host_invite?.expires_at,
+            eventTitle: event?.title
         });
 
         if (!event) {
-            console.log('❌ Backend: No valid event found for token');
+            console.log('❌ Backend: No event found for token');
             return {
                 status: false,
-                message: 'Invalid or expired co-host invite token',
-                data: null
-            };
-        }
-
-        // Check if token usage limit exceeded
-        if (event.co_host_invite.used_count >= event.co_host_invite.max_uses) {
-            console.log('❌ Backend: Token usage limit exceeded');
-            return {
-                status: false,
-                message: 'Co-host invite token usage limit exceeded',
+                message: 'Invalid co-host invite token',
                 data: null
             };
         }
@@ -63,29 +49,29 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<any> 
             };
         }
 
-        // Add user as pending co-host
+        // Add user as approved co-host
         const newCoHost = {
             user_id: new mongoose.Types.ObjectId(userId),
-            invited_by: event.co_host_invite.created_by,
+            invited_by: event.co_host_invite_token.created_by,
             status: 'approved',
             permissions: {
                 manage_content: true,
                 manage_guests: false,
                 manage_settings: false,
                 approve_content: true
-            }
+            },
+            joined_at: new Date()
         };
 
         console.log('✅ Backend: Adding new co-host:', newCoHost);
 
-        // Update event with new co-host and increment usage count
+        // Update event with new co-host - no need to increment usage count
         const updatedEvent = await Event.findByIdAndUpdate(
             event._id,
             {
                 $push: { co_hosts: newCoHost },
                 $inc: { 
-                    'co_host_invite.used_count': 1,
-                    'stats.participants.co_hosts': 1
+                    'stats.participants': 1  // Updated based on new schema
                 },
                 $set: { updated_at: new Date() }
             },
@@ -117,13 +103,14 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<any> 
 // Deactivate co-host invite token
 export const deactivateCoHostInvite = async (eventId: string, userId: string): Promise<any> => {
     try {
+        // Simply remove the co_host_invite_token from the event
         const updatedEvent = await Event.findByIdAndUpdate(
             eventId,
             {
-                $set: {
-                    'co_host_invite.is_active': false,
-                    updated_at: new Date()
-                }
+                $unset: {
+                    'co_host_invite_token': ""
+                },
+                $set: { updated_at: new Date() }
             },
             { new: true }
         );
@@ -238,7 +225,7 @@ export const manageCoHost = async (
                         [`co_hosts.${coHostIndex}.approved_by`]: new mongoose.Types.ObjectId(adminUserId),
                         updated_at: new Date()
                     },
-                    $inc: { 'stats.participants.co_hosts': -1 }
+                    $inc: { 'stats.participants': -1 }  // Updated based on new schema
                 };
                 message = 'Co-host removed successfully';
                 break;
@@ -279,7 +266,7 @@ export const manageCoHost = async (
 export const getEventCoHosts = async (eventId: string): Promise<any> => {
     try {
         const event = await Event.findById(eventId)
-            .select('title co_hosts created_by stats.participants.co_hosts')
+            .select('title co_hosts created_by stats.participants')  // Updated field selection
             .populate('co_hosts.user_id', 'name email avatar')
             .populate('co_hosts.invited_by', 'name email')
             .populate('co_hosts.approved_by', 'name email')
@@ -308,7 +295,6 @@ export const getEventCoHosts = async (eventId: string): Promise<any> => {
                 event_id: eventId,
                 event_title: event.title,
                 event_creator: event.created_by,
-                total_co_hosts: event.stats.participants.co_hosts,
                 co_hosts_by_status: coHostsByStatus,
                 summary: {
                     approved: coHostsByStatus.approved.length,
@@ -380,20 +366,20 @@ export const generateCoHostInviteToken = async (
             };
         }
 
-        // Generate unique token
-        const token = `cohost_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const expiresAt = new Date(Date.now() + (expiresInHours * 60 * 60 * 1000));
+        // Generate unique token - using format similar to your schema
+        const token = event.co_host_invite_token.token;
+        // const token = `coh_${eventId}_${Math.random().toString(36).substr(2, 6)}`;
 
-        // Update event with new co-host invite
+        // Update event with new co-host invite token - simplified structure
         const updatedEvent = await Event.findByIdAndUpdate(
             eventId,
             {
                 $set: {
-                    co_host_invite: {
+                    co_host_invite_token: {
                         token,
                         created_by: new mongoose.Types.ObjectId(createdBy),
                         created_at: new Date(),
-                        expires_at: expiresAt,
+                        expires_at: new Date(Date.now() + (expiresInHours * 60 * 60 * 1000)),
                         is_active: true,
                         max_uses: maxUses,
                         used_count: 0
@@ -412,22 +398,9 @@ export const generateCoHostInviteToken = async (
             };
         }
 
-        // Prepare response data
+        // Prepare simplified response data
         const responseData = {
             token,
-            created_by: {
-                _id: createdBy,
-                name: '', // You might want to populate this
-                email: ''
-            },
-            created_at: new Date().toISOString(),
-            expires_at: expiresAt.toISOString(),
-            is_active: true,
-            max_uses: maxUses,
-            used_count: 0,
-            is_expired: false,
-            is_max_used: false,
-            is_usable: true,
             invite_link: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/events/join-cohost/${token}`
         };
 
@@ -447,12 +420,12 @@ export const generateCoHostInviteToken = async (
     }
 };
 
-// Fixed getCoHostInviteDetails service
+// Simplified getCoHostInviteDetails service
 export const getCoHostInviteDetails = async (eventId: string): Promise<{ status: boolean, message: string, data: any }> => {
     try {
         const event = await Event.findById(eventId)
-            .select('co_host_invite title')
-            .populate('co_host_invite.created_by', 'name email');
+            .select('co_host_invite_token title')
+            .populate('co_host_invite_token.created_by', 'name email');
 
         if (!event) {
             return {
@@ -462,33 +435,25 @@ export const getCoHostInviteDetails = async (eventId: string): Promise<{ status:
             };
         }
 
-        if (!event.co_host_invite || !event.co_host_invite.is_active) {
+        if (!event.co_host_invite_token) {
             return {
                 status: true,
-                message: 'No active co-host invite found',
+                message: 'No co-host invite found',
                 data: {
-                    has_active_invite: false,
+                    has_invite: false,
                     event_title: event.title
                 }
             };
         }
 
-        const invite = event.co_host_invite;
-        const isExpired = new Date() > new Date(invite.expires_at);
-        const isMaxUsed = invite.used_count >= invite.max_uses;
+        const invite = event.co_host_invite_token;
 
         const responseData = {
-            has_active_invite: true,
+            has_invite: true,
             event_title: event.title,
             token: invite.token,
             created_by: invite.created_by,
             created_at: invite.created_at.toISOString(),
-            expires_at: invite.expires_at.toISOString(),
-            max_uses: invite.max_uses,
-            used_count: invite.used_count,
-            is_expired: isExpired,
-            is_max_used: isMaxUsed,
-            is_usable: !isExpired && !isMaxUsed && invite.is_active,
             invite_link: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/events/join-cohost/${invite.token}`
         };
 

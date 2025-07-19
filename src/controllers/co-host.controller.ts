@@ -21,24 +21,6 @@ export const generateCoHostInviteController = async (req: injectedRequest, res: 
             return;
         }
 
-        if (expires_in_hours < 1 || expires_in_hours > 168) {
-            res.status(400).json({
-                status: false,
-                message: 'Expiry hours must be between 1 and 168 (7 days)',
-                data: null
-            });
-            return;
-        }
-
-        if (max_uses < 1 || max_uses > 50) {
-            res.status(400).json({
-                status: false,
-                message: 'Max uses must be between 1 and 50',
-                data: null
-            });
-            return;
-        }
-
         const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
         if (!hasPermission) {
             res.status(403).json({
@@ -50,7 +32,7 @@ export const generateCoHostInviteController = async (req: injectedRequest, res: 
         }
 
         const response = await cohostService.generateCoHostInviteToken(event_id, userId, expires_in_hours, max_uses);
-
+        console.log('Co-host invite token generated:', response);
         // Ensure proper response structure
         if (response.status) {
             res.status(200).json(response);

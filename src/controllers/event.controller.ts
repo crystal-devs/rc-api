@@ -8,164 +8,111 @@ import * as eventService from "@services/event.service";
 import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
 import { createDefaultAlbumForEvent } from "@services/album.service";
-import { Event } from "@models/event.model";
+import { Event, EventType } from "@models/event.model";
 
-// ============= CORE EVENT OPERATIONS =============
+interface InjectedRequest extends Request {
+    user: {
+        _id: string;
+        [key: string]: any;
+    };
+}
+
+interface EventCreationInput {
+    title: string;
+    description?: string;
+    start_date?: string | Date;
+    end_date?: string | Date;
+    timezone?: string;
+    location?: {
+        name?: string;
+        address?: string;
+        coordinates?: [number, number];
+    };
+    cover_image?: {
+        url?: string;
+        public_id?: string;
+        thumbnail_url?: string;
+    };
+    template?: 'wedding' | 'birthday' | 'concert' | 'corporate' | 'vacation' | 'custom';
+    visibility?: 'anyone_with_link' | 'invited_only' | 'private';
+    permissions?: {
+        can_view?: boolean;
+        can_upload?: boolean;
+        can_download?: boolean;
+        allowed_media_types?: {
+            images?: boolean;
+            videos?: boolean;
+        };
+        require_approval?: boolean;
+    };
+    share_settings?: {
+        is_active?: boolean;
+        password?: string;
+        expires_at?: string | Date;
+    };
+    co_hosts?: Array<{
+        user_id: string | mongoose.Types.ObjectId;
+        invited_by: string | mongoose.Types.ObjectId;
+        status?: 'pending' | 'approved' | 'rejected';
+        permissions?: {
+            manage_content?: boolean;
+            manage_guests?: boolean;
+            manage_settings?: boolean;
+            approve_content?: boolean;
+        };
+    }>;
+}
 
 export const createEventController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
-        const {
-            title,
-            description,
-            start_date,
-            end_date,
-            timezone = "Asia/Kolkata",
-            location,
-            cover_image,
-            template = "custom",
-            privacy,
-            default_guest_permissions
-        } = trimObject(req.body);
+        // Validate req.user._id
+        if (!req.user || !req.user._id) {
+            console.error('createEventController: req.user or req.user._id is undefined');
+            throw new Error('User authentication required');
+        }
 
-        // Enhanced validation
-        if (!title?.trim()) throw new Error("Event title is required");
-        if (title.length > 100) throw new Error("Event title must be less than 100 characters");
-        if (description && description.length > 1000) throw new Error("Description must be less than 1000 characters");
+        console.log('createEventController: req.user._id =', req.user._id);
 
-        // Advanced date validation
+        const { title, template, start_date, end_date } = trimObject(req.body) as EventCreationInput;
+
+        // Validation
+        if (!title?.trim()) throw new Error('Event title is required');
+        if (title.length > 100) throw new Error('Event title must be less than 100 characters');
+
+        // Validate template
+        const validTemplates = ['wedding', 'birthday', 'concert', 'corporate', 'vacation', 'custom'];
+        if (!validTemplates.includes(template)) throw new Error('Invalid template type');
+
+        // Date validation
         const startDate = start_date ? new Date(start_date) : new Date();
         const endDate = end_date ? new Date(end_date) : null;
 
-        if (startDate && isNaN(startDate.getTime())) throw new Error("Invalid start date");
-        if (endDate && isNaN(endDate.getTime())) throw new Error("Invalid end date");
-        if (startDate && endDate && startDate >= endDate) throw new Error("End date must be after start date");
+        if (isNaN(startDate.getTime())) throw new Error('Invalid start date');
+        if (endDate && isNaN(endDate.getTime())) throw new Error('Invalid end date');
+        if (startDate && endDate && startDate >= endDate)
+            throw new Error('End date must be after start date');
 
-        // Generate unique event_code for easier sharing
-        const eventCode = await generateUniqueEventCode(template);
-
-        // Enhanced location processing
-        const locationObj = eventService.processLocationData(location);
-
-        // Enhanced cover image processing
-        const coverImageObj = eventService.processCoverImageData(cover_image, req.user._id.toString());
-
-        const eventData: eventService.EventCreationData = {
+        // Prepare event data (minimal, relying on schema defaults)
+        const eventData: Partial<EventType> = {
             title: title.trim(),
-            description: description?.trim() || "",
-            event_code: eventCode,
-            created_by: new mongoose.Types.ObjectId(req.user._id),
-
-            // Initialize empty co-hosts array
-            co_hosts: [] as any,
-            co_host_invite: null,
-
+            template,
+            created_by: new mongoose.Types.ObjectId(req.user._id), // Set created_by explicitly
             start_date: startDate,
             end_date: endDate,
-            timezone,
-
-            location: locationObj ? {
-                name: locationObj.name ?? "",
-                address: locationObj.address ?? "",
-                coordinates: locationObj.coordinates ?? []
-            } : {
-                name: "",
-                address: "",
-                coordinates: []
-            },
-
-            cover_image: coverImageObj ? {
-                url: coverImageObj.url ?? "",
-                public_id: coverImageObj.public_id ?? "",
-                uploaded_by: coverImageObj.uploaded_by ?? req.user._id,
-                thumbnail_url: (coverImageObj as any).thumbnail_url ?? "",
-                compressed_url: (coverImageObj as any).compressed_url ?? ""
-            } : {
-                url: "",
-                public_id: "",
-                uploaded_by: null,
-                thumbnail_url: "",
-                compressed_url: ""
-            },
-
-            template,
-
-            // Simplified privacy settings
-            privacy: {
-                visibility: privacy?.visibility || 'private',
-                guest_management: {
-                    require_approval: privacy?.guest_management?.require_approval ?? true,
-                    max_guests: privacy?.guest_management?.max_guests ?? 500,
-                    allow_anonymous: privacy?.guest_management?.allow_anonymous ?? (privacy?.visibility === 'unlisted'),
-                    auto_approve_invited: privacy?.guest_management?.auto_approve_invited ?? true,
-                    anonymous_transition_policy: privacy?.guest_management?.anonymous_transition_policy || 'grace_period',
-                    grace_period_hours: privacy?.guest_management?.grace_period_hours ?? 24,
-                    anonymous_content_policy: privacy?.guest_management?.anonymous_content_policy || 'preserve_and_transfer'
-                },
-                content_controls: {
-                    allow_downloads: privacy?.content_controls?.allow_downloads ?? true,
-                    allow_sharing: privacy?.content_controls?.allow_sharing ?? false,
-                    require_watermark: privacy?.content_controls?.require_watermark ?? false,
-                    approval_mode: privacy?.content_controls?.approval_mode || 'auto',
-                    auto_compress_uploads: privacy?.content_controls?.auto_compress_uploads ?? true,
-                    max_file_size_mb: privacy?.content_controls?.max_file_size_mb ?? 50,
-                    allowed_media_types: {
-                        images: privacy?.content_controls?.allowed_media_types?.images ?? true,
-                        videos: privacy?.content_controls?.allowed_media_types?.videos ?? true
-                    }
-                }
-            },
-
-            default_guest_permissions: {
-                view: default_guest_permissions?.view ?? true,
-                upload: default_guest_permissions?.upload ?? false,
-                download: default_guest_permissions?.download ?? false,
-                share: default_guest_permissions?.share ?? false,
-                create_albums: default_guest_permissions?.create_albums ?? false
-            },
-
-            anonymous_sessions: [] as any,
-
-            stats: {
-                participants: {
-                    total: 1,
-                    co_hosts: 0,
-                    anonymous_sessions: 0,
-                    registered_users: 1
-                },
-                content: {
-                    photos: 0,
-                    videos: 0,
-                    total_size_mb: 0,
-                    comments: 0,
-                    pending_approval: 0
-                },
-                engagement: {
-                    total_views: 0,
-                    unique_viewers: 0,
-                    average_session_duration: 0,
-                    last_activity: new Date()
-                },
-                sharing: {
-                    total_shares: 0,
-                    qr_scans: 0
-                }
-            },
-
-            created_at: new Date(),
-            updated_at: new Date(),
-            archived_at: null,
-            featured: false
+            // Other fields (description, timezone, location, cover_image, visibility, permissions, share_settings, co_hosts, stats)
+            // are omitted to use schema defaults
         };
+
+        console.log('createEventController: eventData.created_by =', eventData.created_by.toString());
 
         const response = await eventService.createEventService(eventData);
 
-        // Check if response has proper structure
         if (!response || typeof response.status === 'undefined') {
             console.error('Invalid response from createEventService:', response);
             res.status(500).json({
                 status: false,
                 message: 'Internal server error - invalid service response',
-                data: null
+                data: null,
             });
             return;
         }
@@ -175,7 +122,7 @@ export const createEventController = async (req: injectedRequest, res: Response,
             try {
                 await Promise.all([
                     createDefaultAlbumForEvent(response.data._id.toString(), req.user._id.toString()),
-                    eventService.addCreatorAsParticipant(response.data._id.toString(), req.user._id.toString())
+                    eventService.addCreatorAsParticipant(response.data._id.toString(), req.user._id.toString()),
                 ]);
             } catch (albumError) {
                 console.error('Error creating default album:', albumError);
@@ -183,22 +130,17 @@ export const createEventController = async (req: injectedRequest, res: Response,
             }
         }
 
-        // Send proper response
-        if (response.status) {
-            res.status(201).json(response);
-        } else {
-            res.status(400).json(response);
-        }
+        // Send response
+        res.status(response.status ? 201 : 400).json(response);
     } catch (error) {
         console.error('Error in createEventController:', error);
         res.status(500).json({
             status: false,
             message: error.message || 'Internal server error',
-            data: null
+            data: null,
         });
     }
 };
-
 
 // // Helper function to generate unique event code
 const generateUniqueEventCode = async (template: string): Promise<string> => {
@@ -272,106 +214,106 @@ export const getEventController = async (req: injectedRequest, res: Response, ne
 };
 
 export const updateEventController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
-    try {
-        const { event_id } = trimObject(req.params);
-        const userId = req.user._id.toString();
-        const updateData = trimObject(req.body);
+    // try {
+    //     const { event_id } = trimObject(req.params);
+    //     const userId = req.user._id.toString();
+    //     const updateData = trimObject(req.body);
 
-        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
-            res.status(400).json({
-                status: false,
-                message: 'Valid event ID is required',
-                data: null
-            });
-            return;
-        }
+    //     if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+    //         res.status(400).json({
+    //             status: false,
+    //             message: 'Valid event ID is required',
+    //             data: null
+    //         });
+    //         return;
+    //     }
 
-        // Validate update permissions
-        const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
-        if (!hasPermission) {
-            res.status(403).json({
-                status: false,
-                message: "You don't have permission to update this event",
-                data: null
-            });
-            return;
-        }
+    //     // Validate update permissions
+    //     const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
+    //     if (!hasPermission) {
+    //         res.status(403).json({
+    //             status: false,
+    //             message: "You don't have permission to update this event",
+    //             data: null
+    //         });
+    //         return;
+    //     }
 
-        // Get current event for visibility transition handling
-        const currentEvent = await Event.findById(event_id);
-        if (!currentEvent) {
-            res.status(404).json({
-                status: false,
-                message: 'Event not found',
-                data: null
-            });
-            return;
-        }
+    //     // Get current event for visibility transition handling
+    //     const currentEvent = await Event.findById(event_id);
+    //     if (!currentEvent) {
+    //         res.status(404).json({
+    //             status: false,
+    //             message: 'Event not found',
+    //             data: null
+    //         });
+    //         return;
+    //     }
 
-        // Define fields that can be updated
-        const fieldsToProcess = [
-            'title',
-            'description',
-            'start_date',
-            'end_date',
-            'location',
-            'privacy',
-            'default_guest_permissions'
-        ];
+    //     // Define fields that can be updated
+    //     const fieldsToProcess = [
+    //         'title',
+    //         'description',
+    //         'start_date',
+    //         'end_date',
+    //         'location',
+    //         'privacy',
+    //         'default_guest_permissions'
+    //     ];
 
-        // Process and validate update data
-        const processedUpdateData = await eventService.processEventUpdateData(updateData, fieldsToProcess);
+    //     // Process and validate update data
+    //     const processedUpdateData = await eventService.processEventUpdateData(updateData, fieldsToProcess);
 
-        // Handle visibility transitions if privacy is being updated
-        let transitionResult = null;
-        if (processedUpdateData.privacy?.visibility &&
-            processedUpdateData.privacy.visibility !== currentEvent.privacy.visibility) {
+    //     // Handle visibility transitions if privacy is being updated
+    //     let transitionResult = null;
+    //     if (processedUpdateData.privacy?.visibility &&
+    //         processedUpdateData.privacy.visibility !== currentEvent.privacy.visibility) {
 
-            try {
-                transitionResult = await eventService.handleVisibilityTransition(
-                    event_id,
-                    currentEvent.privacy.visibility,
-                    processedUpdateData.privacy.visibility,
-                    userId
-                );
-            } catch (transitionError) {
-                console.error('Error handling visibility transition:', transitionError);
-                // Continue with update even if transition handling fails
-            }
-        }
+    //         try {
+    //             transitionResult = await eventService.handleVisibilityTransition(
+    //                 event_id,
+    //                 currentEvent.privacy.visibility,
+    //                 processedUpdateData.privacy.visibility,
+    //                 userId
+    //             );
+    //         } catch (transitionError) {
+    //             console.error('Error handling visibility transition:', transitionError);
+    //             // Continue with update even if transition handling fails
+    //         }
+    //     }
 
-        const response = await eventService.updateEventService(event_id, processedUpdateData, userId);
+    //     const response = await eventService.updateEventService(event_id, processedUpdateData, userId);
 
-        // Check if response has proper structure
-        if (!response || typeof response.status === 'undefined') {
-            console.error('Invalid response from updateEventService:', response);
-            res.status(500).json({
-                status: false,
-                message: 'Internal server error - invalid service response',
-                data: null
-            });
-            return;
-        }
+    //     // Check if response has proper structure
+    //     if (!response || typeof response.status === 'undefined') {
+    //         console.error('Invalid response from updateEventService:', response);
+    //         res.status(500).json({
+    //             status: false,
+    //             message: 'Internal server error - invalid service response',
+    //             data: null
+    //         });
+    //         return;
+    //     }
 
-        // Include transition result in response if applicable
-        if (transitionResult) {
-            response.visibility_transition = transitionResult;
-        }
+    //     // Include transition result in response if applicable
+    //     if (transitionResult) {
+    //         response.visibility_transition = transitionResult;
+    //     }
 
-        // Send proper response
-        if (response.status) {
-            res.status(200).json(response);
-        } else {
-            res.status(400).json(response);
-        }
-    } catch (error) {
-        console.error('Error in updateEventController:', error);
-        res.status(500).json({
-            status: false,
-            message: error.message || 'Internal server error',
-            data: null
-        });
-    }
+    //     // Send proper response
+    //     if (response.status) {
+    //         res.status(200).json(response);
+    //     } else {
+    //         res.status(400).json(response);
+    //     }
+    // } catch (error) {
+    //     console.error('Error in updateEventController:', error);
+    //     res.status(500).json({
+    //         status: false,
+    //         message: error.message || 'Internal server error',
+    //         data: null
+    //     });
+    // }
 };
 
 

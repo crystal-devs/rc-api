@@ -986,7 +986,7 @@ export const inviteParticipantsService = async (data: {
                 role: p.role || 'guest',
                 invite_sent_at: new Date()
             },
-            permissions: p.permissions || event.default_guest_permissions || {
+            permissions: p.permissions || {
                 view: true,
                 upload: false,
                 download: false,

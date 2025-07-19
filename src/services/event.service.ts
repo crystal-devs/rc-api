@@ -17,60 +17,61 @@ export type EventType = typeof Event.schema extends mongoose.Schema<infer T> ? T
 
 // ============= CORE EVENT OPERATIONS =============
 
-export const createEventService = async (eventData: EventCreationData): Promise<ServiceResponse<EventType>> => {
+export const createEventService = async (
+    eventData: Partial<EventType>
+): Promise<ServiceResponse<EventType>> => {
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
         logger.info(`[createEventService] Creating event: ${eventData.title}`);
 
+        // Ensure created_by is set
+        if (!eventData.created_by) {
+            logger.error('[createEventService] created_by is undefined');
+            throw new Error('created_by is required');
+        }
+
+        logger.info(`[createEventService] eventData.created_by = ${eventData.created_by.toString()}`);
+
         // Create the event
         const event = await Event.create([eventData], { session });
-        if (!event[0]?._id || !eventData?.created_by) {
-            throw new Error("Invalid event creation result");
+        if (!event[0]?._id) {
+            throw new Error('Invalid event creation result');
         }
 
         const eventId = event[0]._id;
         const creatorId = eventData.created_by;
 
         // Create access control for owner
-        await AccessControl.create([{
-            resource_id: eventId,
-            resource_type: "event",
-            permissions: [{
-                user_id: creatorId,
-                role: "owner",
-            }],
-        }], { session });
-
-        // Add co-hosts to access control
-        if (eventData.co_hosts && eventData.co_hosts.length > 0) {
-            const coHostIds: mongoose.Types.ObjectId[] = eventData.co_hosts.map((id: any) =>
-                mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
-            );
-            const coHostPermissions = coHostIds.map((coHostId: mongoose.Types.ObjectId) => ({
-                resource_id: eventId,
-                resource_type: "event",
-                permissions: [{
-                    user_id: coHostId,
-                    role: "co_host",
-                }],
-            }));
-            await AccessControl.create(coHostPermissions, { session });
-        }
+        await AccessControl.create(
+            [
+                {
+                    resource_id: eventId,
+                    resource_type: 'event',
+                    permissions: [{ user_id: creatorId, role: 'owner' }],
+                },
+            ],
+            { session }
+        );
 
         // Create activity log
-        await ActivityLog.create([{
-            user_id: creatorId,
-            resource_id: eventId,
-            resource_type: "event",
-            action: "created",
-            details: {
-                event_title: eventData.title,
-                template: eventData.template,
-                privacy: eventData.privacy?.visibility
-            }
-        }], { session });
+        await ActivityLog.create(
+            [
+                {
+                    user_id: creatorId,
+                    resource_id: eventId,
+                    resource_type: 'event',
+                    action: 'created',
+                    details: {
+                        event_title: eventData.title,
+                        template: eventData.template,
+                        visibility: event[0].visibility, // Use created event's visibility (default: 'private')
+                    },
+                },
+            ],
+            { session }
+        );
 
         // Update user usage statistics
         await updateUsageForEventCreation(creatorId.toString(), eventId.toString(), session);
@@ -81,10 +82,10 @@ export const createEventService = async (eventData: EventCreationData): Promise<
         return {
             status: true,
             code: 201,
-            message: "Event created successfully",
-            data: event[0],
+            message: 'Event created successfully',
+            data: event[0] as EventType,
             error: null,
-            other: null
+            other: null,
         };
     } catch (error) {
         logger.error(`[createEventService] Error: ${error.message}`);
@@ -93,18 +94,20 @@ export const createEventService = async (eventData: EventCreationData): Promise<
         return {
             status: false,
             code: 500,
-            message: "Failed to create event",
+            message: 'Failed to create event',
             data: null,
             error: {
                 message: error.message,
-                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
             },
-            other: null
+            other: null,
         };
     } finally {
         await session.endSession();
     }
 };
+
+
 
 export const getUserEventsService = async (filters: {
     userId: string;
@@ -865,38 +868,20 @@ export const validateCoHosts = async (coHosts: string[]): Promise<mongoose.Types
     return existingUsers.map(user => user._id);
 };
 
-export const addCreatorAsParticipant = async (eventId: string, userId: string): Promise<void> => {
+export const addCreatorAsParticipant = async (
+    eventId: string,
+    userId: string,
+    session?: mongoose.ClientSession
+): Promise<void> => {
     try {
-        await EventParticipant.create({
-            event_id: new mongoose.Types.ObjectId(eventId),
-            user_id: new mongoose.Types.ObjectId(userId),
-            identity: {
-                is_registered_user: true,
-                is_anonymous: false
-            },
-            participation: {
-                status: 'active',
-                role: 'owner',
-                invited_at: new Date(),
-                first_joined_at: new Date(),
-                last_seen_at: new Date(),
-                total_sessions: 0
-            },
-            permissions: {
-                view: { enabled: true, albums: ['all'] },
-                upload: { enabled: true, albums: ['all'] },
-                download: { enabled: true, albums: ['all'] },
-                comment: { enabled: true },
-                share: { enabled: true, can_create_tokens: true },
-                moderate: {
-                    can_approve_content: true,
-                    can_remove_content: true,
-                    can_manage_guests: true
-                }
-            }
-        });
+        await Event.updateOne(
+            { _id: new mongoose.Types.ObjectId(eventId) },
+            { $inc: { 'stats.participants': 1 } },
+            { session }
+        );
     } catch (error) {
         logger.error(`[addCreatorAsParticipant] Error: ${error.message}`);
+        throw error;
     }
 };
 
@@ -1117,86 +1102,86 @@ export const handleVisibilityTransition = async (
     };
 
     // Handle transitions involving anonymous users
-    if (oldVisibility === 'unlisted' && (newVisibility === 'private' || newVisibility === 'restricted')) {
-        const anonymousCount = event.anonymous_sessions.length;
-        result.anonymous_users_affected = anonymousCount;
+    // if (oldVisibility === 'unlisted' && (newVisibility === 'private' || newVisibility === 'restricted')) {
+    //     const anonymousCount = event.anonymous_sessions.length;
+    //     result.anonymous_users_affected = anonymousCount;
 
-        if (anonymousCount > 0) {
-            const policy = event.privacy.guest_management.anonymous_transition_policy;
-            const graceHours = event.privacy.guest_management.grace_period_hours;
+    //     if (anonymousCount > 0) {
+    //         const policy = event.privacy.guest_management.anonymous_transition_policy;
+    //         const graceHours = event.privacy.guest_management.grace_period_hours;
 
-            switch (policy) {
-                case 'block_all':
-                    // Expire all sessions immediately
-                    await Event.updateOne(
-                        { _id: eventId },
-                        {
-                            $set: {
-                                'anonymous_sessions.$[].grace_period_expires': new Date()
-                            }
-                        }
-                    );
-                    result.actions_taken.push('All anonymous users blocked immediately');
-                    break;
+    //         switch (policy) {
+    //             case 'block_all':
+    //                 // Expire all sessions immediately
+    //                 await Event.updateOne(
+    //                     { _id: eventId },
+    //                     {
+    //                         $set: {
+    //                             'anonymous_sessions.$[].grace_period_expires': new Date()
+    //                         }
+    //                     }
+    //                 );
+    //                 result.actions_taken.push('All anonymous users blocked immediately');
+    //                 break;
 
-                case 'grace_period':
-                    // Set grace period for all sessions
-                    const graceExpiry = new Date(Date.now() + (graceHours * 60 * 60 * 1000));
-                    await Event.updateOne(
-                        { _id: eventId },
-                        {
-                            $set: {
-                                'anonymous_sessions.$[elem].grace_period_expires': graceExpiry
-                            }
-                        },
-                        {
-                            arrayFilters: [{ 'elem.grace_period_expires': { $exists: false } }]
-                        }
-                    );
-                    result.actions_taken.push(`${graceHours}h grace period set for ${anonymousCount} anonymous users`);
-                    break;
+    //             case 'grace_period':
+    //                 // Set grace period for all sessions
+    //                 const graceExpiry = new Date(Date.now() + (graceHours * 60 * 60 * 1000));
+    //                 await Event.updateOne(
+    //                     { _id: eventId },
+    //                     {
+    //                         $set: {
+    //                             'anonymous_sessions.$[elem].grace_period_expires': graceExpiry
+    //                         }
+    //                     },
+    //                     {
+    //                         arrayFilters: [{ 'elem.grace_period_expires': { $exists: false } }]
+    //                     }
+    //                 );
+    //                 result.actions_taken.push(`${graceHours}h grace period set for ${anonymousCount} anonymous users`);
+    //                 break;
 
-                case 'force_login':
-                    // Set 1 hour grace period and mark for notification
-                    const loginExpiry = new Date(Date.now() + (1 * 60 * 60 * 1000));
-                    await Event.updateOne(
-                        { _id: eventId },
-                        {
-                            $set: {
-                                'anonymous_sessions.$[].grace_period_expires': loginExpiry,
-                                'anonymous_sessions.$[].transition_notified': true
-                            }
-                        }
-                    );
-                    result.actions_taken.push(`Force login notification sent to ${anonymousCount} anonymous users`);
-                    break;
-            }
+    //             case 'force_login':
+    //                 // Set 1 hour grace period and mark for notification
+    //                 const loginExpiry = new Date(Date.now() + (1 * 60 * 60 * 1000));
+    //                 await Event.updateOne(
+    //                     { _id: eventId },
+    //                     {
+    //                         $set: {
+    //                             'anonymous_sessions.$[].grace_period_expires': loginExpiry,
+    //                             'anonymous_sessions.$[].transition_notified': true
+    //                         }
+    //                     }
+    //                 );
+    //                 result.actions_taken.push(`Force login notification sent to ${anonymousCount} anonymous users`);
+    //                 break;
+    //         }
 
-            // Update stats
-            await Event.updateOne(
-                { _id: eventId },
-                {
-                    $set: {
-                        'privacy.previous_visibility': oldVisibility,
-                        'privacy.visibility_changed_at': new Date()
-                    }
-                }
-            );
-        }
-    }
+    //         // Update stats
+    //         await Event.updateOne(
+    //             { _id: eventId },
+    //             {
+    //                 $set: {
+    //                     'privacy.previous_visibility': oldVisibility,
+    //                     'privacy.visibility_changed_at': new Date()
+    //                 }
+    //             }
+    //         );
+    //     }
+    // }
 
     // Handle other transition scenarios
-    if (newVisibility === 'unlisted' && oldVisibility !== 'unlisted') {
-        result.actions_taken.push('Event is now accessible via link without login');
-    }
+    // if (newVisibility === 'unlisted' && oldVisibility !== 'unlisted') {
+    //     result.actions_taken.push('Event is now accessible via link without login');
+    // }
 
-    if (newVisibility === 'restricted' && oldVisibility !== 'restricted') {
-        result.actions_taken.push('Event now requires approval for new guests');
-    }
+    // if (newVisibility === 'restricted' && oldVisibility !== 'restricted') {
+    //     result.actions_taken.push('Event now requires approval for new guests');
+    // }
 
-    if (newVisibility === 'private' && oldVisibility !== 'private') {
-        result.actions_taken.push('Event is now invitation-only');
-    }
+    // if (newVisibility === 'private' && oldVisibility !== 'private') {
+    //     result.actions_taken.push('Event is now invitation-only');
+    // }
 
     return result;
 };

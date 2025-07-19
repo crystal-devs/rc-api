@@ -5,7 +5,7 @@ import {
     eventAccessMiddleware, 
     requireGuestManagementAccess, 
     tokenBasedEventAccessMiddleware,
-    publicTokenAccessMiddleware
+    tokenAccessMiddleware
 } from "@middlewares/event-access.middleware";
 
 const shareTokenRouter = express.Router();
@@ -32,7 +32,7 @@ shareTokenRouter.post("/event/:event_id/tokens",
 
 // Get specific share token details
 shareTokenRouter.get("/:token_id", 
-    publicTokenAccessMiddleware,
+    tokenAccessMiddleware,
     shareTokenController.getShareTokenDetailsController
 );
 
