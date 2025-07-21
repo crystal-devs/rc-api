@@ -2,8 +2,6 @@
 import { AccessControl } from "@models/access.model";
 import { ActivityLog } from "@models/activity-log.model";
 import { Event } from "@models/event.model";
-import { EventParticipant } from "@models/event-participant.model";
-import { EventSession } from "@models/event-session.model";
 import { User } from "@models/user.model";
 import { MODEL_NAMES } from "@models/names";
 import { updateUsageForEventCreation, updateUsageForEventDeletion } from "@models/user-usage.model";
@@ -357,24 +355,100 @@ export const getUserEventsService = async (filters: {
 
 
 export const getEventDetailService = async (
-    eventId: string,
-    userId: string
+    identifier: string, // Can be eventId, share_token, or co_host_invite_token
+    userId: string,
+    tokenType?: 'share_token' | 'co_host_invite_token' // Optional hint about token type
 ): Promise<ServiceResponse<EventType & { user_role?: string; user_permissions?: Record<string, boolean> | null }>> => {
     try {
-        // Validate inputs
-        if (!mongoose.Types.ObjectId.isValid(eventId) || !mongoose.Types.ObjectId.isValid(userId)) {
+        // Validate userId
+        if (!mongoose.Types.ObjectId.isValid(userId)) {
             return {
                 status: false,
                 code: 400,
-                message: 'Invalid event ID or user ID',
+                message: 'Invalid user ID',
                 data: null,
                 error: { message: 'Invalid ObjectId format' },
                 other: null,
             };
         }
 
+        // Build match condition based on identifier type
+        let matchCondition: any;
+        
+        if (mongoose.Types.ObjectId.isValid(identifier)) {
+            // It's a valid ObjectId, treat as eventId
+            matchCondition = { _id: new mongoose.Types.ObjectId(identifier) };
+        } else if (identifier.startsWith('evt_')) {
+            // It's a share token
+            matchCondition = { share_token: identifier };
+        } else if (identifier.startsWith('coh_')) {
+            // It's a co-host invite token
+            matchCondition = { 'co_host_invite_token.token': identifier };
+        } else {
+            // Try to determine by tokenType hint or default to share_token
+            if (tokenType === 'co_host_invite_token') {
+                matchCondition = { 'co_host_invite_token.token': identifier };
+            } else {
+                matchCondition = { share_token: identifier };
+            }
+        }
+
         const pipeline: mongoose.PipelineStage[] = [
-            { $match: { _id: new mongoose.Types.ObjectId(eventId) } },
+            { $match: matchCondition },
+
+            // Check token validity and access permissions
+            {
+                $addFields: {
+                    token_access: {
+                        $cond: {
+                            if: { $ne: ['$share_token', identifier] },
+                            then: {
+                                // Check co-host invite token
+                                $cond: {
+                                    if: {
+                                        $and: [
+                                            { $eq: ['$co_host_invite_token.token', identifier] },
+                                            { $eq: ['$co_host_invite_token.is_active', true] },
+                                            { $gt: ['$co_host_invite_token.expires_at', new Date()] },
+                                        ],
+                                    },
+                                    then: 'co_host_invite',
+                                    else: 'none',
+                                },
+                            },
+                            else: {
+                                // Check share token access
+                                $cond: {
+                                    if: {
+                                        $and: [
+                                            { $eq: ['$share_settings.is_active', true] },
+                                            {
+                                                $or: [
+                                                    { $eq: ['$share_settings.expires_at', null] },
+                                                    { $gt: ['$share_settings.expires_at', new Date()] },
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    then: 'share_token',
+                                    else: 'expired',
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+
+            // Filter out events with invalid token access (unless user is owner/co-host)
+            {
+                $match: {
+                    $or: [
+                        { created_by: new mongoose.Types.ObjectId(userId) }, // Owner access
+                        { 'co_hosts.user_id': new mongoose.Types.ObjectId(userId) }, // Co-host access
+                        { token_access: { $in: ['share_token', 'co_host_invite'] } }, // Valid token access
+                    ],
+                },
+            },
 
             // Get creator details
             {
@@ -387,92 +461,71 @@ export const getEventDetailService = async (
                 },
             },
 
-            // Get co-hosts details
+            // Get co-hosts details (only approved ones for non-owners)
             {
                 $lookup: {
                     from: MODEL_NAMES.USER,
-                    localField: 'co_hosts.user_id',
-                    foreignField: '_id',
-                    as: 'co_hosts_info',
-                    pipeline: [{ $project: { name: 1, email: 1, avatar_url: 1 } }],
-                },
-            },
-
-            // Get participants summary
-            {
-                $lookup: {
-                    from: MODEL_NAMES.EVENT_PARTICIPANT,
-                    localField: '_id',
-                    foreignField: 'event_id',
-                    as: 'participants_summary',
+                    let: { 
+                        coHostUserIds: '$co_hosts.user_id',
+                        isOwner: { $eq: ['$created_by', new mongoose.Types.ObjectId(userId)] }
+                    },
                     pipeline: [
                         {
-                            $group: {
-                                _id: '$participation.status',
-                                count: { $sum: 1 },
-                                recent_participants: {
-                                    $push: {
-                                        $cond: [
-                                            {
-                                                $lt: [
-                                                    '$participation.joined_at',
-                                                    new Date(Date.now() - 24 * 60 * 60 * 1000),
-                                                ],
-                                            },
-                                            null,
-                                            {
-                                                name: '$identity.name',
-                                                avatar: '$identity.avatar_url',
-                                                joined_at: '$participation.joined_at',
-                                            },
-                                        ],
-                                    },
-                                },
-                            },
+                            $match: {
+                                $expr: { $in: ['$_id', '$$coHostUserIds'] }
+                            }
                         },
+                        { $project: { name: 1, email: 1, avatar_url: 1 } }
                     ],
+                    as: 'co_hosts_info',
                 },
             },
 
-            // Get albums
+
+
+            // Get albums (respect privacy settings)
             {
                 $lookup: {
                     from: MODEL_NAMES.ALBUM,
-                    localField: '_id',
-                    foreignField: 'event_id',
-                    as: 'albums_detail',
-                    pipeline: [
-                        {
-                            $project: {
-                                name: 1,
-                                description: 1,
-                                cover_photo: 1,
-                                photo_count: 1,
-                                is_private: 1,
-                                created_at: 1,
-                            },
-                        },
-                        { $sort: { created_at: 1 } },
-                    ],
-                },
-            },
-
-            // Get AccessControl permissions (optional, for non-creator/co-host roles)
-            {
-                $lookup: {
-                    from: MODEL_NAMES.ACCESS_CONTROL,
-                    let: { eventId: '$_id' },
+                    let: { 
+                        eventId: '$_id',
+                        isOwnerOrCoHost: {
+                            $or: [
+                                { $eq: ['$created_by', new mongoose.Types.ObjectId(userId)] },
+                                {
+                                    $and: [
+                                        { $in: [new mongoose.Types.ObjectId(userId), '$co_hosts.user_id'] },
+                                        {
+                                            $eq: [
+                                                {
+                                                    $arrayElemAt: [
+                                                        '$co_hosts.status',
+                                                        {
+                                                            $indexOfArray: [
+                                                                '$co_hosts.user_id',
+                                                                new mongoose.Types.ObjectId(userId),
+                                                            ],
+                                                        },
+                                                    ],
+                                                },
+                                                'approved',
+                                            ],
+                                        },
+                                    ],
+                                },
+                            ],
+                        }
+                    },
                     pipeline: [
                         {
                             $match: {
                                 $expr: {
                                     $and: [
-                                        { $eq: ['$resource_id', '$$eventId'] },
-                                        { $eq: ['$resource_type', 'event'] },
+                                        { $eq: ['$event_id', '$$eventId'] },
                                         {
-                                            $eq: [
-                                                '$permissions.user_id',
-                                                new mongoose.Types.ObjectId(userId),
+                                            $or: [
+                                                '$$isOwnerOrCoHost', // Owner/co-host can see all albums
+                                                { $eq: ['$is_private', false] }, // Others can see public albums
                                             ],
                                         },
                                     ],
@@ -481,41 +534,57 @@ export const getEventDetailService = async (
                         },
                         {
                             $project: {
-                                role: {
-                                    $arrayElemAt: [
-                                        {
-                                            $map: {
-                                                input: {
-                                                    $filter: {
-                                                        input: '$permissions',
-                                                        cond: {
-                                                            $eq: [
-                                                                '$$this.user_id',
-                                                                new mongoose.Types.ObjectId(userId),
-                                                            ],
-                                                        },
-                                                    },
-                                                },
-                                                as: 'perm',
-                                                in: '$$perm.role',
-                                            },
-                                        },
-                                        0,
-                                    ],
-                                },
+                                name: 1,
+                                description: 1,
+                                cover_photo: 1,
+                                photo_count: 1,
+                                created_at: 1,
                             },
                         },
+                        { $sort: { created_at: 1 } },
                     ],
-                    as: 'user_access',
+                    as: 'albums_detail',
                 },
             },
 
-            // Format the response
+            // Format the response with proper role and permissions
             {
                 $addFields: {
                     creator: { $arrayElemAt: ['$creator_info', 0] },
-                    co_hosts: '$co_hosts_info',
+                    co_hosts: {
+                        $map: {
+                            input: {
+                                $filter: {
+                                    input: {
+                                        $zip: {
+                                            inputs: ['$co_hosts', '$co_hosts_info'],
+                                        },
+                                    },
+                                    cond: {
+                                        $or: [
+                                            { $eq: ['$created_by', new mongoose.Types.ObjectId(userId)] }, // Owner sees all
+                                            { 
+                                                $eq: [
+                                                    { $getField: { field: 'status', input: { $arrayElemAt: ['$this', 0] } } }, 
+                                                    'approved'
+                                                ] 
+                                            }, // Others see only approved
+                                        ],
+                                    },
+                                },
+                            },
+                            as: 'coHostPair',
+                            in: {
+                                $mergeObjects: [
+                                    { $arrayElemAt: ['$coHostPair', 0] }, // co-host data
+                                    { $arrayElemAt: ['$coHostPair', 1] }, // user info
+                                ],
+                            },
+                        },
+                    },
                     albums: '$albums_detail',
+                    
+                    // Determine user role based on new logic
                     user_role: {
                         $cond: {
                             if: { $eq: ['$created_by', new mongoose.Types.ObjectId(userId)] },
@@ -549,11 +618,25 @@ export const getEventDetailService = async (
                                         ],
                                     },
                                     then: 'co_host',
-                                    else: { $ifNull: [{ $arrayElemAt: ['$user_access.role', 0] }, null] },
+                                    else: {
+                                        $cond: {
+                                            if: { $eq: ['$token_access', 'co_host_invite'] },
+                                            then: 'co_host_invite',
+                                            else: {
+                                                $cond: {
+                                                    if: { $eq: ['$token_access', 'share_token'] },
+                                                    then: 'participant',
+                                                    else: 'guest',
+                                                },
+                                            },
+                                        },
+                                    },
                                 },
                             },
                         },
                     },
+                    
+                    // Set user permissions based on role and event permissions
                     user_permissions: {
                         $cond: {
                             if: { $eq: ['$created_by', new mongoose.Types.ObjectId(userId)] },
@@ -562,43 +645,93 @@ export const getEventDetailService = async (
                                 manage_guests: true,
                                 manage_settings: true,
                                 approve_content: true,
+                                can_view: true,
+                                can_upload: true,
+                                can_download: true,
                             },
                             else: {
                                 $cond: {
                                     if: {
-                                        $in: [
-                                            new mongoose.Types.ObjectId(userId),
-                                            '$co_hosts.user_id',
-                                        ],
-                                    },
-                                    then: {
-                                        $arrayElemAt: [
-                                            '$co_hosts.permissions',
+                                        $and: [
                                             {
-                                                $indexOfArray: [
-                                                    '$co_hosts.user_id',
+                                                $in: [
                                                     new mongoose.Types.ObjectId(userId),
+                                                    '$co_hosts.user_id',
+                                                ],
+                                            },
+                                            {
+                                                $eq: [
+                                                    {
+                                                        $arrayElemAt: [
+                                                            '$co_hosts.status',
+                                                            {
+                                                                $indexOfArray: [
+                                                                    '$co_hosts.user_id',
+                                                                    new mongoose.Types.ObjectId(userId),
+                                                                ],
+                                                            },
+                                                        ],
+                                                    },
+                                                    'approved',
                                                 ],
                                             },
                                         ],
                                     },
-                                    else: null,
+                                    then: {
+                                        $mergeObjects: [
+                                            {
+                                                $arrayElemAt: [
+                                                    '$co_hosts.permissions',
+                                                    {
+                                                        $indexOfArray: [
+                                                            '$co_hosts.user_id',
+                                                            new mongoose.Types.ObjectId(userId),
+                                                        ],
+                                                    },
+                                                ],
+                                            },
+                                            {
+                                                can_view: true,
+                                                can_upload: true,
+                                                can_download: true,
+                                            },
+                                        ],
+                                    },
+                                    else: {
+                                        $cond: {
+                                            if: { $eq: ['$token_access', 'co_host_invite'] },
+                                            then: {
+                                                manage_content: false,
+                                                manage_guests: false,
+                                                manage_settings: false,
+                                                approve_content: false,
+                                                can_view: true,
+                                                can_upload: false,
+                                                can_download: false,
+                                            },
+                                            else: '$permissions', // Use event's default permissions for participants
+                                        },
+                                    },
                                 },
                             },
                         },
                     },
+                    
+                    // Participant statistics
                     participants_stats: {
                         $arrayToObject: {
                             $map: {
                                 input: '$participants_summary',
                                 as: 'stat',
                                 in: {
-                                    k: '$stat._id',
-                                    v: '$stat.count',
+                                    k: '$$stat._id',
+                                    v: '$$stat.count',
                                 },
                             },
                         },
                     },
+                    
+                    // Recent joiners (only non-null entries)
                     recent_joiners: {
                         $reduce: {
                             input: '$participants_summary.recent_participants',
@@ -607,11 +740,10 @@ export const getEventDetailService = async (
                                 $concatArrays: [
                                     '$$value',
                                     {
-                                        $cond: [
-                                            { $eq: ['$$this', null] },
-                                            [],
-                                            ['$$this'],
-                                        ],
+                                        $filter: {
+                                            input: ['$$this'],
+                                            cond: { $ne: ['$$this', null] },
+                                        },
                                     },
                                 ],
                             },
@@ -627,7 +759,7 @@ export const getEventDetailService = async (
                     co_hosts_info: 0,
                     albums_detail: 0,
                     participants_summary: 0,
-                    user_access: 0,
+                    token_access: 0,
                 },
             },
         ];
@@ -639,15 +771,52 @@ export const getEventDetailService = async (
             return {
                 status: false,
                 code: 404,
-                message: 'Event not found',
+                message: 'Event not found or access denied',
                 data: null,
                 error: null,
                 other: null,
             };
         }
 
+        // Handle co-host invite token usage
+        if (identifier.startsWith('coh_') && event.user_role === 'co_host_invite') {
+            // Check if user is already a co-host
+            const existingCoHost = event.co_hosts?.find(
+                (coHost: any) => coHost.user_id.toString() === userId
+            );
+            
+            if (!existingCoHost) {
+                // Add user as pending co-host
+                await Event.findByIdAndUpdate(
+                    event._id,
+                    {
+                        $push: {
+                            co_hosts: {
+                                user_id: new mongoose.Types.ObjectId(userId),
+                                invited_by: event.co_host_invite_token.created_by,
+                                status: 'pending',
+                                permissions: {
+                                    manage_content: true,
+                                    manage_guests: true,
+                                    manage_settings: true,
+                                    approve_content: true,
+                                },
+                                invited_at: new Date(),
+                            },
+                        },
+                        $inc: {
+                            'co_host_invite_token.used_count': 1,
+                        },
+                    }
+                );
+                
+                // Update user role to reflect pending status
+                event.user_role = 'co_host_pending';
+            }
+        }
+
         // Record view activity
-        await recordEventActivity(eventId, userId, 'viewed');
+        await recordEventActivity(event._id.toString(), userId, 'viewed');
 
         return {
             status: true,
@@ -727,12 +896,6 @@ export const deleteEventService = async (
                 resource_id: new mongoose.Types.ObjectId(eventId),
                 resource_type: "event"
             }, { session }),
-
-            // Delete participants
-            EventParticipant.deleteMany({ event_id: new mongoose.Types.ObjectId(eventId) }, { session }),
-
-            // Delete sessions
-            EventSession.deleteMany({ event_id: new mongoose.Types.ObjectId(eventId) }, { session })
         ]);
 
         // Log deletion activity

@@ -207,6 +207,7 @@ export const getEventController = async (req: injectedRequest, res: Response, ne
         }
 
         const response = await eventService.getEventDetailService(event_id, userId);
+        console.log('===== GET EVENT DETAIL REQUEST =====', response);
         sendResponse(res, response);
     } catch (error) {
         next(error);
