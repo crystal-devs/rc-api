@@ -105,26 +105,155 @@ export const uploadCoverImageController: RequestHandler = async (req: injectedRe
 /**
  * Get all media for a specific event
  */
-export const getMediaByEventController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+export const getMediaByEventController: RequestHandler = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
     try {
         const { event_id } = req.params;
+        const userId = req.user?._id?.toString();
 
-        // Validate event_id
+        // Validate event_id first
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
             res.status(400).json({
                 status: false,
-                message: "Invalid event ID",
-                error: { message: "A valid event ID is required" },
+                code: 400,
+                message: 'Invalid or missing event ID',
+                data: null,
+                error: { message: 'A valid event ID is required' },
+                other: null
             });
             return;
         }
 
-        // Fetch media for the event
-        const response = await getMediaByEventService(event_id);
-        sendResponse(res, response);
-    } catch (_err) {
-        console.error('Error in getMediaByEventController:', _err);
-        next(_err);
+        // Extract and validate query parameters
+        const {
+            include_processing,
+            include_pending,
+            page,
+            limit,
+            quality,
+            since,
+        } = req.query;
+
+        // Parse and validate query parameters with proper defaults
+        const options: {
+            includeProcessing?: boolean;
+            includePending?: boolean;
+            page?: number;
+            limit?: number;
+            quality?: 'thumbnail' | 'display' | 'full';
+            since?: string;
+        } = {};
+
+        // Handle boolean parameters - only set if explicitly provided
+        if (include_processing !== undefined) {
+            options.includeProcessing = include_processing === 'true';
+        }
+
+        if (include_pending !== undefined) {
+            options.includePending = include_pending === 'true';
+        }
+
+        // Handle numeric parameters with validation
+        if (page) {
+            const pageNum = parseInt(page as string, 10);
+            if (isNaN(pageNum) || pageNum < 1) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid page number',
+                    data: null,
+                    error: { message: 'Page must be a positive integer' },
+                    other: null
+                });
+                return;
+            }
+            options.page = pageNum;
+        }
+
+        if (limit) {
+            const limitNum = parseInt(limit as string, 10);
+            if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid limit',
+                    data: null,
+                    error: { message: 'Limit must be between 1 and 100' },
+                    other: null
+                });
+                return;
+            }
+            options.limit = limitNum;
+        }
+
+        // Handle quality parameter
+        if (quality) {
+            const validQualities = ['thumbnail', 'display', 'full'];
+            if (!validQualities.includes(quality as string)) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid quality parameter',
+                    data: null,
+                    error: { message: 'Quality must be one of: thumbnail, display, full' },
+                    other: null
+                });
+                return;
+            }
+            options.quality = quality as 'thumbnail' | 'display' | 'full';
+        }
+
+        // Handle since parameter
+        if (since) {
+            const sinceDate = new Date(since as string);
+            if (isNaN(sinceDate.getTime())) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid date format for since parameter',
+                    data: null,
+                    error: { message: 'Since parameter must be a valid ISO date string' },
+                    other: null
+                });
+                return;
+            }
+            options.since = since as string;
+        }
+
+        console.log('Controller: Fetching media for event:', {
+            event_id,
+            options,
+            userId
+        });
+
+        // Call service
+        const response = await getMediaByEventService(event_id, options, userId);
+
+        // Send response
+        res.status(response.code).json(response);
+
+    } catch (err: any) {
+        console.error('Error in getMediaByEventController:', {
+            message: err.message,
+            stack: err.stack,
+            params: req.params,
+            query: req.query
+        });
+
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Internal server error',
+            data: null,
+            error: {
+                message: 'An unexpected error occurred',
+                details: process.env.NODE_ENV === 'development' ? err.message : undefined
+            },
+            other: null
+        });
     }
 };
 

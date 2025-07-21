@@ -1,1266 +1,1400 @@
-import { ShareToken, ShareTokenCreationType } from "@models/share-token.model";
+// services/share-token.service.ts
+
 import { ServiceResponse } from "types/service.types";
 import mongoose from "mongoose";
-import bcrypt from "bcryptjs";
+import * as crypto from 'crypto';
 import { Event } from "@models/event.model";
-import { Media } from "@models/media.model";
-import { User } from "@models/user.model";
+import { ActivityLog } from "@models/activity-log.model";
+import { EventParticipant } from "@models/event-participant.model";
 import { logger } from "@utils/logger";
+import { ShareToken, ShareTokenType } from "@models/share-token.model";
+import { MODEL_NAMES } from "@models/names";
 
-/**
- * Create a new share token for an event or album
- */
-export const createShareTokenService = async (
-    tokenData: {
-        event_id: string;
-        album_id?: string;
-        permissions: {
-            view: boolean;
-            upload: boolean;
-            download: boolean;
-            share: boolean;
-        };
-        expires_at?: Date;
-        password?: string;
-        is_restricted_to_guests?: boolean;
-        invited_guests?: string[];  // List of email addresses
-    },
-    user_id: string
-): Promise<ServiceResponse<any>> => {
+// ============= SHARE TOKEN MANAGEMENT SERVICES =============
+
+export const getEventShareTokensService = async (filters: {
+    eventId: string;
+    requesterId: string;
+    page: number;
+    limit: number;
+    type: string;
+    status: string;
+}): Promise<ServiceResponse<any>> => {
     try {
-        logger.info("Creating share token with data:", {
-            event_id: tokenData.event_id,
-            album_id: tokenData.album_id,
-            permissions: tokenData.permissions,
-            expires_at: tokenData.expires_at,
-            has_password: !!tokenData.password,
-            is_restricted_to_guests: tokenData.is_restricted_to_guests,
-            invited_guests_count: tokenData.invited_guests?.length || 0,
-            user_id
-        });
-        // Process the password if provided
-        let password_hash = null;
-        if (tokenData.password) {
-            password_hash = await bcrypt.hash(tokenData.password, 10);
+        const { eventId, page, limit, type, status } = filters;
+
+        const pipeline: any[] = [
+            { $match: { event_id: new mongoose.Types.ObjectId(eventId) } }
+        ];
+
+        // Apply filters
+        const matchConditions: any = {};
+
+        if (status === 'active') {
+            matchConditions.revoked = false;
+            matchConditions.$or = [
+                { 'restrictions.expires_at': null },
+                { 'restrictions.expires_at': { $gt: new Date() } }
+            ];
+        } else if (status === 'expired') {
+            matchConditions.revoked = false;
+            matchConditions['restrictions.expires_at'] = { $lt: new Date() };
+        } else if (status === 'revoked') {
+            matchConditions.revoked = true;
         }
 
-        // Create token data
-        const shareTokenData: any = {
-            event_id: new mongoose.Types.ObjectId(tokenData.event_id),
-            created_by: new mongoose.Types.ObjectId(user_id),
-            permissions: {
-                view: tokenData.permissions.view ?? true,
-                upload: tokenData.permissions.upload ?? false,
-                download: tokenData.permissions.download ?? false,
-                share: tokenData.permissions.share ?? false,
+        if (type !== 'all') {
+            matchConditions.token_type = type;
+        }
+
+        if (Object.keys(matchConditions).length > 0) {
+            pipeline.push({ $match: matchConditions });
+        }
+
+        // Add creator details
+        pipeline.push(
+            {
+                $lookup: {
+                    from: MODEL_NAMES.USER,
+                    localField: "created_by",
+                    foreignField: "_id",
+                    as: "creator_info",
+                    pipeline: [
+                        { $project: { name: 1, email: 1, avatar_url: 1 } }
+                    ]
+                }
             },
-            expires_at: tokenData.expires_at || null,
-            password_hash,
-        };
-
-        // Add album_id if provided
-        if (tokenData.album_id) {
-            shareTokenData.album_id = new mongoose.Types.ObjectId(tokenData.album_id);
-        }
-
-        // Set guest access options if provided
-        if (tokenData.is_restricted_to_guests) {
-            shareTokenData.is_restricted_to_guests = true;
-            
-            // If we have invited guests, set them up
-            if (Array.isArray(tokenData.invited_guests) && tokenData.invited_guests.length > 0) {
-                // Normalize and deduplicate emails
-                const emailsMap: {[key: string]: boolean} = {};
-                const uniqueEmails = tokenData.invited_guests
-                    .filter(email => email && typeof email === 'string')
-                    .map(email => email.toLowerCase().trim())
-                    .filter(email => {
-                        if (emailsMap[email]) return false;
-                        emailsMap[email] = true;
-                        return true;
-                    });
-                
-                shareTokenData.invited_guests = uniqueEmails.map(email => ({
-                    email: email,
-                    invited_at: new Date(),
-                    accessed_at: null as Date | null,
-                    user_id: null as mongoose.Types.ObjectId | null
-                }));
-                
-                logger.info(`Added ${uniqueEmails.length} guests to new share token`);
-            }
-        }
-
-        // Create the share token
-        const shareToken = await ShareToken.create(shareTokenData);
-        
-        // Update the event's sharing status
-        await updateEventSharingStatus(tokenData.event_id);
-        
-        logger.info("Share token created successfully:", {
-            id: shareToken._id.toString(),
-            token: shareToken.token,
-            event_id: shareToken.event_id.toString()
-        });
-
-        // Format response to match frontend expectations
-        return {
-            status: true,
-            code: 201,
-            message: "Share token created successfully",
-            data: {
-                id: shareToken._id.toString(),
-                token: shareToken.token,
-                eventId: shareToken.event_id.toString(),
-                albumId: shareToken.album_id?.toString() || null,
-                permissions: {
-                    view: shareToken.permissions.view,
-                    upload: shareToken.permissions.upload,
-                    download: shareToken.permissions.download,
-                    share: shareToken.permissions.share
-                },
-                createdAt: shareToken.created_at,
-                expiresAt: shareToken.expires_at,
-                createdById: shareToken.created_by.toString(),
-                usageCount: shareToken.usage_count,
-                isPasswordProtected: !!shareToken.password_hash
-            },
-            error: null,
-            other: null,
-        };
-    } catch (err: any) {
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to create share token",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
-        };
-    }
-};
-
-/**
- * Validate a share token
- */
-export const validateShareTokenService = async (
-    tokenValue: string,
-    password?: string,
-    user_id?: string  // Added user_id parameter to check for guest access
-): Promise<ServiceResponse<any>> => {
-    try {
-        // Find the token
-        const token = await ShareToken.findOne({ token: tokenValue });
-
-        // Check if token exists
-        if (!token) {
-            return {
-                status: false,
-                code: 404,
-                message: "Invalid share token",
-                data: null,
-                error: { message: "The provided share token does not exist" },
-                other: null,
-            };
-        }
-
-        // Check if token is revoked
-        if (token.revoked) {
-            return {
-                status: false,
-                code: 403,
-                message: "Share token has been revoked",
-                data: null,
-                error: { message: "This share token has been revoked" },
-                other: null,
-            };
-        }
-
-        // Check if token is expired
-        if (token.expires_at && new Date() > token.expires_at) {
-            return {
-                status: false,
-                code: 403,
-                message: "Share token has expired",
-                data: null,
-                error: { message: "This share token has expired" },
-                other: null,
-            };
-        }
-        
-        // Check for guest-only access restriction
-        if (token.is_restricted_to_guests) {
-            // If no user ID is provided, can't verify guest status
-            if (!user_id) {
-                return {
-                    status: false,
-                    code: 401,
-                    message: "Authentication required",
-                    data: null,
-                    error: { 
-                        message: "This shared resource is restricted to invited guests only. Please log in."
+            {
+                $addFields: {
+                    creator: { $arrayElemAt: ["$creator_info", 0] },
+                    is_expired: {
+                        $and: [
+                            { $ne: ["$restrictions.expires_at", null] },
+                            { $lt: ["$restrictions.expires_at", new Date()] }
+                        ]
                     },
-                    other: { requires_authentication: true },
-                };
-            }
-            
-            // If the user is the creator, they always have access
-            if (token.created_by.toString() !== user_id) {
-                // Check if user is in invited guests
-                const user = await User.findById(user_id);
-                
-                if (!user || !user.email) {
-                    return {
-                        status: false,
-                        code: 403,
-                        message: "User not authenticated properly",
-                        data: null,
-                        error: { 
-                            message: "Unable to verify your identity. Please log in again."
-                        },
-                        other: { requires_authentication: true },
-                    };
-                }
-                
-                // Check if user's email is in the invited guests list
-                const isInvited = token.invited_guests.some(guest => 
-                    guest.email.toLowerCase() === user.email.toLowerCase()
-                );
-                
-                if (!isInvited) {
-                    return {
-                        status: false,
-                        code: 403,
-                        message: "Access denied",
-                        data: null,
-                        error: { message: "You are not on the guest list for this shared resource" },
-                        other: null,
-                    };
-                }
-                
-                // Update the accessed_at timestamp and user_id for this guest
-                for (const guest of token.invited_guests) {
-                    if (guest.email.toLowerCase() === user.email.toLowerCase()) {
-                        guest.accessed_at = new Date();
-                        guest.user_id = new mongoose.Types.ObjectId(user_id);
-                        break;
+                    usage_percentage: {
+                        $cond: [
+                            { $eq: ["$restrictions.max_uses", null] },
+                            0,
+                            {
+                                $multiply: [
+                                    { $divide: ["$usage.count", "$restrictions.max_uses"] },
+                                    100
+                                ]
+                            }
+                        ]
                     }
                 }
-                
-                await token.save();
+            },
+            {
+                $project: {
+                    creator_info: 0
+                }
             }
-        }
+        );
 
-        // Check password if token is password protected
-        if (token.password_hash) {
-            if (!password) {
-                return {
-                    status: false,
-                    code: 401,
-                    message: "Password required",
-                    data: null,
-                    error: { message: "This share token is password protected" },
-                    other: { requiresPassword: true },
-                };
-            }
+        // Count total
+        const countPipeline = [...pipeline, { $count: "total" }];
+        const totalResult = await ShareToken.aggregate(countPipeline);
+        const total = totalResult[0]?.total || 0;
 
-            const isPasswordValid = await bcrypt.compare(password, token.password_hash);
-            if (!isPasswordValid) {
-                return {
-                    status: false,
-                    code: 401,
-                    message: "Invalid password",
-                    data: null,
-                    error: { message: "The password provided is incorrect" },
-                    other: { requiresPassword: true },
-                };
-            }
-        }
+        // Add sorting and pagination
+        pipeline.push(
+            { $sort: { created_at: -1 } },
+            { $skip: (page - 1) * limit },
+            { $limit: limit }
+        );
 
-        // Increment usage count
-        token.usage_count += 1;
-        await token.save();
+        const tokens = await ShareToken.aggregate(pipeline);
 
-        // Return token details
-        return {
-            status: true,
-            code: 200,
-            message: "Share token validated successfully",
-            data: {
-                id: token._id.toString(),
-                token: token.token,
-                eventId: token.event_id.toString(),
-                albumId: token.album_id?.toString() || null,
-                permissions: token.permissions,
-                createdAt: token.created_at,
-                expiresAt: token.expires_at,
-                createdById: token.created_by.toString(),
-                usageCount: token.usage_count
-            },
-            error: null,
-            other: null,
-        };
-    } catch (err: any) {
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to validate share token",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
-        };
-    }
-};
-
-/**
- * Get shared event content
- */
-export const getSharedEventService = async (
-    tokenValue: string,
-    password?: string
-): Promise<ServiceResponse<any>> => {
-    try {
-        // First, validate the token
-        const validationResult = await validateShareTokenService(tokenValue, password);
-        
-        if (!validationResult.status) {
-            return validationResult;
-        }
-        
-        const tokenData = validationResult.data;
-        
-        // Check if the token has view permission
-        if (!tokenData.permissions.view) {
-            return {
-                status: false,
-                code: 403,
-                message: "Insufficient permissions",
-                data: null,
-                error: { message: "This share token does not have view permissions" },
-                other: null,
-            };
-        }
-        
-        // Fetch the event data
-        const eventData = await Event.findById(tokenData.eventId)
-            .select('title description start_date end_date location template cover_image');
-            
-        if (!eventData) {
-            return {
-                status: false,
-                code: 404,
-                message: "Event not found",
-                data: null,
-                error: { message: "The event associated with this token does not exist" },
-                other: null,
-            };
-        }
-        
-        // Construct the response with event data and token permissions
-        return {
-            status: true,
-            code: 200,
-            message: "Shared event retrieved successfully",
-            data: {
-                event: eventData,
-                permissions: tokenData.permissions,
-                tokenId: tokenData.id
-            },
-            error: null,
-            other: null,
-        };
-    } catch (err: any) {
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to retrieve shared event",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
-        };
-    }
-};
-
-/**
- * Revoke a share token
- */
-export const revokeShareTokenService = async (
-    token_id: string,
-    user_id: string
-): Promise<ServiceResponse<null>> => {
-    try {
-        const token = await ShareToken.findById(token_id);
-        
-        if (!token) {
-            return {
-                status: false,
-                code: 404,
-                message: "Share token not found",
-                data: null,
-                error: { message: "The specified share token does not exist" },
-                other: null,
-            };
-        }
-        
-        // Only allow the token creator or an admin to revoke it
-        if (token.created_by.toString() !== user_id) {
-            // Here you might add a check if user is admin
-            return {
-                status: false,
-                code: 403,
-                message: "Permission denied",
-                data: null,
-                error: { message: "You don't have permission to revoke this token" },
-                other: null,
-            };
-        }
-        
-        // Update token to revoked status
-        token.revoked = true;
-        token.revoked_at = new Date();
-        token.revoked_by = new mongoose.Types.ObjectId(user_id);
-        await token.save();
-        
-        // Update event sharing status since a token was revoked
-        await updateEventSharingStatus(token.event_id.toString());
-        
-        return {
-            status: true,
-            code: 200,
-            message: "Share token revoked successfully",
-            data: null,
-            error: null,
-            other: null,
-        };
-    } catch (err: any) {
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to revoke share token",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
-        };
-    }
-};
-
-/**
- * Get all share tokens for an event
- */
-export const getEventShareTokensService = async (
-    event_id: string,
-    user_id: string
-): Promise<ServiceResponse<any[]>> => {
-    try {
-        // Check if user has permission to view tokens for this event
-        // Here you could add a check if the user is the event creator or has admin rights
-        
-        const tokens = await ShareToken.find({
-            event_id: new mongoose.Types.ObjectId(event_id),
-            created_by: new mongoose.Types.ObjectId(user_id)
-        })
-        .select('-password_hash')
-        .sort({ created_at: -1 });
-        
         return {
             status: true,
             code: 200,
             message: "Share tokens retrieved successfully",
-            data: tokens.map(token => ({
-                id: token._id,
-                token: token.token,
-                eventId: token.event_id,
-                albumId: token.album_id,
-                permissions: token.permissions,
-                createdAt: token.created_at,
-                expiresAt: token.expires_at,
-                usageCount: token.usage_count,
-                revoked: token.revoked,
-                revokedAt: token.revoked_at
-            })),
-            error: null,
-            other: null,
-        };
-    } catch (err: any) {
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to retrieve share tokens",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+            data: {
+                tokens,
+                pagination: {
+                    page,
+                    limit,
+                    total,
+                    pages: Math.ceil(total / limit)
+                }
             },
-            other: null,
+            error: null,
+            other: null
         };
+    } finally {
+        // await session.endSession();
     }
 };
 
-/**
- * Get shared album media
- */
-export const getSharedAlbumMediaService = async (
-    album_id: string,
-    tokenValue: string,
-    password?: string
-): Promise<ServiceResponse<any[]>> => {
-    try {
-        // First validate the token
-        const validationResult = await validateShareTokenService(tokenValue, password);
-        
-        if (!validationResult.status) {
-            return validationResult;
-        }
-        
-        const tokenData = validationResult.data;
-        
-        // Check if token permissions allow viewing
-        if (!tokenData.permissions.view) {
-            return {
-                status: false,
-                code: 403,
-                message: "Insufficient permissions",
-                data: null,
-                error: { message: "This share token does not have view permissions" },
-                other: null,
-            };
-        }
-        
-        // Check if token is for this album or its parent event
-        const isValidForAlbum = tokenData.albumId && tokenData.albumId === album_id;
-        
-        if (!isValidForAlbum) {
-            // If not directly for this album, check if it's for the parent event
-            const album = await mongoose.model('albums').findById(album_id);
-            if (!album || album.event_id.toString() !== tokenData.eventId) {
-                return {
-                    status: false,
-                    code: 403,
-                    message: "Token not valid for this album",
-                    data: null,
-                    error: { message: "The provided share token is not valid for this album" },
-                    other: null,
-                };
-            }
-        }
-        
-        // Get media for the album
-        const media = await Media.find({ album_id: new mongoose.Types.ObjectId(album_id) })
-            .sort({ created_at: -1 });
-            
-        return {
-            status: true,
-            code: 200,
-            message: "Media retrieved successfully",
-            data: media,
-            error: null,
-            other: {
-                permissions: tokenData.permissions
-            },
-        };
-    } catch (err: any) {
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to retrieve shared album media",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
-        };
+// ============= UTILITY FUNCTIONS =============
+
+const generateTimeSeriesData = (participants: any[], startDate: Date, endDate: Date) => {
+    const days = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+    const timeSeries = [];
+
+    for (let i = 0; i < days; i++) {
+        const date = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
+        const nextDate = new Date(date.getTime() + 24 * 60 * 60 * 1000);
+
+        const dayParticipants = participants.filter(p => {
+            const joinDate = p.participation.joined_at || p.created_at;
+            return joinDate >= date && joinDate < nextDate;
+        });
+
+        timeSeries.push({
+            date: date.toISOString().split('T')[0],
+            joins: dayParticipants.length,
+            active_joins: dayParticipants.filter(p => p.participation.status === 'active').length
+        });
     }
+
+    return timeSeries;
 };
 
-/**
- * Invite a guest to an event via share token
- */
-export const inviteGuestWithShareTokenService = async (
-    token_id: string,
-    guest_email: string,
-    user_id: string
-): Promise<ServiceResponse<null>> => {
+// ============= BULK OPERATIONS =============
+
+export const bulkRevokeTokensService = async (data: {
+    eventId: string;
+    tokenIds: string[];
+    revokedBy: string;
+    reason: string;
+}): Promise<ServiceResponse<any>> => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
-        const token = await ShareToken.findById(token_id);
-        
-        if (!token) {
-            return {
-                status: false,
-                code: 404,
-                message: "Share token not found",
-                data: null,
-                error: { message: "The specified share token does not exist" },
-                other: null,
-            };
-        }
-        
-        // Only allow the token creator or an admin to invite guests
-        if (token.created_by.toString() !== user_id) {
-            // Here you might add a check if user is admin
-            return {
-                status: false,
-                code: 403,
-                message: "Permission denied",
-                data: null,
-                error: { message: "You don't have permission to invite guests with this token" },
-                other: null,
-            };
-        }
-        
-        // Check if the guest is already invited
-        const isAlreadyInvited = token.invited_guests.some(guest => 
-            guest.email.toLowerCase() === guest_email.toLowerCase()
+        const { eventId, tokenIds, revokedBy, reason } = data;
+
+        const objectIds = tokenIds.map(id => new mongoose.Types.ObjectId(id));
+
+        // Bulk revoke tokens
+        const revokeResult = await ShareToken.updateMany(
+            {
+                _id: { $in: objectIds },
+                event_id: new mongoose.Types.ObjectId(eventId),
+                revoked: false
+            },
+            {
+                $set: {
+                    revoked: true,
+                    revoked_at: new Date(),
+                    revoked_by: new mongoose.Types.ObjectId(revokedBy),
+                    // revoke_reason: reason || "Bulk revocation"
+                }
+            },
+            { session }
         );
-        
-        if (isAlreadyInvited) {
-            return {
-                status: false,
-                code: 409,
-                message: "Guest already invited",
-                data: null,
-                error: { message: "This guest has already been invited" },
-                other: null,
-            };
-        }
-        
-        // Add the guest to the token's invited guests list
-        token.invited_guests.push({
-            email: guest_email.toLowerCase(),
-            invited_at: new Date(),
-            accessed_at: null as Date | null,
-            user_id: null as mongoose.Types.ObjectId | null
-        });
-        await token.save();
-        
-        // Here you would typically send an email invitation to the guest
-        // For now, we just log it
-        logger.info(`Invited guest ${guest_email} to event via share token ${token_id}`);
-        
+
+        // Update event stats
+        await Event.findByIdAndUpdate(
+            eventId,
+            {
+                $inc: { 'stats.sharing.active_tokens': -revokeResult.modifiedCount },
+                $set: { updated_at: new Date() }
+            },
+            { session }
+        );
+
+        // Log bulk activity
+        await ActivityLog.create([{
+            user_id: new mongoose.Types.ObjectId(revokedBy),
+            resource_id: new mongoose.Types.ObjectId(eventId),
+            resource_type: "event",
+            action: "edited",
+            details: {
+                type: "share_token",
+                subaction: "bulk_tokens_revoked",
+                revoked_count: revokeResult.modifiedCount,
+                token_ids: tokenIds,
+                reason
+            }
+        }], { session });
+
+        await session.commitTransaction();
+
         return {
             status: true,
             code: 200,
-            message: "Guest invited successfully",
-            data: null,
+            message: `Successfully revoked ${revokeResult.modifiedCount} tokens`,
+            data: {
+                revoked_count: revokeResult.modifiedCount,
+                total_requested: tokenIds.length
+            },
             error: null,
-            other: null,
+            other: null
         };
-    } catch (err: any) {
+    } catch (error) {
+        logger.error(`[bulkRevokeTokensService] Error: ${error.message}`);
+        await session.abortTransaction();
         return {
             status: false,
             code: 500,
-            message: "Failed to invite guest with share token",
+            message: "Failed to bulk revoke tokens",
             data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
+            error: { message: error.message },
+            other: null
         };
+    } finally {
+        await session.endSession();
     }
 };
 
-/**
- * Get all guests invited via a share token
- */
-export const getShareTokenGuestsService = async (
-    token_id: string,
-    user_id: string
+export const getEventSharingStatusService = async (
+    eventId: string,
+    userId: string
 ): Promise<ServiceResponse<any>> => {
-    try {
-        const token = await ShareToken.findById(token_id);
-        
-        if (!token) {
-            return {
-                status: false,
-                code: 404,
-                message: "Share token not found",
-                data: null,
-                error: { message: "The specified share token does not exist" },
-                other: null,
-            };
-        }
-        
-        // Only allow the token creator or an admin to view guests
-        if (token.created_by.toString() !== user_id) {
-            // Here you might add a check if user is admin
-            return {
-                status: false,
-                code: 403,
-                message: "Permission denied",
-                data: null,
-                error: { message: "You don't have permission to view guests for this token" },
-                other: null,
-            };
-        }
-        
-        // Populate guest details
-        const guestEmails = token.invited_guests.map(guest => guest.email);
-        const guests = await User.find({ 
-            email: { $in: guestEmails } 
-        }).select('name email');
-        
-        return {
-            status: true,
-            code: 200,
-            message: "Guests retrieved successfully",
-            data: guests,
-            error: null,
-            other: null,
-        };
-    } catch (err: any) {
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to retrieve guests for share token",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
-        };
-    }
+    return null
 };
 
-/**
- * Add invited guests to a share token
- */
-export const addInvitedGuestsToShareTokenService = async (
-    token_id: string,
-    user_id: string,
-    guests: string[]
-): Promise<ServiceResponse<any>> => {
+// ============= TOKEN VALIDATION HELPERS =============
+
+export const validateTokenAccess = async (
+    token: string,
+    userEmail?: string
+): Promise<{ valid: boolean; reason?: string; shareToken?: any }> => {
     try {
-        // Validate inputs
-        if (!mongoose.Types.ObjectId.isValid(token_id)) {
-            return {
-                status: false,
-                code: 400,
-                message: "Invalid token ID",
-                data: null,
-                error: { message: "A valid token ID is required" },
-                other: null,
-            };
-        }
-
-        if (!Array.isArray(guests) || guests.length === 0) {
-            return {
-                status: false,
-                code: 400,
-                message: "Invalid guests list",
-                data: null,
-                error: { message: "A valid list of guest emails is required" },
-                other: null,
-            };
-        }
-
-        // Find the token
-        const token = await ShareToken.findById(token_id);
-
-        if (!token) {
-            return {
-                status: false,
-                code: 404,
-                message: "Share token not found",
-                data: null,
-                error: { message: "The specified share token does not exist" },
-                other: null,
-            };
-        }
-
-        // Check if user has permission (only the token creator can add guests)
-        if (token.created_by.toString() !== user_id) {
-            return {
-                status: false,
-                code: 403,
-                message: "Permission denied",
-                data: null,
-                error: { message: "You don't have permission to modify this token" },
-                other: null,
-            };
-        }
-
-        // Enable guest restriction if not already set
-        token.is_restricted_to_guests = true;
-
-        // Add new guests (avoiding duplicates)
-        const currentEmailsMap: {[key: string]: boolean} = {};
-        token.invited_guests.forEach(g => {
-            currentEmailsMap[g.email.toLowerCase()] = true;
+        const shareToken = await ShareToken.findOne({
+            token,
+            revoked: false
         });
-        
+
+        if (!shareToken) {
+            return { valid: false, reason: "Token not found or revoked" };
+        }
+
+        // Check expiration
+        if (shareToken.restrictions.expires_at && shareToken.restrictions.expires_at < new Date()) {
+            return { valid: false, reason: "Token has expired" };
+        }
+
+        // Check usage limit
+        if (shareToken.restrictions.max_uses && shareToken.usage.count >= shareToken.restrictions.max_uses) {
+            return { valid: false, reason: "Token usage limit reached" };
+        }
+
+        // Check email restrictions
+        if (userEmail && shareToken.restrictions.allowed_emails.length > 0) {
+            const emailAllowed = shareToken.restrictions.allowed_emails.some(
+                allowedEmail => allowedEmail.toLowerCase() === userEmail.toLowerCase()
+            );
+            if (!emailAllowed) {
+                return { valid: false, reason: "Email not authorized" };
+            }
+        }
+
+        return { valid: true, shareToken };
+    } catch (error) {
+        logger.error(`[validateTokenAccess] Error: ${error.message}`);
+        return { valid: false, reason: "Token validation error" };
+    }
+};
+
+export const generateShareableLink = (token: string): string => {
+    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    return `${baseUrl}/join/${token}`;
+};
+
+// ============= TOKEN CLEANUP UTILITIES =============
+
+export const cleanupExpiredTokensService = async (): Promise<ServiceResponse<any>> => {
+    try {
         const now = new Date();
-        
-        for (const email of guests) {
-            const normalizedEmail = email.toLowerCase().trim();
-            // Only add if not already in the list
-            if (!currentEmailsMap[normalizedEmail]) {
-                token.invited_guests.push({
-                    email: normalizedEmail,
-                    invited_at: now,
-                    accessed_at: null as Date | null,
-                    user_id: null as mongoose.Types.ObjectId | null
-                });
-                currentEmailsMap[normalizedEmail] = true;
-            }
-        }
 
-        // Save the updated token
-        await token.save();
-
-        // Update event sharing status since guests were added
-        await updateEventSharingStatus(token.event_id.toString());
-
-        logger.info(`Added ${guests.length} guests to token ${token_id}`);
-
-        return {
-            status: true,
-            code: 200,
-            message: "Guests added successfully",
-            data: {
-                token_id: token._id,
-                guests_count: token.invited_guests.length
-            },
-            error: null,
-            other: null,
-        };
-    } catch (err: any) {
-        logger.error("Failed to add guests to share token", { error: err.message });
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to add guests to share token",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
-        };
-    }
-};
-
-/**
- * Remove invited guests from a share token
- */
-export const removeInvitedGuestsFromShareTokenService = async (
-    token_id: string,
-    user_id: string,
-    guests: string[]
-): Promise<ServiceResponse<any>> => {
-    try {
-        // Validate inputs
-        if (!mongoose.Types.ObjectId.isValid(token_id)) {
-            return {
-                status: false,
-                code: 400,
-                message: "Invalid token ID",
-                data: null,
-                error: { message: "A valid token ID is required" },
-                other: null,
-            };
-        }
-
-        if (!Array.isArray(guests) || guests.length === 0) {
-            return {
-                status: false,
-                code: 400,
-                message: "Invalid guests list",
-                data: null,
-                error: { message: "A valid list of guest emails is required" },
-                other: null,
-            };
-        }
-
-        // Find the token
-        const token = await ShareToken.findById(token_id);
-
-        if (!token) {
-            return {
-                status: false,
-                code: 404,
-                message: "Share token not found",
-                data: null,
-                error: { message: "The specified share token does not exist" },
-                other: null,
-            };
-        }
-
-        // Check if user has permission (only the token creator can remove guests)
-        if (token.created_by.toString() !== user_id) {
-            return {
-                status: false,
-                code: 403,
-                message: "Permission denied",
-                data: null,
-                error: { message: "You don't have permission to modify this token" },
-                other: null,
-            };
-        }
-
-        // Normalize emails for comparison and put them in a map for O(1) lookup
-        const emailsToRemove: {[key: string]: boolean} = {};
-        guests.forEach(email => {
-            emailsToRemove[email.toLowerCase().trim()] = true;
+        // Find expired tokens
+        const expiredTokens = await ShareToken.find({
+            revoked: false,
+            'restrictions.expires_at': { $lt: now }
         });
-        
-        // Filter out the guests to be removed
-        const initialCount = token.invited_guests.length;
-        
-        // Properly filter a mongoose document array
-        for (let i = token.invited_guests.length - 1; i >= 0; i--) {
-            if (emailsToRemove[token.invited_guests[i].email.toLowerCase()]) {
-                token.invited_guests.splice(i, 1);
-            }
-        }
-        
-        // If no more guests, optionally disable guest restriction
-        if (token.invited_guests.length === 0) {
-            token.is_restricted_to_guests = false;
-        }
 
-        // Save the updated token
-        await token.save();
-
-        // Update event sharing status since guests were removed
-        await updateEventSharingStatus(token.event_id.toString());
-
-        const removedCount = initialCount - token.invited_guests.length;
-        logger.info(`Removed ${removedCount} guests from token ${token_id}`);
-
-        return {
-            status: true,
-            code: 200,
-            message: "Guests removed successfully",
-            data: {
-                token_id: token._id,
-                guests_count: token.invited_guests.length,
-                removed_count: removedCount
-            },
-            error: null,
-            other: null,
-        };
-    } catch (err: any) {
-        logger.error("Failed to remove guests from share token", { error: err.message });
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to remove guests from share token",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
-        };
-    }
-};
-
-/**
- * Check if a guest has access to a share token
- */
-export const checkGuestAccessToShareTokenService = async (
-    token_id: string,
-    email: string
-): Promise<ServiceResponse<boolean>> => {
-    try {
-        // Validate inputs
-        if (!mongoose.Types.ObjectId.isValid(token_id)) {
-            return {
-                status: false,
-                code: 400,
-                message: "Invalid token ID",
-                data: null,
-                error: { message: "A valid token ID is required" },
-                other: null,
-            };
-        }
-
-        if (!email || typeof email !== 'string') {
-            return {
-                status: false,
-                code: 400,
-                message: "Invalid email",
-                data: null,
-                error: { message: "A valid email address is required" },
-                other: null,
-            };
-        }
-
-        // Find the token
-        const token = await ShareToken.findById(token_id);
-
-        if (!token) {
-            return {
-                status: false,
-                code: 404,
-                message: "Share token not found",
-                data: null,
-                error: { message: "The specified share token does not exist" },
-                other: null,
-            };
-        }
-
-        // If token is not restricted to guests, anyone has access
-        if (!token.is_restricted_to_guests) {
+        if (expiredTokens.length === 0) {
             return {
                 status: true,
                 code: 200,
-                message: "Token is not restricted to guests",
-                data: true, // Access granted
+                message: "No expired tokens found",
+                data: { expired_count: 0 },
                 error: null,
-                other: null,
+                other: null
             };
         }
 
-        // Check if the email is in the invited guests list
-        const normalizedEmail = email.toLowerCase().trim();
-        const isInvited = token.invited_guests.some(guest => 
-            guest.email.toLowerCase() === normalizedEmail
+        // Mark them as revoked
+        const cleanupResult = await ShareToken.updateMany(
+            {
+                revoked: false,
+                'restrictions.expires_at': { $lt: now }
+            },
+            {
+                $set: {
+                    revoked: true,
+                    revoked_at: now,
+                    // revoke_reason: "Automatically expired"
+                }
+            }
         );
+
+        // Update event stats for affected events
+        const eventIds = Array.from(new Set(expiredTokens.map(token => token.event_id.toString())));
+
+        for (const eventId of eventIds) {
+            const expiredForEvent = expiredTokens.filter(token =>
+                token.event_id.toString() === eventId
+            ).length;
+
+            await Event.findByIdAndUpdate(
+                eventId,
+                {
+                    $inc: { 'stats.sharing.active_tokens': -expiredForEvent },
+                    $set: { updated_at: new Date() }
+                }
+            );
+        }
+
+        logger.info(`[cleanupExpiredTokensService] Cleaned up ${cleanupResult.modifiedCount} expired tokens`);
 
         return {
             status: true,
             code: 200,
-            message: isInvited ? "Guest has access" : "Guest does not have access",
-            data: isInvited,
+            message: `Successfully cleaned up ${cleanupResult.modifiedCount} expired tokens`,
+            data: {
+                expired_count: cleanupResult.modifiedCount,
+                affected_events: eventIds.length
+            },
             error: null,
-            other: null,
+            other: null
         };
-    } catch (err: any) {
-        logger.error("Failed to check guest access", { error: err.message });
+    } catch (error) {
+        logger.error(`[cleanupExpiredTokensService] Error: ${error.message}`);
         return {
             status: false,
             code: 500,
-            message: "Failed to check guest access",
+            message: "Failed to cleanup expired tokens",
             data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
+            error: { message: error.message },
+            other: null
         };
     }
 };
 
-/**
- * Update an event's sharing status based on its active share tokens
- * @param event_id The ID of the event to update
- */
-const updateEventSharingStatus = async (event_id: string): Promise<void> => {
-    try {
-        // Get all active (not revoked and not expired) share tokens for the event
-        const now = new Date();
-        const activeTokens = await ShareToken.find({
-            event_id: new mongoose.Types.ObjectId(event_id),
-            revoked: false,
-            $or: [
-                { expires_at: null },
-                { expires_at: { $gt: now } }
-            ]
-        });
-        
-        if (activeTokens.length === 0) {
-            // No active tokens, update event to not shared
-            await Event.findByIdAndUpdate(event_id, {
-                is_shared: false,
-                share_settings: {
-                    restricted_to_guests: false,
-                    has_password_protection: false,
-                    guest_count: 0,
-                    last_shared_at: null,
-                    active_share_tokens: 0
-                }
-            });
-            return;
-        }
-        
-        // Calculate sharing statistics
-        const hasRestrictedAccess = activeTokens.some(token => token.is_restricted_to_guests);
-        const hasPasswordProtection = activeTokens.some(token => token.password_hash !== null);
-        
-        // Count total invited guests (avoiding duplicates across tokens)
-        const emailsMap: {[key: string]: boolean} = {};
-        let uniqueGuestCount = 0;
-        
-        activeTokens.forEach(token => {
-            token.invited_guests.forEach(guest => {
-                const email = guest.email.toLowerCase();
-                if (!emailsMap[email]) {
-                    emailsMap[email] = true;
-                    uniqueGuestCount++;
-                }
-            });
-        });
-        
-        // Update the event
-        await Event.findByIdAndUpdate(event_id, {
-            is_shared: true,
-            share_settings: {
-                restricted_to_guests: hasRestrictedAccess,
-                has_password_protection: hasPasswordProtection,
-                guest_count: uniqueGuestCount,
-                last_shared_at: new Date(),
-                active_share_tokens: activeTokens.length
-            }
-        });
-        
-        logger.info(`Updated sharing status for event ${event_id}`, {
-            active_tokens: activeTokens.length,
-            restricted_access: hasRestrictedAccess,
-            password_protected: hasPasswordProtection,
-            guest_count: uniqueGuestCount
-        });
-    } catch (err) {
-        logger.error(`Failed to update event sharing status for event ${event_id}`, {
-            error: err instanceof Error ? err.message : String(err)
-        });
-        // Don't throw - this is a background operation that shouldn't break the main flow
-    }
-};
+// ============= EXPORT FUNCTIONS =============
 
-/**
- * Update sharing status for all events (can be called during system startup)
- */
-export const updateAllEventsSharingStatus = async (): Promise<void> => {
+export const exportTokenUsageService = async (data: {
+    eventId: string;
+    requesterId: string;
+    format: string;
+}): Promise<ServiceResponse<string>> => {
     try {
-        logger.info("Starting to update sharing status for all events");
-        
-        // Find all events
-        const events = await Event.find();
-        logger.info(`Found ${events.length} events to check`);
-        
-        let updatedCount = 0;
-        
-        // Update each event's sharing status
-        for (const event of events) {
-            await updateEventSharingStatus(event._id.toString());
-            updatedCount++;
-            
-            // Log progress for large updates
-            if (updatedCount % 100 === 0) {
-                logger.info(`Updated sharing status for ${updatedCount}/${events.length} events`);
-            }
-        }
-        
-        logger.info(`Completed updating sharing status for ${updatedCount} events`);
-    } catch (err) {
-        logger.error("Failed to update all events sharing status", {
-            error: err instanceof Error ? err.message : String(err)
-        });
-    }
-};
+        const { eventId, format } = data;
 
-/**
- * Get the sharing status for an event
- */
-export const getEventSharingStatusService = async (
-    event_id: string,
-    user_id: string
-): Promise<ServiceResponse<any>> => {
-    try {
-        // Validate inputs
-        if (!mongoose.Types.ObjectId.isValid(event_id)) {
+        // Get tokens with usage data
+        const tokens = await ShareToken.find({
+            event_id: new mongoose.Types.ObjectId(eventId)
+        })
+            .populate('created_by', 'name email')
+            .sort({ created_at: -1 });
+
+        if (format === 'csv') {
+            const csvHeaders = [
+                'Token',
+                'Type',
+                'Name',
+                'Created By',
+                'Created Date',
+                'Usage Count',
+                'Max Uses',
+                'Expires At',
+                'Status',
+                'Last Used'
+            ];
+
+            let csvContent = csvHeaders.join(',') + '\n';
+
+            tokens.forEach(token => {
+                const status = token.revoked ? 'Revoked' :
+                    (token.restrictions.expires_at && token.restrictions.expires_at < new Date()) ? 'Expired' : 'Active';
+
+                const row = [
+                    `"${token.token}"`,
+                    token.token_type,
+                    `"${token.created_by || 'Unknown'}"`,
+                    token.created_at.toISOString().split('T')[0],
+                    token.usage.count,
+                    token.restrictions.max_uses || 'Unlimited',
+                    token.restrictions.expires_at ? token.restrictions.expires_at.toISOString().split('T')[0] : 'Never',
+                    status,
+                    token.usage.last_used ? token.usage.last_used.toISOString().split('T')[0] : 'Never'
+                ];
+
+                csvContent += row.join(',') + '\n';
+            });
+
             return {
-                status: false,
-                code: 400,
-                message: "Invalid event ID",
-                data: null,
-                error: { message: "A valid event ID is required" },
-                other: null,
+                status: true,
+                code: 200,
+                message: "Token usage exported successfully",
+                data: csvContent,
+                error: null,
+                other: null
             };
+        } else {
+            throw new Error("Unsupported export format");
         }
+    } catch (error) {
+        logger.error(`[exportTokenUsageService] Error: ${error.message}`);
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to export token usage",
+            data: null,
+            error: { message: error.message },
+            other: null
+        };
+    }
+};
 
-        // Find the event
-        const event = await Event.findById(event_id);
+export const createShareTokenService = async (data: {
+    eventId: string;
+    albumId?: string;
+    tokenType: string;
+    permissions: any;
+    restrictions: any;
+    createdBy: string;
+    name?: string;
+    description?: string;
+}): Promise<ServiceResponse<ShareTokenType>> => {
+    try {
+        const { eventId, albumId, tokenType, permissions, restrictions, createdBy, name, description } = data;
+
+        // Verify event exists
+        const event = await Event.findById(eventId);
         if (!event) {
             return {
                 status: false,
                 code: 404,
                 message: "Event not found",
                 data: null,
-                error: { message: "The specified event does not exist" },
+                error: null,
+                other: null
+            };
+        }
+
+        // Generate unique token
+        let token: string;
+        let isUnique = false;
+        let attempts = 0;
+
+        while (!isUnique && attempts < 10) {
+            token = crypto.randomBytes(16).toString('hex');
+            const existing = await ShareToken.findOne({ token });
+            if (!existing) {
+                isUnique = true;
+            }
+            attempts++;
+        }
+
+        if (!isUnique) {
+            throw new Error("Failed to generate unique token");
+        }
+
+        const shareToken = await ShareToken.create({
+            event_id: new mongoose.Types.ObjectId(eventId),
+            album_id: albumId ? new mongoose.Types.ObjectId(albumId) : null,
+            token,
+            token_type: tokenType,
+            name: name || `${tokenType} Token`,
+            description: description || "",
+            permissions: {
+                view: permissions?.view ?? true,
+                upload: permissions?.upload ?? false,
+                download: permissions?.download ?? false,
+                share: permissions?.share ?? false,
+                comment: permissions?.comment ?? true
+            },
+            restrictions: {
+                max_uses: restrictions?.max_uses || null,
+                expires_at: restrictions?.expires_at ? new Date(restrictions.expires_at) : null,
+                allowed_emails: restrictions?.allowed_emails || [],
+                requires_approval: restrictions?.requires_approval || false
+            },
+            usage: {
+                count: 0,
+                used_by: []
+            },
+            created_by: new mongoose.Types.ObjectId(createdBy),
+            revoked: false
+        });
+
+        // Update event sharing stats
+        await Event.findByIdAndUpdate(
+            eventId,
+            {
+                $inc: { 'stats.sharing.active_tokens': 1 },
+                $set: { updated_at: new Date() }
+            }
+        );
+
+        // Log activity
+        await ActivityLog.create({
+            user_id: new mongoose.Types.ObjectId(createdBy),
+            resource_id: new mongoose.Types.ObjectId(eventId),
+            resource_type: "event",
+            action: "created",
+            details: {
+                type: "share_token",
+                subaction: "token_created",
+                token_type: tokenType,
+                token_id: shareToken._id,
+                permissions,
+                name: name || `${tokenType} Token`
+            }
+        });
+
+        return {
+            status: true,
+            code: 201,
+            message: "Share token created successfully",
+            data: shareToken,
+            error: null,
+            other: null
+        };
+    } catch (error) {
+        logger.error(`[createShareTokenService] Error: ${error.message}`);
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to create share token",
+            data: null,
+            error: { message: error.message },
+            other: null
+        };
+    }
+};
+
+export const getShareTokenDetailsService = async (data: {
+    tokenId: string;
+    requesterId?: string;
+}): Promise<ServiceResponse<any>> => {
+    try {
+        const { tokenId, requesterId } = data;
+
+        // Find event by share_token
+        const event = await Event.findOne({ share_token: tokenId }).populate([
+            {
+                path: 'created_by',
+                select: 'name email avatar_url',
+            },
+            {
+                path: 'co_hosts.user_id',
+                select: 'name email avatar_url',
+            },
+        ]);
+
+        if (!event) {
+            logger.warn(`[getShareTokenDetailsService] Share token ${tokenId} not found`);
+            return {
+                status: false,
+                code: 404,
+                message: 'Share token not found',
+                data: null,
+                error: { message: 'Token not found' },
                 other: null,
             };
         }
 
-        // Check user permission
-        if (event.created_by.toString() !== user_id) {
+        // Check share_settings
+        if (!event.share_settings.is_active) {
+            logger.warn(`[getShareTokenDetailsService] Share token ${tokenId} is inactive`);
             return {
                 status: false,
                 code: 403,
-                message: "Permission denied",
+                message: 'Share token is inactive',
                 data: null,
-                error: { message: "You don't have permission to view this event's sharing status" },
+                error: { message: 'Token is inactive' },
                 other: null,
             };
         }
 
-        // If the event's sharing status might be out of date, refresh it
-        if (event.is_shared) {
-            await updateEventSharingStatus(event_id);
-            // Refetch the event to get updated sharing info
-            const updatedEvent = await Event.findById(event_id);
-            if (updatedEvent) {
-                event.is_shared = updatedEvent.is_shared;
-                event.share_settings = updatedEvent.share_settings;
-            }
+        if (event.share_settings.expires_at && new Date(event.share_settings.expires_at) < new Date()) {
+            logger.warn(`[getShareTokenDetailsService] Share token ${tokenId} has expired`);
+            return {
+                status: false,
+                code: 403,
+                message: 'Share token has expired',
+                data: null,
+                error: { message: 'Token has expired' },
+                other: null,
+            };
         }
 
-        // Get active share tokens
-        const activeTokens = await ShareToken.find({
-            event_id: new mongoose.Types.ObjectId(event_id),
-            revoked: false,
-            $or: [
-                { expires_at: null },
-                { expires_at: { $gt: new Date() } }
-            ]
-        }).select('-password_hash');
+        // Check permissions
+        if (!event.permissions.can_view) {
+            logger.warn(`[getShareTokenDetailsService] Viewing not allowed for event ${event._id}`);
+            return {
+                status: false,
+                code: 403,
+                message: 'Viewing this event is not allowed',
+                data: null,
+                error: { message: 'Viewing not permitted' },
+                other: null,
+            };
+        }
+
+        // Get usage analytics
+        const participants = await EventParticipant.find({
+            event_id: event._id,
+        }).select('participation.status participation.joined_at guest_info.email created_at');
+
+        const analytics = {
+            total_uses: participants.length,
+            successful_joins: participants.filter((p) => p.participation.status === 'active').length,
+            pending_approvals: participants.filter((p) => p.participation.status === 'invited').length,
+            recent_users: participants
+                .slice(-5)
+                .map((p) => ({
+                    email: p.guest_info.email,
+                    status: p.participation.status,
+                    joined_at: p.participation.joined_at || p.created_at,
+                })),
+        };
+
+        // Prepare event details
+        const eventDetails = {
+            _id: event._id.toString(),
+            title: event.title,
+            description: event.description,
+            start_date: event.start_date.toISOString(),
+            end_date: event.end_date ? event.end_date.toISOString() : undefined,
+            template: event.template,
+            visibility: event.visibility,
+            cover_image: event.cover_image.url ? { url: event.cover_image.url } : undefined,
+            location: event.location.name ? { name: event.location.name } : undefined,
+            permissions: {
+                can_view: event.permissions.can_view,
+                can_upload: event.permissions.can_upload,
+                can_download: event.permissions.can_download,
+                require_approval: event.permissions.require_approval,
+            },
+            created_by: {
+                _id: event.created_by._id.toString(),
+            },
+            stats: {
+                participants: participants.length,
+            },
+            share_settings: {
+                is_active: event.share_settings.is_active,
+                expires_at: event.share_settings.expires_at ? event.share_settings.expires_at.toISOString() : undefined,
+            },
+        };
+
+        // Set FRONTEND_URL or fallback
+        const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
         return {
             status: true,
             code: 200,
-            message: "Event sharing status retrieved successfully",
+            message: 'Share token details retrieved successfully',
             data: {
-                is_shared: event.is_shared,
-                share_settings: event.share_settings,
-                active_tokens: activeTokens.map(token => ({
-                    id: token._id,
-                    token: token.token,
-                    created_at: token.created_at,
-                    expires_at: token.expires_at,
-                    is_restricted_to_guests: token.is_restricted_to_guests,
-                    invited_guest_count: token.invited_guests.length
-                }))
+                event: eventDetails,
+                analytics,
+                invitation_link: `${FRONTEND_URL}/join/${event.share_token}`,
             },
             error: null,
             other: null,
         };
-    } catch (err: any) {
-        logger.error("Failed to get event sharing status", { error: err.message });
+    } catch (error) {
+        logger.error(`[getShareTokenDetailsService] Error: ${error.message}`);
         return {
             status: false,
             code: 500,
-            message: "Failed to get event sharing status",
+            message: 'Failed to get share token details',
             data: null,
             error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+                message: error.message,
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
             },
             other: null,
+        };
+    }
+};
+export const updateShareTokenService = async (data: {
+    tokenId: string;
+    updateData: any;
+    updatedBy: string;
+    eventId?: string; // Make eventId optional
+}): Promise<ServiceResponse<ShareTokenType>> => {
+    try {
+        const { tokenId, updateData, updatedBy } = data;
+
+        // Find token directly by ID without requiring the event ID
+        const token = await ShareToken.findOne({
+            _id: new mongoose.Types.ObjectId(tokenId),
+            revoked: false
+        });
+
+        if (!token) {
+            return {
+                status: false,
+                code: 404,
+                message: "Share token not found or already revoked",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Get eventId from the token itself
+        const eventId = token.event_id.toString();
+
+        // Prepare update object
+        const update: any = {};
+
+        if (updateData.name !== undefined) {
+            update.name = updateData.name;
+        }
+
+        if (updateData.description !== undefined) {
+            update.description = updateData.description;
+        }
+
+        if (updateData.permissions) {
+            update.permissions = { ...token.permissions, ...updateData.permissions };
+        }
+
+        if (updateData.restrictions) {
+            update.restrictions = { ...token.restrictions, ...updateData.restrictions };
+
+            // Handle date conversion
+            if (updateData.restrictions.expires_at) {
+                update.restrictions.expires_at = new Date(updateData.restrictions.expires_at);
+            }
+        }
+
+        if (updateData.token_type) {
+            update.token_type = updateData.token_type;
+        }
+
+        // Update token
+        const updatedToken = await ShareToken.findByIdAndUpdate(
+            tokenId,
+            { $set: update },
+            { new: true }
+        );
+
+        // Log activity
+        await ActivityLog.create({
+            user_id: new mongoose.Types.ObjectId(updatedBy),
+            resource_id: new mongoose.Types.ObjectId(eventId),
+            resource_type: "event",
+            action: "edited",
+            details: {
+                type: "share_token",
+                subaction: "token_updated",
+                token_id: tokenId,
+                changes: Object.keys(updateData),
+                updated_fields: update
+            }
+        });
+
+        return {
+            status: true,
+            code: 200,
+            message: "Share token updated successfully",
+            data: updatedToken,
+            error: null,
+            other: null
+        };
+    } catch (error) {
+        logger.error(`[updateShareTokenService] Error: ${error.message}`);
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to update share token",
+            data: null,
+            error: { message: error.message },
+            other: null
+        };
+    }
+};
+
+export const revokeShareTokenService = async (data: {
+    tokenId: string;
+    revokedBy: string;
+    reason: string;
+    eventId?: string; // Make eventId optional
+}): Promise<ServiceResponse<{ revoked: boolean }>> => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const { tokenId, revokedBy, reason } = data;
+
+        // Find token directly by ID without requiring the event ID
+        const token = await ShareToken.findOne({
+            _id: new mongoose.Types.ObjectId(tokenId),
+            revoked: false
+        }).session(session);
+
+        if (!token) {
+            await session.abortTransaction();
+            return {
+                status: false,
+                code: 404,
+                message: "Share token not found or already revoked",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Get eventId from the token itself
+        const eventId = token.event_id.toString();
+
+        // Update token with all fields
+        const tokenUpdate = {
+            revoked: true,
+            revoked_at: new Date(),
+            revoked_by: new mongoose.Types.ObjectId(revokedBy)
+        };
+
+        // Update token using findByIdAndUpdate instead of direct property assignment
+        await ShareToken.findByIdAndUpdate(
+            token._id,
+            {
+                $set: tokenUpdate
+            },
+            { session }
+        );
+
+        // Update event stats
+        await Event.findByIdAndUpdate(
+            eventId,
+            {
+                $inc: { 'stats.sharing.active_tokens': -1 },
+                $set: { updated_at: new Date() }
+            },
+            { session }
+        );
+
+        // Log activity
+        await ActivityLog.create([{
+            user_id: new mongoose.Types.ObjectId(revokedBy),
+            resource_id: new mongoose.Types.ObjectId(eventId),
+            resource_type: "event",
+            action: "edited",
+            details: {
+                type: "share_token",
+                subaction: "token_revoked",
+                token_id: tokenId,
+                reason,
+                usage_count: token.usage.count,
+                token_type: token.token_type
+            }
+        }], { session });
+
+        await session.commitTransaction();
+
+        return {
+            status: true,
+            code: 200,
+            message: "Share token revoked successfully",
+            data: { revoked: true },
+            error: null,
+            other: null
+        };
+    } catch (error) {
+        logger.error(`[revokeShareTokenService] Error: ${error.message}`);
+        await session.abortTransaction();
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to revoke share token",
+            data: null,
+            error: { message: error.message },
+            other: null
+        };
+    } finally {
+        await session.endSession();
+    }
+};
+
+export const getTokenAnalyticsService = async (data: {
+    tokenId: string;
+    requesterId: string;
+    period: string;
+    metrics: string;
+    eventId?: string; // Make eventId optional
+}): Promise<ServiceResponse<any>> => {
+    try {
+        const { tokenId, period } = data;
+
+        // Calculate date range based on period
+        const now = new Date();
+        let startDate: Date;
+
+        switch (period) {
+            case '24h':
+                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+                break;
+            case '7d':
+                startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+                break;
+            case '30d':
+                startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+                break;
+            default:
+                startDate = new Date(0); // All time
+        }
+
+        // Get token details directly by ID
+        const token = await ShareToken.findOne({
+            _id: new mongoose.Types.ObjectId(tokenId)
+        });
+
+        if (!token) {
+            return {
+                status: false,
+                code: 404,
+                message: "Share token not found",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Use the eventId from token
+        const eventId = token.event_id.toString();
+
+        // Get participants who used this token
+        const participants = await EventParticipant.find({
+            share_token_used: new mongoose.Types.ObjectId(tokenId),
+            created_at: { $gte: startDate }
+        }).select('participation.status participation.joined_at guest_info.email created_at');
+
+        // Get usage analytics
+        const analytics = {
+            token_info: {
+                token: token.token,
+                token_type: token.token_type,
+                created_at: token.created_at,
+                total_uses: token.usage.count,
+                last_used: token.usage.last_used,
+                is_active: !token.revoked && (!token.restrictions.expires_at || token.restrictions.expires_at > now)
+            },
+            usage_stats: {
+                total_clicks: token.usage.count,
+                successful_joins: participants.filter(p => p.participation.status === 'active').length,
+                pending_approvals: participants.filter(p => p.participation.status === 'invited').length,
+                conversion_rate: token.usage.count > 0 ?
+                    (participants.filter(p => p.participation.status === 'active').length / token.usage.count) * 100 : 0
+            },
+            restrictions: {
+                max_uses: token.restrictions.max_uses,
+                expires_at: token.restrictions.expires_at,
+                allowed_emails_count: token.restrictions.allowed_emails.length,
+                requires_approval: token.restrictions.requires_approval
+            },
+            time_series: generateTimeSeriesData(participants, startDate, now),
+            participant_details: participants.map(p => ({
+                email: p.guest_info.email,
+                status: p.participation.status,
+                joined_at: p.participation.joined_at || p.created_at,
+                days_since_join: p.participation.joined_at ?
+                    Math.floor((now.getTime() - p.participation.joined_at.getTime()) / (1000 * 60 * 60 * 24)) : null
+            }))
+        };
+
+        return {
+            status: true,
+            code: 200,
+            message: "Token analytics retrieved successfully",
+            data: analytics,
+            error: null,
+            other: null
+        };
+    } catch (error) {
+        logger.error(`[getTokenAnalyticsService] Error: ${error.message}`);
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to get token analytics",
+            data: null,
+            error: { message: error.message },
+            other: null
+        };
+    }
+};
+
+// ============= PUBLIC TOKEN ACCESS SERVICES =============
+
+export const getTokenInfoService = async (token: string): Promise<ServiceResponse<any>> => {
+    try {
+        const shareToken = await ShareToken.findOne({
+            token,
+            revoked: false
+        }).populate([
+            {
+                path: 'event_id',
+                select: 'title description cover_image location start_date privacy',
+                populate: {
+                    path: 'created_by',
+                    select: 'name avatar_url'
+                }
+            },
+            {
+                path: 'created_by',
+                select: 'name avatar_url'
+            }
+        ]);
+
+        if (!shareToken) {
+            return {
+                status: false,
+                code: 404,
+                message: "Invalid invitation link",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Check if expired
+        const isExpired = shareToken.restrictions.expires_at && shareToken.restrictions.expires_at < new Date();
+        const isAtCapacity = shareToken.restrictions.max_uses && shareToken.usage.count >= shareToken.restrictions.max_uses;
+
+        if (isExpired) {
+            return {
+                status: false,
+                code: 410,
+                message: "This invitation link has expired",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        if (isAtCapacity) {
+            return {
+                status: false,
+                code: 410,
+                message: "This invitation link has reached its usage limit",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        return {
+            status: true,
+            code: 200,
+            message: "Token info retrieved successfully",
+            data: {
+                event: shareToken.event_id,
+                token_type: shareToken.token_type,
+                permissions: shareToken.permissions,
+                restrictions: {
+                    requires_approval: shareToken.restrictions.requires_approval,
+                    has_email_restrictions: shareToken.restrictions.allowed_emails.length > 0,
+                    expires_at: shareToken.restrictions.expires_at,
+                    max_uses: shareToken.restrictions.max_uses,
+                    current_uses: shareToken.usage.count
+                },
+                inviter: shareToken.created_by
+            },
+            error: null,
+            other: null
+        };
+    } catch (error) {
+        logger.error(`[getTokenInfoService] Error: ${error.message}`);
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to get token info",
+            data: null,
+            error: { message: error.message },
+            other: null
+        };
+    }
+};
+
+export const joinEventViaTokenService = async (data: {
+    token: string;
+    guestInfo: {
+        email: string;
+        name: string;
+        avatar_url: string;
+        is_anonymous: boolean;
+    };
+    userId?: string;
+}): Promise<ServiceResponse<any>> => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const { token, guestInfo, userId } = data;
+
+        // Find and validate token
+        const shareToken = await ShareToken.findOne({
+            token,
+            revoked: false
+        }).session(session);
+
+        if (!shareToken) {
+            await session.abortTransaction();
+            return {
+                status: false,
+                code: 404,
+                message: "Invalid or expired invitation link",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Check if token is expired
+        if (shareToken.restrictions.expires_at && shareToken.restrictions.expires_at < new Date()) {
+            await session.abortTransaction();
+            return {
+                status: false,
+                code: 410,
+                message: "This invitation link has expired",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Check usage limit
+        if (shareToken.restrictions.max_uses && shareToken.usage.count >= shareToken.restrictions.max_uses) {
+            await session.abortTransaction();
+            return {
+                status: false,
+                code: 410,
+                message: "This invitation link has reached its usage limit",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Check email restrictions
+        if (shareToken.restrictions.allowed_emails.length > 0) {
+            const emailAllowed = shareToken.restrictions.allowed_emails.some(
+                allowedEmail => allowedEmail.toLowerCase() === guestInfo.email.toLowerCase()
+            );
+            if (!emailAllowed) {
+                await session.abortTransaction();
+                return {
+                    status: false,
+                    code: 403,
+                    message: "Your email is not authorized to join this event",
+                    data: null,
+                    error: null,
+                    other: null
+                };
+            }
+        }
+
+        // Check if already a participant
+        const existingParticipant = await EventParticipant.findOne({
+            event_id: shareToken.event_id,
+            'identity.email': guestInfo.email.toLowerCase()
+        }).session(session);
+
+        if (existingParticipant) {
+            if (existingParticipant.participation.status === 'active') {
+                await session.abortTransaction();
+                return {
+                    status: false,
+                    code: 409,
+                    message: "You are already a member of this event",
+                    data: { participant_id: existingParticipant._id },
+                    error: null,
+                    other: null
+                };
+            } else if (existingParticipant.participation.status === 'invited') {
+                // Update existing invitation to active
+                const updatedParticipant = await EventParticipant.findByIdAndUpdate(
+                    existingParticipant._id,
+                    {
+                        $set: {
+                            user_id: userId ? new mongoose.Types.ObjectId(userId) : null,
+                            'participation.status': 'active',
+                            'participation.first_joined_at': new Date(),
+                            'participation.invite_accepted_at': new Date(),
+                            'participation.last_seen_at': new Date(),
+                            updated_at: new Date()
+                        }
+                    },
+                    { new: true, session }
+                );
+
+                // Update token usage
+                await ShareToken.findByIdAndUpdate(
+                    shareToken._id,
+                    {
+                        $inc: { 'usage.count': 1 },
+                        $set: { 'usage.last_used_at': new Date() },
+                        $push: { 'usage.used_by': updatedParticipant._id }
+                    },
+                    { session }
+                );
+
+                // Update event stats
+                await Event.findByIdAndUpdate(
+                    shareToken.event_id,
+                    {
+                        $inc: {
+                            'stats.participants.active': 1,
+                            'stats.participants.pending_invites': -1
+                        },
+                        $set: {
+                            updated_at: new Date(),
+                            'stats.engagement.last_activity': new Date()
+                        }
+                    },
+                    { session }
+                );
+
+                await session.commitTransaction();
+
+                return {
+                    status: true,
+                    code: 200,
+                    message: "Successfully joined the event",
+                    data: {
+                        participant: updatedParticipant,
+                        event_id: shareToken.event_id,
+                        redirect_url: `/events/${shareToken.event_id}`
+                    },
+                    error: null,
+                    other: null
+                };
+            }
+        }
+
+        // Create new participant
+        const newParticipant = await EventParticipant.create([{
+            event_id: shareToken.event_id,
+            user_id: userId ? new mongoose.Types.ObjectId(userId) : null,
+            identity: {
+                email: guestInfo.email.toLowerCase(),
+                name: guestInfo.name,
+                avatar_url: guestInfo.avatar_url || '',
+                is_registered_user: !!userId,
+                is_anonymous: guestInfo.is_anonymous || false
+            },
+            participation: {
+                status: shareToken.restrictions.requires_approval ? 'pending' : 'active',
+                role: 'guest',
+                invited_at: new Date(),
+                first_joined_at: new Date(),
+                last_seen_at: new Date(),
+                total_sessions: 0
+            },
+            permissions: {
+                view: { enabled: shareToken.permissions.view, albums: ['all'] },
+                upload: { enabled: shareToken.permissions.upload, albums: ['all'] },
+                download: { enabled: shareToken.permissions.download, albums: ['all'] },
+                share: { enabled: shareToken.permissions.share },
+                moderate: {
+                    can_approve_content: false,
+                    can_remove_content: false,
+                    can_manage_guests: false
+                }
+            },
+            activity: {
+                photos_uploaded: 0,
+                photos_viewed: 0,
+                photos_downloaded: 0,
+                comments_made: 0,
+                shares_created: 0,
+                total_time_spent_minutes: 0,
+                favorite_albums: []
+            },
+            invitation: {
+                invitation_method: 'link',
+                share_token_used: shareToken._id,
+                reminder_count: 0
+            },
+            preferences: {
+                email_notifications: {
+                    new_photos: true,
+                    comments: false,
+                    activity_digest: 'weekly'
+                },
+                privacy: {
+                    show_in_participant_list: true,
+                    allow_others_to_tag: true
+                }
+            },
+            created_at: new Date(),
+            updated_at: new Date()
+        }], { session });
+
+        // Update token usage
+        await ShareToken.findByIdAndUpdate(
+            shareToken._id,
+            {
+                $inc: { 'usage.count': 1 },
+                $set: { 'usage.last_used_at': new Date() },
+                $push: { 'usage.used_by': newParticipant[0]._id }
+            },
+            { session }
+        );
+
+        // Update event stats
+        const statsUpdate = shareToken.restrictions.requires_approval ? {
+            $inc: { 'stats.participants.pending_invites': 1 }
+        } : {
+            $inc: {
+                'stats.participants.total': 1,
+                'stats.participants.active': 1
+            }
+        };
+
+        await Event.findByIdAndUpdate(
+            shareToken.event_id,
+            {
+                ...statsUpdate,
+                $set: {
+                    updated_at: new Date(),
+                    'stats.engagement.last_activity': new Date()
+                }
+            },
+            { session }
+        );
+
+        await session.commitTransaction();
+
+        const message = shareToken.restrictions.requires_approval
+            ? "Your request to join has been sent for approval"
+            : "Successfully joined the event";
+
+        return {
+            status: true,
+            code: 201,
+            message,
+            data: {
+                participant: newParticipant[0],
+                event_id: shareToken.event_id,
+                requires_approval: shareToken.restrictions.requires_approval,
+                redirect_url: `/events/${shareToken.event_id}`
+            },
+            error: null,
+            other: null
+        };
+    } catch (error) {
+        logger.error(`[joinEventViaTokenService] Error: ${error.message}`);
+        await session.abortTransaction();
+        return {
+            status: false,
+            code: 500,
+            message: "Internal server error",
+            data: null,
+            error: error.message,
+            other: null
         };
     }
 };

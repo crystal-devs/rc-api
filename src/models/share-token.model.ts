@@ -1,55 +1,107 @@
-import mongoose, { InferSchemaType } from "mongoose";
+import mongoose, { InferSchemaType, Schema } from "mongoose";
 import { MODEL_NAMES } from "./names";
-import crypto from "crypto";
 
-// Define guest schema
-const guestSchema = new mongoose.Schema({
-    email: { type: String, required: true },
-    invited_at: { type: Date, default: Date.now },
-    accessed_at: { type: Date, default: null },
-    user_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, default: null }, // Will be populated when the user logs in
-}, { _id: false });
+export interface ShareTokenType extends Document {
+  _id: mongoose.Types.ObjectId;
+  event_id: mongoose.Types.ObjectId;
+  album_id?: mongoose.Types.ObjectId;
+  token: string;
+  token_type: 'invite' | 'view_only' | 'collaborate';
+  permissions: {
+    view: boolean;
+    upload: boolean;
+    download: boolean;
+    share: boolean;
+  };
+  restrictions: {
+    max_uses?: number;
+    expires_at?: Date;
+    allowed_emails: string[];
+    requires_approval: boolean;
+    password_hash?: string;
+  };
+  usage: {
+    count: number;
+    last_used?: Date;
+    used_by: mongoose.Types.ObjectId[];
+  };
+  created_by: mongoose.Types.ObjectId;
+  created_at: Date;
+  revoked: boolean;
+  revoked_at?: Date;
+  revoked_by?: mongoose.Types.ObjectId;
+}
 
-// Define permissions schema
-const permissionsSchema = new mongoose.Schema({
+const shareTokenSchema = new Schema<ShareTokenType>({
+  event_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: MODEL_NAMES.EVENT,
+    required: true,
+    index: true
+  },
+  album_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Album',
+    default: null
+  },
+  token: {
+    type: String,
+    required: true,
+    unique: true,
+    index: true
+  },
+  token_type: {
+    type: String,
+    enum: ['invite', 'view_only', 'collaborate'],
+    default: 'invite'
+  },
+  permissions: {
     view: { type: Boolean, default: true },
     upload: { type: Boolean, default: false },
     download: { type: Boolean, default: false },
     share: { type: Boolean, default: false },
-}, { _id: false });
-
-// Define share token schema
-const shareTokenSchema = new mongoose.Schema({
-    _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
-    token: { 
-        type: String, 
-        unique: true, 
-        required: true,
-        default: () => crypto.randomBytes(12).toString('base64url') // Generate a secure random token
-    },
-    event_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.EVENT, required: true },
-    album_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.ALBUM, default: null },
-    password_hash: { type: String, default: null },
-    permissions: { type: permissionsSchema, required: true, default: () => ({}) },
-    created_at: { type: Date, default: Date.now },
-    expires_at: { type: Date, default: null },
-    created_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: true },
-    usage_count: { type: Number, default: 0 },
-    revoked: { type: Boolean, default: false },
-    revoked_at: { type: Date, default: null },
-    revoked_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, default: null },
-    
-    // Guest access control fields
-    is_restricted_to_guests: { type: Boolean, default: false }, // If true, only invited guests can access
-    invited_guests: { type: [guestSchema], default: [] },       // List of invited guests
+    comment: { type: Boolean, default: true }
+  },
+  restrictions: {
+    max_uses: Number,
+    expires_at: Date,
+    allowed_emails: [{ type: String, lowercase: true }],
+    requires_approval: { type: Boolean, default: false }
+  },
+  usage: {
+    count: { type: Number, default: 0 },
+    last_used: Date,
+    used_by: [{ type: mongoose.Schema.Types.ObjectId, ref: 'EventParticipant' }]
+  },
+  created_by: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: MODEL_NAMES.USER,
+    required: true
+  },
+  created_at: {
+    type: Date,
+    default: Date.now
+  },
+  revoked: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  revoked_at: Date,
+  revoked_by: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: MODEL_NAMES.USER
+  }
 });
 
-// Create indexes for better performance
-shareTokenSchema.index({ token: 1 });
-shareTokenSchema.index({ event_id: 1 });
-shareTokenSchema.index({ album_id: 1 });
+// Indexes for efficient queries
+shareTokenSchema.index({ event_id: 1, revoked: 1 });
+shareTokenSchema.index({ token_type: 1, revoked: 1 });
+shareTokenSchema.index({ 'restrictions.expires_at': 1 });
+shareTokenSchema.index({ created_by: 1 });
+
 
 export const ShareToken = mongoose.model(MODEL_NAMES.SHARE_TOKEN, shareTokenSchema, MODEL_NAMES.SHARE_TOKEN);
 
-export type ShareTokenType = InferSchemaType<typeof shareTokenSchema>;
-export type ShareTokenCreationType = Omit<ShareTokenType, '_id'>;
+// export type ShareTokenType = InferSchemaType<typeof shareTokenSchema>;
+// export type ShareTokenCreationType = Omit<ShareTokenType, '_id'>;

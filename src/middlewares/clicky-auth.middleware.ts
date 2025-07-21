@@ -5,6 +5,7 @@ import { getUserByIdService } from "@services/user.service";
 import { injectedRequest } from "types/injected-types";
 
 export const authMiddleware = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+    console.log('===== AUTH MIDDLEWARE =====');
     // Skip authorization check for OPTIONS requests (CORS preflight)
     if (req.method === 'OPTIONS') {
         next();

@@ -1,176 +1,540 @@
+// controllers/event.controller.ts
+
+
 import { trimObject } from "@utils/sanitizers.util";
-import { NextFunction, Response } from "express"
-import { injectedRequest } from "types/injected-types"
+import { NextFunction, Response } from "express";
+import { injectedRequest } from "types/injected-types";
 import * as eventService from "@services/event.service";
 import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
 import { createDefaultAlbumForEvent } from "@services/album.service";
-import { getEventSharingStatusService } from "@services/share-token.service";
+import { Event, EventType } from "@models/event.model";
 
-export const createeventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+interface InjectedRequest extends Request {
+    user: {
+        _id: string;
+        [key: string]: any;
+    };
+}
+
+interface EventCreationInput {
+    title: string;
+    description?: string;
+    start_date?: string | Date;
+    end_date?: string | Date;
+    timezone?: string;
+    location?: {
+        name?: string;
+        address?: string;
+        coordinates?: [number, number];
+    };
+    cover_image?: {
+        url?: string;
+        public_id?: string;
+        thumbnail_url?: string;
+    };
+    template?: 'wedding' | 'birthday' | 'concert' | 'corporate' | 'vacation' | 'custom';
+    visibility?: 'anyone_with_link' | 'invited_only' | 'private';
+    permissions?: {
+        can_view?: boolean;
+        can_upload?: boolean;
+        can_download?: boolean;
+        allowed_media_types?: {
+            images?: boolean;
+            videos?: boolean;
+        };
+        require_approval?: boolean;
+    };
+    share_settings?: {
+        is_active?: boolean;
+        password?: string;
+        expires_at?: string | Date;
+    };
+    co_hosts?: Array<{
+        user_id: string | mongoose.Types.ObjectId;
+        invited_by: string | mongoose.Types.ObjectId;
+        status?: 'pending' | 'approved' | 'rejected';
+        permissions?: {
+            manage_content?: boolean;
+            manage_guests?: boolean;
+            manage_settings?: boolean;
+            approve_content?: boolean;
+        };
+    }>;
+}
+
+export const createEventController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
-        let { title, description, start_date, end_date, is_private = false, cover_image, location, template, accessType } = trimObject(req.body);
-        // Validate required fields
-        if (!title) throw new Error("Title is a required field");
-
-        // Validate date logic
-        if (start_date && end_date && start_date > end_date) {
-            throw new Error("Start date must be before end date");
-        }
-        else if (start_date) start_date = new Date(start_date)
-        else if (end_date) end_date = new Date(end_date)
-
-        // Type checking
-        if (typeof title !== "string" || typeof description !== "string") {
-            throw new Error("Invalid data type for title or description");
-        }
-        if (start_date && !(start_date instanceof Date)) {
-            throw new Error("Invalid data type for start_date");
-        }
-        if (end_date && !(end_date instanceof Date)) {
-            throw new Error("Invalid data type for end_date");
+        // Validate req.user._id
+        if (!req.user || !req.user._id) {
+            console.error('createEventController: req.user or req.user._id is undefined');
+            throw new Error('User authentication required');
         }
 
-        const response = await eventService.createEventService({
-            title,
-            description,
-            start_date,
-            end_date,
-            created_by: new mongoose.Types.ObjectId(req.user._id),
-            is_private,
-            is_shared: false,
-            created_at: new Date(),
-            cover_image: cover_image || "",
-            location: location || "",
-            template: template || "custom",
+        console.log('createEventController: req.user._id =', req.user._id);
+
+        const { title, template, start_date, end_date } = trimObject(req.body) as EventCreationInput;
+
+        // Validation
+        if (!title?.trim()) throw new Error('Event title is required');
+        if (title.length > 100) throw new Error('Event title must be less than 100 characters');
+
+        // Validate template
+        const validTemplates = ['wedding', 'birthday', 'concert', 'corporate', 'vacation', 'custom'];
+        if (!validTemplates.includes(template)) throw new Error('Invalid template type');
+
+        // Date validation
+        const startDate = start_date ? new Date(start_date) : new Date();
+        const endDate = end_date ? new Date(end_date) : null;
+
+        if (isNaN(startDate.getTime())) throw new Error('Invalid start date');
+        if (endDate && isNaN(endDate.getTime())) throw new Error('Invalid end date');
+        if (startDate && endDate && startDate >= endDate)
+            throw new Error('End date must be after start date');
+
+        // Prepare event data (minimal, relying on schema defaults)
+        const eventData: Partial<EventType> = {
+            title: title.trim(),
+            template,
+            created_by: new mongoose.Types.ObjectId(req.user._id), // Set created_by explicitly
+            start_date: startDate,
+            end_date: endDate,
+            // Other fields (description, timezone, location, cover_image, visibility, permissions, share_settings, co_hosts, stats)
+            // are omitted to use schema defaults
+        };
+
+        console.log('createEventController: eventData.created_by =', eventData.created_by.toString());
+
+        const response = await eventService.createEventService(eventData);
+
+        if (!response || typeof response.status === 'undefined') {
+            console.error('Invalid response from createEventService:', response);
+            res.status(500).json({
+                status: false,
+                message: 'Internal server error - invalid service response',
+                data: null,
+            });
+            return;
+        }
+
+        // Create default album and add creator as participant
+        if (response.status && response.data?._id) {
+            try {
+                await Promise.all([
+                    createDefaultAlbumForEvent(response.data._id.toString(), req.user._id.toString()),
+                    eventService.addCreatorAsParticipant(response.data._id.toString(), req.user._id.toString()),
+                ]);
+            } catch (albumError) {
+                console.error('Error creating default album:', albumError);
+                // Continue even if album creation fails
+            }
+        }
+
+        // Send response
+        res.status(response.status ? 201 : 400).json(response);
+    } catch (error) {
+        console.error('Error in createEventController:', error);
+        res.status(500).json({
+            status: false,
+            message: error.message || 'Internal server error',
+            data: null,
         });
+    }
+};
 
-        // If event created successfully, create a default album
-        if (response.status && response.data && response.data._id) {
-            await createDefaultAlbumForEvent(
-                response.data._id.toString(),
-                req.user._id.toString()
-            );
+// // Helper function to generate unique event code
+const generateUniqueEventCode = async (template: string): Promise<string> => {
+    let attempts = 0;
+    const maxAttempts = 5;
+
+    while (attempts < maxAttempts) {
+        const code = `${template.toUpperCase()}-${Date.now().toString(36)}-${Math.random().toString(36).substr(2, 5)}`;
+
+        // Check if code already exists
+        const existingEvent = await Event.findOne({ event_code: code });
+        if (!existingEvent) {
+            return code;
         }
-
-        sendResponse(res, response);
-    } catch (_err) {
-        next(_err)
+        attempts++;
     }
-}
 
-export const getUsereventsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    // Fallback with timestamp if all attempts fail
+    return `${template.toUpperCase()}-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
+};
+
+
+export const getUserEventsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
-        const user_id = req.user._id.toString(); // we will defenetly get the user id from the auth middleware
-        const response = await eventService.geteventsByeventIdOrUserId({ user_id });
-        sendResponse(res, response);
-    } catch (_err) {
-        next(_err);
-    }
-}
+        const userId = req.user._id.toString();
+        const {
+            page = 1,
+            limit = 10,
+            sort = '-created_at',
+            status = 'all', // 'active', 'archived', 'all'
+            privacy = 'all', // 'public', 'private', 'all'
+            template,
+            search,
+            tags
+        } = trimObject(req.query);
 
-export const geteventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+        const filters = {
+            userId,
+            page: Math.max(1, parseInt(page as string)),
+            limit: Math.min(50, Math.max(1, parseInt(limit as string))),
+            sort: sort as string,
+            status: status as string,
+            privacy: privacy as string,
+            template: template as string,
+            search: search as string,
+            tags: tags ? (tags as string).split(',') : undefined
+        };
+
+        const response = await eventService.getUserEventsService(filters);
+        console.log('===== GET USER EVENTS REQUEST =====', response);
+        sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const getEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const { event_id } = trimObject(req.params);
-        console.log(event_id, 'event id')
-        if (!event_id) throw new Error("event id is required");
-        const response = await eventService.geteventsByeventIdOrUserId({ event_id });
-        console.log(response, 'response')
+        const userId = req.user._id.toString();
+
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+
+        const response = await eventService.getEventDetailService(event_id, userId);
         sendResponse(res, response);
-    } catch (_err) {
-        next(_err);
+    } catch (error) {
+        next(error);
     }
-}
+};
 
-export const updateeventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
-    try {
-        let { title, description, start_date, end_date, is_private, share_settings } = trimObject(req.body);
-        const { event_id } = trimObject(req.params);
-        console.log(req.body, 'req.body');
-        // Validate event_id
-        if (!event_id) throw new Error("event ID is required");
+export const updateEventController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+    // try {
+    //     const { event_id } = trimObject(req.params);
+    //     const userId = req.user._id.toString();
+    //     const updateData = trimObject(req.body);
 
-        // Initialize update object
-        const updateData: any = {};
+    //     if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+    //         res.status(400).json({
+    //             status: false,
+    //             message: 'Valid event ID is required',
+    //             data: null
+    //         });
+    //         return;
+    //     }
 
-        // Conditionally add fields to update object
-        if (title) {
-            if (typeof title !== "string") throw new Error("Invalid data type for title");
-            updateData.title = title;
-        }
-        if (description) {
-            if (typeof description !== "string") throw new Error("Invalid data type for description");
-            updateData.description = description;
-        }
-        if (start_date) {
-            start_date = new Date(start_date)
-            if (!(start_date instanceof Date)) throw new Error("Invalid data type for start_date");
-            updateData.start_date = start_date;
-        }
-        if (end_date) {
-            end_date = new Date(end_date)
-            if (!(end_date instanceof Date)) throw new Error("Invalid data type for end_date");
-            updateData.end_date = end_date;
-        }
+    //     // Validate update permissions
+    //     const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
+    //     if (!hasPermission) {
+    //         res.status(403).json({
+    //             status: false,
+    //             message: "You don't have permission to update this event",
+    //             data: null
+    //         });
+    //         return;
+    //     }
 
-        // Validate date logic if both dates are present
-        if (updateData.start_date && updateData.end_date && updateData.start_date > updateData.end_date) {
-            throw new Error("Start date must be before end date");
-        }
-        updateData.is_private = is_private !== undefined ? is_private : false;
-        if (share_settings) updateData.share_settings = share_settings;
-        console.log(updateData, 'updateData')
-        // Perform the update
-        const response = await eventService.updateeventService(event_id, updateData);
-        sendResponse(res, response);
-    } catch (_err) {
-        next(_err);
-    }
-}
+    //     // Get current event for visibility transition handling
+    //     const currentEvent = await Event.findById(event_id);
+    //     if (!currentEvent) {
+    //         res.status(404).json({
+    //             status: false,
+    //             message: 'Event not found',
+    //             data: null
+    //         });
+    //         return;
+    //     }
+
+    //     // Define fields that can be updated
+    //     const fieldsToProcess = [
+    //         'title',
+    //         'description',
+    //         'start_date',
+    //         'end_date',
+    //         'location',
+    //         'privacy',
+    //         'default_guest_permissions'
+    //     ];
+
+    //     // Process and validate update data
+    //     const processedUpdateData = await eventService.processEventUpdateData(updateData, fieldsToProcess);
+
+    //     // Handle visibility transitions if privacy is being updated
+    //     let transitionResult = null;
+    //     if (processedUpdateData.privacy?.visibility &&
+    //         processedUpdateData.privacy.visibility !== currentEvent.privacy.visibility) {
+
+    //         try {
+    //             transitionResult = await eventService.handleVisibilityTransition(
+    //                 event_id,
+    //                 currentEvent.privacy.visibility,
+    //                 processedUpdateData.privacy.visibility,
+    //                 userId
+    //             );
+    //         } catch (transitionError) {
+    //             console.error('Error handling visibility transition:', transitionError);
+    //             // Continue with update even if transition handling fails
+    //         }
+    //     }
+
+    //     const response = await eventService.updateEventService(event_id, processedUpdateData, userId);
+
+    //     // Check if response has proper structure
+    //     if (!response || typeof response.status === 'undefined') {
+    //         console.error('Invalid response from updateEventService:', response);
+    //         res.status(500).json({
+    //             status: false,
+    //             message: 'Internal server error - invalid service response',
+    //             data: null
+    //         });
+    //         return;
+    //     }
+
+    //     // Include transition result in response if applicable
+    //     if (transitionResult) {
+    //         response.visibility_transition = transitionResult;
+    //     }
+
+    //     // Send proper response
+    //     if (response.status) {
+    //         res.status(200).json(response);
+    //     } else {
+    //         res.status(400).json(response);
+    //     }
+    // } catch (error) {
+    //     console.error('Error in updateEventController:', error);
+    //     res.status(500).json({
+    //         status: false,
+    //         message: error.message || 'Internal server error',
+    //         data: null
+    //     });
+    // }
+};
+
 
 export const deleteEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const { event_id } = trimObject(req.params);
-
-        // Validate event_id
-        if (!event_id) {
-            throw new Error("Event ID is required");
-        }
-
-        const user_id = req.user._id.toString();
-
-        console.log(`[deleteEventController] Deleting event: ${event_id} by user: ${user_id}`);
-
-        // Call the delete event service
-        const response = await eventService.deleteEventService(event_id, user_id);
-
-        console.log(`[deleteEventController] Delete response: ${JSON.stringify(response)}`);
-
-        sendResponse(res, response);
-    } catch (_err) {
-        next(_err);
-    }
-}
-
-// Get event sharing status
-export const getEventSharingStatusController = async (req: injectedRequest, res: Response, next: NextFunction) => {
-    try {
-        const { event_id } = trimObject(req.params);
+        const userId = req.user._id.toString();
 
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
-            return sendResponse(res, {
-                status: false,
-                code: 400,
-                message: "Invalid event ID",
-                data: null,
-                error: { message: "A valid event ID is required" },
-                other: null
-            });
+            throw new Error("Valid event ID is required");
         }
 
-        const response = await getEventSharingStatusService(event_id, req.user._id.toString());
+        const response = await eventService.deleteEventService(event_id, userId);
         sendResponse(res, response);
-    } catch (err) {
-        next(err);
+    } catch (error) {
+        next(error);
     }
 };
+
+// ============= SEARCH & DISCOVERY =============
+
+export const searchEventsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const userId = req.user._id.toString();
+        const searchFilters = {
+            ...trimObject(req.query),
+            userId
+        };
+
+        // const response = await eventService.searchEventsService(searchFilters);
+        // sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const getEventsByTagController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { tag } = trimObject(req.params);
+        const userId = req.user._id.toString();
+        const { page = 1, limit = 10 } = trimObject(req.query);
+
+        if (!tag) throw new Error("Tag is required");
+
+        // const response = await eventService.getEventsByTagService({
+        //     tag,
+        //     userId,
+        //     page: parseInt(page as string),
+        //     limit: parseInt(limit as string)
+        // });
+
+        // sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const getFeaturedEventsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { page = 1, limit = 10 } = trimObject(req.query);
+
+        // const response = await eventService.getFeaturedEventsService({
+        //     page: parseInt(page as string),
+        //     limit: parseInt(limit as string)
+        // });
+
+        // sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ============= ANALYTICS & ACTIVITY =============
+
+export const getEventAnalyticsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        const userId = req.user._id.toString();
+        const {
+            period = '7d', // '24h', '7d', '30d', '90d', 'all'
+            metrics = 'all' // 'engagement', 'content', 'participants', 'all'
+        } = trimObject(req.query);
+
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+
+        // const response = await eventService.getEventAnalyticsService({
+        //     eventId: event_id,
+        //     userId,
+        //     period: period as string,
+        //     metrics: metrics as string
+        // });
+
+        // sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const getEventActivityController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        const userId = req.user._id.toString();
+        const {
+            page = 1,
+            limit = 20,
+            type = 'all' // 'upload', 'view', 'comment', 'join', 'all'
+        } = trimObject(req.query);
+
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+
+        // const response = await eventService.getEventActivityService({
+        //     eventId: event_id,
+        //     userId,
+        //     page: parseInt(page as string),
+        //     limit: parseInt(limit as string),
+        //     type: type as string
+        // });
+
+        // sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ============= ALBUMS MANAGEMENT =============
+
+export const getEventAlbumsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        const userId = req.user._id.toString();
+
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+
+        // const response = await eventService.getEventAlbumsService(event_id, userId);
+        // sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const createEventAlbumController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        const userId = req.user._id.toString();
+        const { name, description, is_private = false } = trimObject(req.body);
+
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+        if (!name?.trim()) throw new Error("Album name is required");
+
+        // const response = await eventService.createEventAlbumService({
+        //     eventId: event_id,
+        //     userId,
+        //     name: name.trim(),
+        //     description: description?.trim() || "",
+        //     isPrivate: is_private
+        // });
+
+        // sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ============= SETTINGS & PREFERENCES =============
+
+export const updateEventPrivacyController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        const userId = req.user._id.toString();
+        const privacySettings = trimObject(req.body);
+
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+
+        // const response = await eventService.updateEventPrivacyService(event_id, userId, privacySettings);
+        // sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const updateDefaultPermissionsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        const userId = req.user._id.toString();
+        const permissions = trimObject(req.body);
+
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+
+        // const response = await eventService.updateDefaultPermissionsService(event_id, userId, permissions);
+        // sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const toggleEventArchiveController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        const userId = req.user._id.toString();
+        const { archive = true } = trimObject(req.body);
+
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+
+        // const response = await eventService.toggleEventArchiveService(event_id, userId, archive);
+        // sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
