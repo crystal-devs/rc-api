@@ -1077,7 +1077,7 @@ export const processEventUpdateData = async (
         'start_date',
         'end_date',
         'location',
-        'privacy',
+        'visibility',
         'default_guest_permissions'
     ]
 ): Promise<Record<string, any>> => {
@@ -1122,8 +1122,8 @@ export const processEventUpdateData = async (
         processed.location = processLocationData(updateData.location);
     }
 
-    if (processFields.includes('privacy') && updateData.privacy) {
-        processed.privacy = await processPrivacyUpdateData(updateData.privacy);
+    if (processFields.includes('visibility') && updateData.visibility) {
+        processed.visibility = updateData.visibility;
     }
 
     if (processFields.includes('default_guest_permissions') && updateData.default_guest_permissions) {
@@ -1132,104 +1132,6 @@ export const processEventUpdateData = async (
 
     // Always update the updated_at timestamp
     processed.updated_at = new Date();
-
-    return processed;
-};
-
-const processPrivacyUpdateData = async (privacyData: any): Promise<any> => {
-    const processed: any = {};
-
-    // Validate visibility
-    if (privacyData.visibility) {
-        const validVisibilities = ['unlisted', 'restricted', 'private'];
-        if (!validVisibilities.includes(privacyData.visibility)) {
-            throw new Error('Invalid visibility setting');
-        }
-        processed.visibility = privacyData.visibility;
-    }
-
-    // Process guest management settings
-    if (privacyData.guest_management) {
-        processed.guest_management = {};
-        const gm = privacyData.guest_management;
-
-        if (gm.require_approval !== undefined) {
-            processed.guest_management.require_approval = Boolean(gm.require_approval);
-        }
-        if (gm.max_guests !== undefined) {
-            const maxGuests = parseInt(gm.max_guests);
-            if (maxGuests < 1 || maxGuests > 10000) {
-                throw new Error('Max guests must be between 1 and 10000');
-            }
-            processed.guest_management.max_guests = maxGuests;
-        }
-        if (gm.allow_anonymous !== undefined) {
-            processed.guest_management.allow_anonymous = Boolean(gm.allow_anonymous);
-        }
-        if (gm.auto_approve_invited !== undefined) {
-            processed.guest_management.auto_approve_invited = Boolean(gm.auto_approve_invited);
-        }
-        if (gm.anonymous_transition_policy) {
-            const validPolicies = ['block_all', 'grace_period', 'force_login'];
-            if (!validPolicies.includes(gm.anonymous_transition_policy)) {
-                throw new Error('Invalid anonymous transition policy');
-            }
-            processed.guest_management.anonymous_transition_policy = gm.anonymous_transition_policy;
-        }
-        if (gm.grace_period_hours !== undefined) {
-            const hours = parseInt(gm.grace_period_hours);
-            if (hours < 1 || hours > 168) { // 1 hour to 1 week
-                throw new Error('Grace period must be between 1 and 168 hours');
-            }
-            processed.guest_management.grace_period_hours = hours;
-        }
-        if (gm.anonymous_content_policy) {
-            const validPolicies = ['preserve_and_transfer', 'preserve_as_anonymous', 'delete_on_expire'];
-            if (!validPolicies.includes(gm.anonymous_content_policy)) {
-                throw new Error('Invalid anonymous content policy');
-            }
-            processed.guest_management.anonymous_content_policy = gm.anonymous_content_policy;
-        }
-    }
-
-    // Process content controls
-    if (privacyData.content_controls) {
-        processed.content_controls = {};
-        const cc = privacyData.content_controls;
-
-        if (cc.allow_downloads !== undefined) {
-            processed.content_controls.allow_downloads = Boolean(cc.allow_downloads);
-        }
-        if (cc.allow_sharing !== undefined) {
-            processed.content_controls.allow_sharing = Boolean(cc.allow_sharing);
-        }
-        if (cc.require_watermark !== undefined) {
-            processed.content_controls.require_watermark = Boolean(cc.require_watermark);
-        }
-        if (cc.approval_mode) {
-            const validModes = ['auto', 'manual', 'ai_assisted'];
-            if (!validModes.includes(cc.approval_mode)) {
-                throw new Error('Invalid approval mode');
-            }
-            processed.content_controls.approval_mode = cc.approval_mode;
-        }
-        if (cc.max_file_size_mb !== undefined) {
-            const size = parseInt(cc.max_file_size_mb);
-            if (size < 1 || size > 500) {
-                throw new Error('File size limit must be between 1 and 500 MB');
-            }
-            processed.content_controls.max_file_size_mb = size;
-        }
-        if (cc.auto_compress_uploads !== undefined) {
-            processed.content_controls.auto_compress_uploads = Boolean(cc.auto_compress_uploads);
-        }
-        if (cc.allowed_media_types) {
-            processed.content_controls.allowed_media_types = {
-                images: Boolean(cc.allowed_media_types.images ?? true),
-                videos: Boolean(cc.allowed_media_types.videos ?? true)
-            };
-        }
-    }
 
     return processed;
 };

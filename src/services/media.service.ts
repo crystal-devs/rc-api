@@ -475,3 +475,139 @@ export const deleteMediaService = async (
         };
     }
 };
+
+/**
+ * Upload guest media to ImageKit and create a Media record with guest context
+ */
+export const uploadGuestMediaService = async (
+    file: Express.Multer.File,
+    event_owner_id: string, // Event owner acts as the uploader
+    album_id: string,
+    event_id: string,
+    guestInfo: {
+        name: string;
+        email: string | null;
+        ip_address: string;
+        user_agent: string;
+    }
+): Promise<ServiceResponse<MediaCreationType>> => {
+    try {
+        const fileBuffer = await fs.readFile(file.path);
+
+        const fileType = (() => {
+            if (file.mimetype.startsWith("image/")) return "image";
+            if (file.mimetype.startsWith("video/")) return "video";
+            return null;
+        })();
+
+        if (!fileType) {
+            await fs.unlink(file.path);
+            return {
+                status: false,
+                code: 400,
+                message: "Unsupported file type",
+                data: null,
+                error: { message: "Only image and video files are supported" },
+                other: null,
+            };
+        }
+
+        // Calculate file size in MB
+        const fileSizeInMB = file.size / (1024 * 1024);
+
+        // For guest uploads, we'll check against the event owner's limits
+        const canUpload = await checkUserLimitsService(event_owner_id, 'storage', fileSizeInMB);
+
+        if (!canUpload) {
+            await fs.unlink(file.path);
+            return {
+                status: false,
+                code: 403,
+                message: "Event storage limit exceeded",
+                data: null,
+                error: {
+                    message: "This event has reached its storage limit. Please contact the event organizer."
+                },
+                other: null,
+            };
+        }
+
+        // Upload file to ImageKit with guest prefix
+        const uploadResult = await imagekit.upload({
+            file: fileBuffer,
+            fileName: `guest_${Date.now()}_${file.originalname}`,
+            folder: `/media/guest-uploads`,
+        });
+
+        await fs.unlink(file.path); // Always clean up
+
+        // Create media record with guest context
+        const media = await Media.create({
+            url: uploadResult.url,
+            type: fileType,
+            album_id: new mongoose.Types.ObjectId(album_id),
+            event_id: new mongoose.Types.ObjectId(event_id),
+            uploaded_by: new mongoose.Types.ObjectId(event_owner_id), // Event owner as uploader
+            size_mb: fileSizeInMB,
+            original_filename: file.originalname,
+            
+            // Guest-specific fields
+            approval: {
+                status: 'auto_approved', // Auto-approve guest uploads
+                auto_approval_reason: 'invited_guest',
+                approved_at: new Date()
+            },
+            
+            upload_context: {
+                method: 'web',
+                ip_address: guestInfo.ip_address,
+                user_agent: guestInfo.user_agent
+            },
+
+            // Store guest info in metadata
+            metadata: {
+                ...{}, // other metadata
+                guest_info: {
+                    name: guestInfo.name,
+                    email: guestInfo.email,
+                    is_guest_upload: true
+                }
+            }
+        });
+
+        // Update event owner's usage metrics (since they're the "uploader")
+        try {
+            await updateUsageForUpload(event_owner_id, fileSizeInMB, event_id);
+            logger.info(`Updated usage for event owner ${event_owner_id} - Added ${fileSizeInMB}MB (guest upload)`);
+        } catch (usageError) {
+            logger.error(`Failed to update usage for event owner ${event_owner_id}: ${usageError}`);
+        }
+
+        return {
+            status: true,
+            code: 201,
+            message: "Guest media upload successful",
+            data: media,
+            error: null,
+            other: {
+                guest_name: guestInfo.name,
+                auto_approved: true
+            },
+        };
+
+    } catch (err: any) {
+        if (file?.path) await fs.unlink(file.path).catch(() => { });
+
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to upload guest media",
+            data: null,
+            error: {
+                message: err.message,
+                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+            },
+            other: null,
+        };
+    }
+};
