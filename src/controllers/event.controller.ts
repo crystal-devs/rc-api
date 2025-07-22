@@ -207,6 +207,7 @@ export const getEventController = async (req: injectedRequest, res: Response, ne
         }
 
         const response = await eventService.getEventDetailService(event_id, userId);
+        console.log('===== GET EVENT DETAIL REQUEST =====', response);
         sendResponse(res, response);
     } catch (error) {
         next(error);
@@ -214,106 +215,101 @@ export const getEventController = async (req: injectedRequest, res: Response, ne
 };
 
 export const updateEventController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
-    // try {
-    //     const { event_id } = trimObject(req.params);
-    //     const userId = req.user._id.toString();
-    //     const updateData = trimObject(req.body);
+    try {
+        const { event_id } = trimObject(req.params);
+        const userId = req.user._id.toString();
+        const updateData = trimObject(req.body);
 
-    //     if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
-    //         res.status(400).json({
-    //             status: false,
-    //             message: 'Valid event ID is required',
-    //             data: null
-    //         });
-    //         return;
-    //     }
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            res.status(400).json({
+                status: false,
+                message: 'Valid event ID is required',
+                data: null
+            });
+            return;
+        }
 
-    //     // Validate update permissions
-    //     const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
-    //     if (!hasPermission) {
-    //         res.status(403).json({
-    //             status: false,
-    //             message: "You don't have permission to update this event",
-    //             data: null
-    //         });
-    //         return;
-    //     }
+        // Validate update permissions
+        const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
+        if (!hasPermission) {
+            res.status(403).json({
+                status: false,
+                message: "You don't have permission to update this event",
+                data: null
+            });
+            return;
+        }
 
-    //     // Get current event for visibility transition handling
-    //     const currentEvent = await Event.findById(event_id);
-    //     if (!currentEvent) {
-    //         res.status(404).json({
-    //             status: false,
-    //             message: 'Event not found',
-    //             data: null
-    //         });
-    //         return;
-    //     }
+        // Get current event for visibility transition handling
+        const currentEvent = await Event.findById(event_id);
+        if (!currentEvent) {
+            res.status(404).json({
+                status: false,
+                message: 'Event not found',
+                data: null
+            });
+            return;
+        }
 
-    //     // Define fields that can be updated
-    //     const fieldsToProcess = [
-    //         'title',
-    //         'description',
-    //         'start_date',
-    //         'end_date',
-    //         'location',
-    //         'privacy',
-    //         'default_guest_permissions'
-    //     ];
+        // Define fields that can be updated
+        const fieldsToProcess = [
+            'title',
+            'description',
+            'start_date',
+            'end_date',
+            'location',
+            'visibility',
+            'default_guest_permissions'
+        ];
 
-    //     // Process and validate update data
-    //     const processedUpdateData = await eventService.processEventUpdateData(updateData, fieldsToProcess);
+        // Process and validate update data
+        const processedUpdateData = await eventService.processEventUpdateData(updateData, fieldsToProcess);
 
-    //     // Handle visibility transitions if privacy is being updated
-    //     let transitionResult = null;
-    //     if (processedUpdateData.privacy?.visibility &&
-    //         processedUpdateData.privacy.visibility !== currentEvent.privacy.visibility) {
+        // Handle visibility transitions if privacy is being updated
+        // let transitionResult = null;
+        // if (processedUpdateData?.visibility &&
+        //     processedUpdateData.visibility !== currentEvent.visibility) {
 
-    //         try {
-    //             transitionResult = await eventService.handleVisibilityTransition(
-    //                 event_id,
-    //                 currentEvent.privacy.visibility,
-    //                 processedUpdateData.privacy.visibility,
-    //                 userId
-    //             );
-    //         } catch (transitionError) {
-    //             console.error('Error handling visibility transition:', transitionError);
-    //             // Continue with update even if transition handling fails
-    //         }
-    //     }
+        //     try {
+        //         transitionResult = await eventService.handleVisibilityTransition(
+        //             event_id,
+        //             currentEvent.visibility,
+        //             processedUpdateData.visibility,
+        //             userId
+        //         );
+        //     } catch (transitionError) {
+        //         console.error('Error handling visibility transition:', transitionError);
+        //         // Continue with update even if transition handling fails
+        //     }
+        // }
 
-    //     const response = await eventService.updateEventService(event_id, processedUpdateData, userId);
+        const response = await eventService.updateEventService(event_id, processedUpdateData, userId);
 
-    //     // Check if response has proper structure
-    //     if (!response || typeof response.status === 'undefined') {
-    //         console.error('Invalid response from updateEventService:', response);
-    //         res.status(500).json({
-    //             status: false,
-    //             message: 'Internal server error - invalid service response',
-    //             data: null
-    //         });
-    //         return;
-    //     }
+        // Check if response has proper structure
+        if (!response || typeof response.status === 'undefined') {
+            console.error('Invalid response from updateEventService:', response);
+            res.status(500).json({
+                status: false,
+                message: 'Internal server error - invalid service response',
+                data: null
+            });
+            return;
+        }
 
-    //     // Include transition result in response if applicable
-    //     if (transitionResult) {
-    //         response.visibility_transition = transitionResult;
-    //     }
-
-    //     // Send proper response
-    //     if (response.status) {
-    //         res.status(200).json(response);
-    //     } else {
-    //         res.status(400).json(response);
-    //     }
-    // } catch (error) {
-    //     console.error('Error in updateEventController:', error);
-    //     res.status(500).json({
-    //         status: false,
-    //         message: error.message || 'Internal server error',
-    //         data: null
-    //     });
-    // }
+        // Send proper response
+        if (response.status) {
+            res.status(200).json(response);
+        } else {
+            res.status(400).json(response);
+        }
+    } catch (error) {
+        console.error('Error in updateEventController:', error);
+        res.status(500).json({
+            status: false,
+            message: error.message || 'Internal server error',
+            data: null
+        });
+    }
 };
 
 

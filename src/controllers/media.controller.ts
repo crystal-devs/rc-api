@@ -1,11 +1,12 @@
 // controllers/media.controller.ts
 
 import { getOrCreateDefaultAlbum } from "@services/album.service";
-import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService, deleteMediaService } from "@services/media.service";
+import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService, deleteMediaService, uploadGuestMediaService } from "@services/media.service";
 import { sendResponse } from "@utils/express.util";
 import { NextFunction, RequestHandler, Response } from "express";
 import { injectedRequest } from "types/injected-types";
 import mongoose from "mongoose";
+import { Event } from "@models/event.model";
 
 /**
  * Regular media upload controller
@@ -232,6 +233,7 @@ export const getMediaByEventController: RequestHandler = async (
         // Call service
         const response = await getMediaByEventService(event_id, options, userId);
 
+        console.log('Media fetched successfully:', response);
         // Send response
         res.status(response.code).json(response);
 
@@ -306,6 +308,104 @@ export const deleteMediaController: RequestHandler = async (req: injectedRequest
         sendResponse(res, response);
     } catch (_err) {
         console.error('Error in deleteMediaController:', _err);
+        next(_err);
+    }
+};
+
+
+export const guestUploadMediaController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+        const file = req.file;
+        let { album_id, event_id, guest_name, guest_email } = req.body;
+
+        console.log('Guest media upload request:', {
+            file: file ? `File present: ${file.originalname}` : 'No file',
+            album_id: album_id ? `Album ID: ${album_id}` : 'No album ID',
+            event_id: event_id ? `Event ID: ${event_id}` : 'No event ID',
+            guest_name: guest_name || 'Anonymous',
+            guest_email: guest_email || 'Not provided',
+            body: JSON.stringify(req.body)
+        });
+
+        if (!file) {
+            res.status(400).json({
+                status: false,
+                message: "Missing file",
+                error: { message: "File is required" },
+            });
+            return;
+        }
+
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            res.status(400).json({
+                status: false,
+                message: "Invalid or missing event_id",
+                error: { message: "A valid event_id is required" },
+            });
+            return;
+        }
+
+        // Check if event exists and allows guest uploads
+        const event = await Event.findById(event_id);
+        if (!event) {
+            res.status(404).json({
+                status: false,
+                message: "Event not found",
+                error: { message: "The specified event does not exist" },
+            });
+            return;
+        }
+
+        // Check if event allows guest uploads
+        if (!event.permissions.can_upload) {
+            res.status(403).json({
+                status: false,
+                message: "Guest uploads not allowed",
+                error: { message: "This event does not allow guest uploads" },
+                requires_login: true
+            });
+            return;
+        }
+
+        // If no album_id provided, get or create default album
+        // For guest uploads, we'll use event owner as the album creator
+        if (!album_id) {
+            const defaultAlbumResponse = await getOrCreateDefaultAlbum(
+                event_id,
+                event.created_by.toString() // Use event owner instead of guest
+            );
+
+            if (!defaultAlbumResponse.status || !defaultAlbumResponse.data) {
+                res.status(500).json({
+                    status: false,
+                    message: "Failed to get or create default album",
+                    error: { message: "Could not create or find default album" },
+                });
+                return;
+            }
+
+            album_id = defaultAlbumResponse.data._id.toString();
+        }
+
+        // Create guest info object
+        const guestInfo = {
+            name: guest_name || 'Anonymous Guest',
+            email: guest_email || null,
+            ip_address: req.ip || req.connection.remoteAddress || '',
+            user_agent: req.get('User-Agent') || ''
+        };
+
+        // Upload media using guest upload service
+        const response = await uploadGuestMediaService(
+            file, 
+            event.created_by.toString(), // Use event owner as uploader
+            album_id, 
+            event_id,
+            guestInfo
+        );
+
+        sendResponse(res, response);
+    } catch (_err) {
         next(_err);
     }
 };

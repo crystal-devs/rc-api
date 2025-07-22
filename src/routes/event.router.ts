@@ -1,7 +1,6 @@
 // routes/event.routes.ts
 import express, { RequestHandler } from "express";
 import * as eventController from "@controllers/event.controller";
-import * as participantController from "@controllers/participant.controller";
 import * as cohostcontroller from "@controllers/co-host.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import { checkEventLimitMiddleware } from "@middlewares/subscription-limit.middleware";
@@ -62,34 +61,34 @@ eventRouter.get("/:event_id/activity",
 
 // ============= PARTICIPANT MANAGEMENT =============
 // Get event participants
-eventRouter.get("/:event_id/participants",
-    eventAccessMiddleware,
-    participantController.getEventParticipantsController
-);
+// eventRouter.get("/:event_id/participants",
+//     eventAccessMiddleware,
+//     participantController.getEventParticipantsController
+// );
 
-// Invite participants (bulk support)
-eventRouter.post("/:event_id/participants/invite",
-    eventAccessMiddleware,
-    participantController.inviteParticipantsController
-);
+// // Invite participants (bulk support)
+// eventRouter.post("/:event_id/participants/invite",
+//     eventAccessMiddleware,
+//     participantController.inviteParticipantsController
+// );
 
-// Update participant permissions
-eventRouter.patch("/:event_id/participants/:participant_id",
-    eventAccessMiddleware,
-    participantController.updateParticipantController
-);
+// // Update participant permissions
+// eventRouter.patch("/:event_id/participants/:participant_id",
+//     eventAccessMiddleware,
+//     participantController.updateParticipantController
+// );
 
-// Remove participant
-eventRouter.delete("/:event_id/participants/:participant_id",
-    eventAccessMiddleware,
-    participantController.removeParticipantController
-);
+// // Remove participant
+// eventRouter.delete("/:event_id/participants/:participant_id",
+//     eventAccessMiddleware,
+//     participantController.removeParticipantController
+// );
 
-// Get participant activity logs
-eventRouter.get("/:event_id/participants/:participant_id/activity",
-    eventAccessMiddleware,
-    participantController.getParticipantActivityController
-);
+// // Get participant activity logs
+// eventRouter.get("/:event_id/participants/:participant_id/activity",
+//     eventAccessMiddleware,
+//     participantController.getParticipantActivityController
+// );
 
 // ============= EVENT ALBUMS MANAGEMENT =============
 // Get event albums

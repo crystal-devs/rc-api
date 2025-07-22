@@ -150,7 +150,7 @@ eventSchema.pre('save', function (next) {
 
         // Generate share_token
         if (!this.share_token) {
-            this.share_token = `evt_${new mongoose.Types.ObjectId().toString()}_${Math.random().toString(36).slice(2, 8)}`;
+            this.share_token = `evt_${Math.random().toString(36).slice(2, 8)}`;
         }
 
         // Generate co_host_invite_token and ensure created_by is set

@@ -25,7 +25,6 @@ import express from "express";
 import http from "http";
 import albumRouter from "@routes/album.router";
 import shareTokenRouter from "@routes/share-token.router";
-import participantRouter from "@routes/participant.routes";
 
 const app = express();
 const PORT = keys.port;
@@ -54,10 +53,8 @@ app.use(`/api/${VERSION}/auth`, authRouter)
 app.use(`/api/${VERSION}/event`, eventRouter)
 app.use(`/api/${VERSION}/album`, albumRouter)
 app.use(`/api/${VERSION}/media`, mediaRouter)
-app.use(`/api/${VERSION}/share`, shareRouter)
 app.use(`/api/${VERSION}/user`, userRouter)
 // Handle shared event endpoints separately
-app.use(`/api/${VERSION}/events`, participantRouter)
 app.use(`/api/${VERSION}/token`, shareTokenRouter)
 
 connectToMongoDB().then(async () => {

@@ -1,15 +1,17 @@
-// routes/media.routes.ts
+// routes/media.routes.ts - Updated for guest uploads
 
 import express, { RequestHandler } from "express";
 import multer from "multer";
 import { 
     uploadMediaController, 
+    guestUploadMediaController, // New controller for guest uploads
     uploadCoverImageController, 
     getMediaByEventController, 
     getMediaByAlbumController,
     deleteMediaController
 } from "@controllers/media.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
+import { conditionalAuthMiddleware } from "@middlewares/conditional-auth.middleware";
 import { 
     checkStorageLimitMiddleware, 
     checkEventPhotoLimitMiddleware,
@@ -26,12 +28,10 @@ const upload = multer({
     }
 });
 
-// Apply authentication middleware to all routes
-mediaRouter.use(authMiddleware);
-
-// Upload media to an album - Check storage limit, event photo limit and file size limit before uploading
+// Authenticated upload (existing functionality)
 mediaRouter.post(
     "/upload", 
+    authMiddleware,
     upload.single('image'), 
     checkFileSizeLimitMiddleware as RequestHandler,
     checkStorageLimitMiddleware as RequestHandler,
@@ -39,16 +39,32 @@ mediaRouter.post(
     uploadMediaController
 );
 
-// Upload a cover image for an event or album
-mediaRouter.post("/upload-cover", upload.single('image'), uploadCoverImageController);
+// Guest upload - no auth required but event must allow it
+mediaRouter.post(
+    "/guest-upload", 
+    upload.single('image'), 
+    checkFileSizeLimitMiddleware as RequestHandler,
+    guestUploadMediaController
+);
 
-// Get media by event ID
-mediaRouter.get("/event/:event_id", getMediaByEventController);
+// Guest upload - no auth required
+mediaRouter.post(
+    "/guest-upload", 
+    upload.single('image'), 
+    checkFileSizeLimitMiddleware as RequestHandler,
+    guestUploadMediaController
+);
 
-// Get media by album ID
-mediaRouter.get("/album/:album_id", getMediaByAlbumController);
+// Cover upload (always requires auth)
+mediaRouter.post("/upload-cover", authMiddleware, upload.single('image'), uploadCoverImageController);
 
-// Delete media by ID
-mediaRouter.delete("/:media_id", deleteMediaController);
+// Get media routes (conditional auth)
+mediaRouter.get("/event/:event_id", conditionalAuthMiddleware, getMediaByEventController);
+mediaRouter.get("/album/:album_id", conditionalAuthMiddleware, getMediaByAlbumController);
+
+
+
+// Delete media (always requires auth)
+mediaRouter.delete("/:media_id", authMiddleware, deleteMediaController);
 
 export default mediaRouter;
