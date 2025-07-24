@@ -1,12 +1,13 @@
 // controllers/media.controller.ts
 
 import { getOrCreateDefaultAlbum } from "@services/album.service";
-import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService, deleteMediaService, uploadGuestMediaService } from "@services/media.service";
+import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService, deleteMediaService, uploadGuestMediaService, updateMediaStatusService, bulkUpdateMediaStatusService, getGuestMediaService } from "@services/media.service";
 import { sendResponse } from "@utils/express.util";
 import { NextFunction, RequestHandler, Response } from "express";
 import { injectedRequest } from "types/injected-types";
 import mongoose from "mongoose";
 import { Event } from "@models/event.model";
+import { Media } from "@models/media.model";
 
 /**
  * Regular media upload controller
@@ -113,7 +114,6 @@ export const getMediaByEventController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { event_id } = req.params;
-        const userId = req.user?._id?.toString();
 
         // Validate event_id first
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
@@ -136,6 +136,10 @@ export const getMediaByEventController: RequestHandler = async (
             limit,
             quality,
             since,
+            // New parameters
+            status,
+            cursor,
+            scroll_type
         } = req.query;
 
         // Parse and validate query parameters with proper defaults
@@ -146,6 +150,9 @@ export const getMediaByEventController: RequestHandler = async (
             limit?: number;
             quality?: 'thumbnail' | 'display' | 'full';
             since?: string;
+            status?: 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved';
+            cursor?: string;
+            scrollType?: 'pagination' | 'infinite';
         } = {};
 
         // Handle boolean parameters - only set if explicitly provided
@@ -157,8 +164,64 @@ export const getMediaByEventController: RequestHandler = async (
             options.includePending = include_pending === 'true';
         }
 
+        // Handle scroll type parameter
+        if (scroll_type) {
+            const validScrollTypes = ['pagination', 'infinite'];
+            if (!validScrollTypes.includes(scroll_type as string)) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid scroll_type parameter',
+                    data: null,
+                    error: { message: 'scroll_type must be one of: pagination, infinite' },
+                    other: null
+                });
+                return;
+            }
+            options.scrollType = scroll_type as 'pagination' | 'infinite';
+        } else {
+            // Default to pagination for backward compatibility
+            options.scrollType = 'pagination';
+        }
+
+        // Handle status parameter for filtering
+        if (status) {
+            const validStatuses = ['approved', 'pending', 'rejected', 'hidden', 'auto_approved'];
+            if (!validStatuses.includes(status as string)) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid status parameter',
+                    data: null,
+                    error: {
+                        message: 'Status must be one of: approved, pending, rejected, hidden, auto_approved'
+                    },
+                    other: null
+                });
+                return;
+            }
+            options.status = status as 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved';
+        }
+
+        // Handle cursor parameter for infinite scroll
+        if (cursor) {
+            const cursorDate = new Date(cursor as string);
+            if (isNaN(cursorDate.getTime())) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid cursor format',
+                    data: null,
+                    error: { message: 'Cursor must be a valid ISO date string' },
+                    other: null
+                });
+                return;
+            }
+            options.cursor = cursor as string;
+        }
+
         // Handle numeric parameters with validation
-        if (page) {
+        if (page && options.scrollType === 'pagination') {
             const pageNum = parseInt(page as string, 10);
             if (isNaN(pageNum) || pageNum < 1) {
                 res.status(400).json({
@@ -227,13 +290,17 @@ export const getMediaByEventController: RequestHandler = async (
         console.log('Controller: Fetching media for event:', {
             event_id,
             options,
-            userId
         });
 
         // Call service
-        const response = await getMediaByEventService(event_id, options, userId);
+        const response = await getMediaByEventService(event_id, options);
 
-        console.log('Media fetched successfully:', response);
+        console.log('Media fetched successfully:', {
+            dataCount: response.data?.length,
+            status: response.status,
+            scrollType: options.scrollType
+        });
+
         // Send response
         res.status(response.code).json(response);
 
@@ -282,6 +349,306 @@ export const getMediaByAlbumController: RequestHandler = async (req: injectedReq
     } catch (_err) {
         console.error('Error in getMediaByAlbumController:', _err);
         next(_err);
+    }
+};
+
+export const updateMediaStatusController: RequestHandler = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { media_id } = req.params;
+        const userId = req.user?._id?.toString();
+        const { status, reason, hide_reason } = req.body;
+
+        // Validate media_id
+        if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid or missing media ID',
+                data: null,
+                error: { message: 'A valid media ID is required' },
+                other: null
+            });
+            return;
+        }
+
+        // Validate required fields
+        if (!status) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Status is required',
+                data: null,
+                error: { message: 'Status field is required in request body' },
+                other: null
+            });
+            return;
+        }
+
+        // Validate status value
+        const validStatuses = ['approved', 'pending', 'rejected', 'hidden', 'auto_approved'];
+        if (!validStatuses.includes(status)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid status value',
+                data: null,
+                error: {
+                    message: 'Status must be one of: approved, pending, rejected, hidden, auto_approved'
+                },
+                other: null
+            });
+            return;
+        }
+
+        // Validate reason for rejected status
+        if (status === 'rejected' && !reason) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Reason is required for rejected status',
+                data: null,
+                error: { message: 'Reason field is required when rejecting media' },
+                other: null
+            });
+            return;
+        }
+
+        console.log('Controller: Updating media status:', {
+            media_id,
+            status,
+            reason,
+            hide_reason,
+            userId
+        });
+
+        // Call service
+        const response = await updateMediaStatusService(media_id, status, {
+            adminId: userId,
+            reason,
+            hideReason: hide_reason
+        });
+
+        console.log('Media status updated:', {
+            success: response.status,
+            previousStatus: response.other?.previousStatus,
+            newStatus: response.other?.newStatus
+        });
+
+        // Send response
+        res.status(response.code).json(response);
+
+    } catch (err: any) {
+        console.error('Error in updateMediaStatusController:', {
+            message: err.message,
+            stack: err.stack,
+            params: req.params,
+            body: req.body
+        });
+
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Internal server error',
+            data: null,
+            error: {
+                message: 'An unexpected error occurred',
+                details: process.env.NODE_ENV === 'development' ? err.message : undefined
+            },
+            other: null
+        });
+    }
+};
+
+export const bulkUpdateMediaStatusController: RequestHandler = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { event_id } = req.params;
+        const userId = req.user?._id?.toString();
+        const { media_ids, status, reason, hide_reason } = req.body;
+
+        // Validate event_id
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid or missing event ID',
+                data: null,
+                error: { message: 'A valid event ID is required' },
+                other: null
+            });
+            return;
+        }
+
+        // Validate required fields
+        if (!media_ids || !Array.isArray(media_ids) || media_ids.length === 0) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Media IDs array is required',
+                data: null,
+                error: { message: 'media_ids must be a non-empty array' },
+                other: null
+            });
+            return;
+        }
+
+        if (!status) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Status is required',
+                data: null,
+                error: { message: 'Status field is required in request body' },
+                other: null
+            });
+            return;
+        }
+
+        // Validate status value
+        const validStatuses = ['approved', 'pending', 'rejected', 'hidden', 'auto_approved'];
+        if (!validStatuses.includes(status)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid status value',
+                data: null,
+                error: {
+                    message: 'Status must be one of: approved, pending, rejected, hidden, auto_approved'
+                },
+                other: null
+            });
+            return;
+        }
+
+        // Limit bulk operations
+        if (media_ids.length > 100) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Too many items for bulk update',
+                data: null,
+                error: { message: 'Maximum 100 items can be updated at once' },
+                other: null
+            });
+            return;
+        }
+
+        console.log('Controller: Bulk updating media status:', {
+            event_id,
+            mediaCount: media_ids.length,
+            status,
+            userId
+        });
+
+        // Call service
+        const response = await bulkUpdateMediaStatusService(event_id, media_ids, status, {
+            adminId: userId,
+            reason,
+            hideReason: hide_reason
+        });
+
+        console.log('Bulk media status update completed:', {
+            success: response.status,
+            modifiedCount: response.data?.modifiedCount,
+            requestedCount: response.data?.requestedCount
+        });
+
+        // Send response
+        res.status(response.code).json(response);
+
+    } catch (err: any) {
+        console.error('Error in bulkUpdateMediaStatusController:', {
+            message: err.message,
+            stack: err.stack,
+            params: req.params,
+            body: req.body
+        });
+
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Internal server error',
+            data: null,
+            error: {
+                message: 'An unexpected error occurred',
+                details: process.env.NODE_ENV === 'development' ? err.message : undefined
+            },
+            other: null
+        });
+    }
+};
+
+// Additional controller for getting media by ID (useful for status updates)
+export const getMediaByIdController: RequestHandler = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { media_id } = req.params;
+        const userId = req.user?._id?.toString();
+
+        // Validate media_id
+        if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid or missing media ID',
+                data: null,
+                error: { message: 'A valid media ID is required' },
+                other: null
+            });
+            return;
+        }
+
+        // Find media
+        const media = await Media.findById(media_id).lean();
+
+        if (!media) {
+            res.status(404).json({
+                status: false,
+                code: 404,
+                message: 'Media not found',
+                data: null,
+                error: { message: 'Media with the provided ID does not exist' },
+                other: null
+            });
+            return;
+        }
+
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: 'Media retrieved successfully',
+            data: media,
+            error: null,
+            other: null
+        });
+
+    } catch (err: any) {
+        console.error('Error in getMediaByIdController:', {
+            message: err.message,
+            params: req.params
+        });
+
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Internal server error',
+            data: null,
+            error: {
+                message: 'An unexpected error occurred',
+                details: process.env.NODE_ENV === 'development' ? err.message : undefined
+            },
+            other: null
+        });
     }
 };
 
@@ -397,9 +764,9 @@ export const guestUploadMediaController: RequestHandler = async (req: injectedRe
 
         // Upload media using guest upload service
         const response = await uploadGuestMediaService(
-            file, 
+            file,
             event.created_by.toString(), // Use event owner as uploader
-            album_id, 
+            album_id,
             event_id,
             guestInfo
         );
@@ -407,5 +774,169 @@ export const guestUploadMediaController: RequestHandler = async (req: injectedRe
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
+    }
+};
+
+export const getGuestMediaController: RequestHandler = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { share_token } = req.params;
+        
+        console.log(share_token, 'share_tokenshare_token')
+        if (!share_token) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: "Share token is required",
+                data: null,
+                error: { message: "Share token parameter is missing" },
+                other: null
+            });
+            return;
+        }
+
+        // Get auth info if available (from conditionalAuthMiddleware)
+        const authToken = req.headers.authorization?.replace('Bearer ', '') || 
+                         req.headers['x-auth-token'] as string;
+        const userEmail = req.user?.email;
+
+        // Extract and validate query parameters
+        const {
+            page,
+            limit,
+            quality,
+            since,
+            cursor,
+            scroll_type
+        } = req.query;
+
+        const options: any = {};
+
+        // Handle scroll type
+        if (scroll_type) {
+            const validScrollTypes = ['pagination', 'infinite'];
+            if (!validScrollTypes.includes(scroll_type as string)) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid scroll_type parameter',
+                    data: null,
+                    error: { message: 'scroll_type must be one of: pagination, infinite' },
+                    other: null
+                });
+                return;
+            }
+            options.scrollType = scroll_type as 'pagination' | 'infinite';
+        } else {
+            options.scrollType = 'pagination';
+        }
+
+        // Handle cursor for infinite scroll
+        if (cursor) {
+            const cursorDate = new Date(cursor as string);
+            if (isNaN(cursorDate.getTime())) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid cursor format',
+                    data: null,
+                    error: { message: 'Cursor must be a valid ISO date string' },
+                    other: null
+                });
+                return;
+            }
+            options.cursor = cursor as string;
+        }
+
+        // Handle pagination
+        if (page && options.scrollType === 'pagination') {
+            const pageNum = parseInt(page as string, 10);
+            if (isNaN(pageNum) || pageNum < 1) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid page number',
+                    data: null,
+                    error: { message: 'Page must be a positive integer' },
+                    other: null
+                });
+                return;
+            }
+            options.page = pageNum;
+        }
+
+        // Handle limit
+        if (limit) {
+            const limitNum = parseInt(limit as string, 10);
+            if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid limit',
+                    data: null,
+                    error: { message: 'Limit must be between 1 and 100' },
+                    other: null
+                });
+                return;
+            }
+            options.limit = limitNum;
+        }
+
+        // Handle quality
+        if (quality) {
+            const validQualities = ['thumbnail', 'display', 'full'];
+            if (validQualities.includes(quality as string)) {
+                options.quality = quality as 'thumbnail' | 'display' | 'full';
+            }
+        }
+
+        // Handle since
+        if (since) {
+            const sinceDate = new Date(since as string);
+            if (!isNaN(sinceDate.getTime())) {
+                options.since = since as string;
+            }
+        }
+
+        console.log('Guest Controller: Processing request for share_token:', share_token, {
+            userEmail,
+            hasAuth: !!authToken,
+            options
+        });
+
+        // Call the guest media service
+        const response = await getGuestMediaService(share_token, userEmail, authToken, options);
+
+        console.log('Guest media response:', {
+            status: response.status,
+            code: response.code,
+            dataCount: response.data?.length,
+            requiresAuth: response.other?.requires_auth
+        });
+
+        res.status(response.code).json(response);
+
+    } catch (err: any) {
+        console.error('Error in getGuestMediaController:', {
+            message: err.message,
+            stack: err.stack,
+            share_token: req.params.share_token,
+            query: req.query
+        });
+
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Internal server error',
+            data: null,
+            error: {
+                message: 'An unexpected error occurred',
+                details: process.env.NODE_ENV === 'development' ? err.message : undefined
+            },
+            other: null
+        });
     }
 };

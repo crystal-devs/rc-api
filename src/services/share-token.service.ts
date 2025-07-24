@@ -176,3 +176,203 @@ export const getShareTokenDetailsService = async (data: {
         };
     }
 };
+
+
+export const validateShareToken = async (shareToken: string): Promise<{
+    valid: boolean;
+    reason?: string;
+    event_id?: string;
+    permissions?: any;
+    shareToken?: any;
+}> => {
+    try {
+        // Find event by share_token (reusing your existing logic)
+        const event = await Event.findOne({ share_token: shareToken }).populate([
+            {
+                path: 'created_by',
+                select: 'name email avatar_url',
+            }
+        ]);
+
+        if (!event) {
+            return { valid: false, reason: "Share token not found" };
+        }
+
+        // Check if share_settings is active
+        if (!event.share_settings?.is_active) {
+            return { valid: false, reason: "Share token is inactive" };
+        }
+
+        // Check expiration
+        if (event.share_settings.expires_at && new Date(event.share_settings.expires_at) < new Date()) {
+            return { valid: false, reason: "Share token has expired" };
+        }
+
+        // Check if viewing is allowed
+        if (!event.permissions?.can_view) {
+            return { valid: false, reason: "Viewing this event is not allowed" };
+        }
+
+        return {
+            valid: true,
+            event_id: event._id.toString(),
+            permissions: {
+                view: event.permissions.can_view,
+                upload: event.permissions.can_upload,
+                download: event.permissions.can_download,
+                moderate: false, // Guests can't moderate
+                delete: false,   // Guests can't delete
+                requireApproval: event.permissions.require_approval
+            },
+            shareToken: {
+                token: shareToken,
+                event_id: event._id,
+                permissions: event.permissions,
+                share_settings: event.share_settings
+            }
+        };
+    } catch (error) {
+        console.error('validateShareToken error:', error);
+        return { valid: false, reason: "Token validation error" };
+    }
+};
+
+export const validateGuestShareToken = async (
+    shareToken: string,
+    userEmail?: string,
+    authToken?: string
+): Promise<{
+    valid: boolean;
+    reason?: string;
+    event_id?: string;
+    permissions?: any;
+    eventData?: any;
+    requiresAuth?: boolean;
+    visibility?: string;
+}> => {
+    try {
+        // Find event by share_token
+        const event = await Event.findOne({ share_token: shareToken }).populate([
+            {
+                path: 'created_by',
+                select: 'name email avatar_url',
+            },
+            {
+                path: 'co_hosts.user_id',
+                select: 'name email avatar_url',
+            }
+        ]);
+
+        if (!event) {
+            return { valid: false, reason: "Share token not found" };
+        }
+
+        // Check if share_settings is active
+        if (!event.share_settings?.is_active) {
+            return { valid: false, reason: "Share token is inactive" };
+        }
+
+        // Check expiration
+        if (event.share_settings.expires_at && new Date(event.share_settings.expires_at) < new Date()) {
+            return { valid: false, reason: "Share token has expired" };
+        }
+
+        const visibility = event?.visibility || event.visibility;
+
+        // Handle different visibility levels
+        switch (visibility) {
+            case 'private':
+                // Private events should not be accessible via share token for guests
+                // Only owners/co-hosts should access via /events/[eventid]
+                return {
+                    valid: false,
+                    reason: "This is a private event. Please use the direct event link if you're an owner or co-host."
+                };
+
+            case 'invited_only':
+                // Invite-only requires authentication
+                if (!authToken || !userEmail) {
+                    return {
+                        valid: false,
+                        reason: "This event requires you to log in to access.",
+                        requiresAuth: true,
+                        visibility
+                    };
+                }
+
+                // Check if user is invited
+                const isInvited = await checkIfUserIsInvited(event._id.toString(), userEmail);
+                if (!isInvited) {
+                    return {
+                        valid: false,
+                        reason: "You are not invited to this event. Please contact the event host for access."
+                    };
+                }
+                break;
+
+            case 'anyone_with_link':
+            default:
+                // Anyone with link can access without authentication
+                break;
+        }
+
+        // Set guest permissions
+        const permissions = {
+            view: event.permissions?.can_view ?? true,
+            upload: event.permissions?.can_upload ?? false,
+            download: event.permissions?.can_download ?? true,
+            moderate: false, // Guests can't moderate
+            delete: false,   // Guests can't delete
+            requireApproval: event.permissions?.require_approval ?? false
+        };
+
+        return {
+            valid: true,
+            event_id: event._id.toString(),
+            permissions,
+            visibility,
+            eventData: {
+                _id: event._id.toString(),
+                title: event.title,
+                description: event.description,
+                cover_image: event.cover_image,
+                location: event.location,
+                start_date: event.start_date,
+                end_date: event.end_date,
+                template: event.template,
+                permissions: event.permissions,
+                share_settings: event.share_settings,
+                created_by: event.created_by
+            }
+        };
+    } catch (error) {
+        console.error('validateGuestShareToken error:', error);
+        return { valid: false, reason: "Token validation error" };
+    }
+};
+
+const checkIfUserIsInvited = async (eventId: string, userEmail: string): Promise<boolean> => {
+    try {
+        // Check in EventParticipant model
+        // const participant = await EventParticipant.findOne({
+        //     event_id: new mongoose.Types.ObjectId(eventId),
+        //     'identity.email': userEmail.toLowerCase(),
+        //     'participation.status': { $in: ['active', 'pending', 'invited'] }
+        // });
+        
+        // if (participant) return true;
+
+        // Also check in invited_guests array if you have one in Event model
+        // const event = await Event.findById(eventId);
+        // if (event?.invited_guests && Array.isArray(event.invited_guests)) {
+        //     return event.invited_guests.some(
+        //         guest => guest.email?.toLowerCase() === userEmail.toLowerCase()
+        //     );
+        // }
+
+        return false;
+    } catch (error) {
+        console.error('Error checking invitation status:', error);
+        return false;
+    }
+};
