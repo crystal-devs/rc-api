@@ -18,68 +18,132 @@ export const eventAccessMiddleware = async (
     next: NextFunction
 ) => {
     try {
-        const { event_id } = req.params;
+        // Get event_id from params - handle different route patterns
+        const event_id = req.params.event_id || req.params.eventId || req.params.id;
         const userId = req.user._id.toString();
 
+        console.log(`🔍 [eventAccessMiddleware] Raw params:`, req.params);
+        console.log(`🔍 [eventAccessMiddleware] Extracted event_id: ${event_id}`);
+        console.log(`🔍 [eventAccessMiddleware] Checking access for user ${userId} to event ${event_id}`);
+
         // Validate event_id
-        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+        if (!event_id) {
+            console.log(`❌ [eventAccessMiddleware] No event_id found in params`);
+            return sendResponse(res, {
+                status: false,
+                code: 400,
+                message: "Event ID is required",
+                data: null,
+                error: { message: "Missing event ID in request params" },
+                other: null
+            });
+        }
+
+        if (!mongoose.Types.ObjectId.isValid(event_id)) {
+            console.log(`❌ [eventAccessMiddleware] Invalid ObjectId format: ${event_id}`);
             return sendResponse(res, {
                 status: false,
                 code: 400,
                 message: "Valid event ID is required",
                 data: null,
-                error: { message: "Invalid or missing event ID" },
+                error: { message: "Invalid ObjectId format" },
                 other: null
             });
         }
 
-        // Check if user is the creator or an approved co-host in the Event collection
-        const event = await Event.findOne({
-            _id: new mongoose.Types.ObjectId(event_id),
-            $or: [
-                { created_by: new mongoose.Types.ObjectId(userId) },
-                { "co_hosts.user_id": new mongoose.Types.ObjectId(userId), "co_hosts.status": "approved" }
-            ]
-        }).lean();
+        // Simple query - just get the event and check access in JavaScript
+        console.log(`🔍 [eventAccessMiddleware] Querying database for event: ${event_id}`);
+        const event = await Event.findById(event_id).lean();
 
-        let userPermission: any = null;
-        let role: 'owner' | 'co_host' | 'guest' | 'viewer' | null = null;
+        if (!event) {
+            console.log(`❌ [eventAccessMiddleware] Event ${event_id} not found in database`);
 
-        if (event) {
-            // Determine role based on Event collection
-            if (event.created_by.toString() === userId) {
-                role = "owner"; // Align with your middleware's terminology
-            } else if (event.co_hosts.some(co => co.user_id.toString() === userId && co.status === "approved")) {
-                role = "co_host";
-                userPermission = event.co_hosts.find(co => co.user_id.toString() === userId);
-            }
-        } else {
-            // Fallback to AccessControl for other roles (e.g., guests)
-            const accessControl = await AccessControl.findOne({
-                resource_id: new mongoose.Types.ObjectId(event_id),
-                resource_type: "event",
-                "permissions.user_id": new mongoose.Types.ObjectId(userId)
-            }).lean();
+            // Debug: Try to find any event with similar ID
+            const similarEvents = await Event.find({}).select('_id title').limit(5).lean();
+            console.log(`🔍 [eventAccessMiddleware] Sample events in DB:`, similarEvents.map(e => ({ id: e._id.toString(), title: e.title })));
 
-            if (!accessControl) {
-                logger.warn(`[eventAccessMiddleware] User ${userId} attempted to access event ${event_id} without permission`);
-                return sendResponse(res, {
-                    status: false,
-                    code: 403,
-                    message: "You don't have access to this event",
-                    data: null,
-                    error: { message: "Access denied" },
-                    other: null
-                });
-            }
-
-            userPermission = accessControl.permissions.find(
-                p => p.user_id.toString() === userId
-            );
-            role = userPermission?.role;
+            return sendResponse(res, {
+                status: false,
+                code: 404,
+                message: "Event not found",
+                data: null,
+                error: { message: "Event not found" },
+                other: null
+            });
         }
 
+        console.log(`✅ [eventAccessMiddleware] Event found: ${event.title}`);
+        console.log(`🔍 [eventAccessMiddleware] Event created_by: ${event.created_by.toString()}`);
+        console.log(`🔍 [eventAccessMiddleware] Co-hosts count: ${event.co_hosts ? event.co_hosts.length : 0}`);
+
+        let role: 'owner' | 'co_host' | 'guest' | 'viewer' | null = null;
+        let userPermission: any = null;
+
+        // Check if user is owner
+        if (event.created_by.toString() === userId) {
+            role = "owner";
+            console.log(`✅ [eventAccessMiddleware] User ${userId} is OWNER of event ${event_id}`);
+        }
+        // Check if user is co-host
+        else if (event.co_hosts && Array.isArray(event.co_hosts) && event.co_hosts.length > 0) {
+            console.log(`🔍 [eventAccessMiddleware] Checking co_hosts array (${event.co_hosts.length} entries):`);
+
+            event.co_hosts.forEach((ch, index) => {
+                console.log(`  Co-host ${index}: user_id=${ch.user_id.toString()}, status=${ch.status}, matches=${ch.user_id.toString() === userId}`);
+            });
+
+            const coHostEntry = event.co_hosts.find(coHost => {
+                const coHostUserId = coHost.user_id.toString();
+                const isApproved = coHost.status === 'approved';
+                const matches = coHostUserId === userId;
+
+                return matches && isApproved;
+            });
+
+            if (coHostEntry) {
+                role = "co_host";
+                userPermission = coHostEntry;
+                console.log(`✅ [eventAccessMiddleware] User ${userId} is APPROVED CO-HOST of event ${event_id}`);
+            } else {
+                console.log(`❌ [eventAccessMiddleware] User ${userId} not found as approved co-host in event ${event_id}`);
+            }
+        } else {
+            console.log(`🔍 [eventAccessMiddleware] No co_hosts array found or it's empty`);
+        }
+
+        // If still no role, check AccessControl as fallback
         if (!role) {
+            console.log(`🔍 [eventAccessMiddleware] Checking AccessControl for user ${userId}`);
+
+            try {
+                const accessControl = await AccessControl.findOne({
+                    resource_id: new mongoose.Types.ObjectId(event_id),
+                    resource_type: "event",
+                    "permissions.user_id": new mongoose.Types.ObjectId(userId)
+                }).lean();
+
+                if (accessControl) {
+                    userPermission = accessControl.permissions.find(
+                        p => p.user_id.toString() === userId
+                    );
+                    role = userPermission?.role;
+                    console.log(`✅ [eventAccessMiddleware] Found AccessControl role: ${role} for user ${userId}`);
+                } else {
+                    console.log(`❌ [eventAccessMiddleware] No AccessControl found for user ${userId}`);
+                }
+            } catch (accessControlError) {
+                console.log(`⚠️ [eventAccessMiddleware] AccessControl query failed:`, accessControlError.message);
+                // Continue without AccessControl
+            }
+        }
+
+        // Final access check
+        if (!role) {
+            console.log(`❌ [eventAccessMiddleware] FINAL DENIAL: No role found for user ${userId} in event ${event_id}`);
+            console.log(`❌ [eventAccessMiddleware] Event owner: ${event.created_by.toString()}`);
+            console.log(`❌ [eventAccessMiddleware] User ID: ${userId}`);
+            console.log(`❌ [eventAccessMiddleware] Co-hosts: ${JSON.stringify(event.co_hosts, null, 2)}`);
+
             return sendResponse(res, {
                 status: false,
                 code: 403,
@@ -97,13 +161,15 @@ export const eventAccessMiddleware = async (
             canView: true,
             canEdit: ['owner', 'co_host'].includes(role),
             canDelete: role === 'owner',
-            canManageGuests: ['owner', 'co_host'].includes(role) && (!userPermission || userPermission?.permissions?.manage_guests !== false),
-            canManageContent: ['owner', 'co_host', 'moderator'].includes(role) && (!userPermission || userPermission?.permissions?.manage_content !== false)
+            canManageGuests: ['owner', 'co_host'].includes(role) && (!userPermission?.permissions || userPermission.permissions.manage_guests !== false),
+            canManageContent: ['owner', 'co_host', 'moderator'].includes(role) && (!userPermission?.permissions || userPermission.permissions.manage_content !== false)
         };
 
+        console.log(`✅ [eventAccessMiddleware] ACCESS GRANTED: User ${userId} has role ${role} in event ${event_id}`);
         next();
     } catch (error) {
-        logger.error(`[eventAccessMiddleware] Error: ${error.message}`);
+        console.error(`💥 [eventAccessMiddleware] Error: ${error.message}`);
+        console.error(`💥 [eventAccessMiddleware] Stack: ${error.stack}`);
         return sendResponse(res, {
             status: false,
             code: 500,
@@ -117,7 +183,6 @@ export const eventAccessMiddleware = async (
         });
     }
 };
-
 /**
  * Middleware to check if user can edit the event
  */
@@ -179,110 +244,6 @@ export const requireGuestManagementAccess = async (
         });
     }
     next();
-};
-
-/**
- * Middleware to check event access via token ID
- * This will find the event ID from the token and then check access
- */
-export const tokenBasedEventAccessMiddleware = async (
-    req: injectedRequest,
-    res: Response,
-    next: NextFunction
-) => {
-    try {
-        const { token_id } = req.params;
-        const userId = req.user._id.toString();
-
-        // Validate token_id
-        if (!token_id || !mongoose.Types.ObjectId.isValid(token_id)) {
-            return sendResponse(res, {
-                status: false,
-                code: 400,
-                message: "Valid token ID is required",
-                data: null,
-                error: { message: "Invalid or missing token ID" },
-                other: null
-            });
-        }
-
-        // Find token to get event ID
-        const shareToken = await mongoose.model(MODEL_NAMES.SHARE_TOKEN).findById(token_id);
-        if (!shareToken) {
-            return sendResponse(res, {
-                status: false,
-                code: 404,
-                message: "Share token not found",
-                data: null,
-                error: { message: "Token not found" },
-                other: null
-            });
-        }
-
-        // Get the event ID from token
-        const event_id = shareToken.event_id.toString();
-
-        // Check user access to event
-        const accessControl = await AccessControl.findOne({
-            resource_id: new mongoose.Types.ObjectId(event_id),
-            resource_type: "event",
-            "permissions.user_id": new mongoose.Types.ObjectId(userId)
-        }).lean();
-
-        if (!accessControl) {
-            logger.warn(`[tokenBasedEventAccessMiddleware] User ${userId} attempted to access event ${event_id} via token ${token_id} without permission`);
-            return sendResponse(res, {
-                status: false,
-                code: 403,
-                message: "You don't have access to this event",
-                data: null,
-                error: { message: "Access denied" },
-                other: null
-            });
-        }
-
-        // Extract user's role and permissions for this event
-        const userPermission = accessControl.permissions.find(
-            p => p.user_id.toString() === userId
-        );
-
-        if (!userPermission) {
-            return sendResponse(res, {
-                status: false,
-                code: 403,
-                message: "You don't have access to this event",
-                data: null,
-                error: { message: "Access denied" },
-                other: null
-            });
-        }
-
-        // Add event access info to request
-        req.eventAccess = {
-            eventId: event_id,
-            role: userPermission.role,
-            canView: true, // If they have access, they can view
-            canEdit: ['owner', 'co_host'].includes(userPermission.role),
-            canDelete: userPermission.role === 'owner',
-            canManageGuests: ['owner', 'co_host'].includes(userPermission.role),
-            canManageContent: ['owner', 'co_host', 'moderator'].includes(userPermission.role)
-        };
-
-        next();
-    } catch (error) {
-        logger.error(`[tokenBasedEventAccessMiddleware] Error: ${error.message}`);
-        return sendResponse(res, {
-            status: false,
-            code: 500,
-            message: "Error checking event access",
-            data: null,
-            error: {
-                message: error.message,
-                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-            },
-            other: null
-        });
-    }
 };
 
 /**

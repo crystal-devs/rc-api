@@ -405,17 +405,17 @@ export const updateMediaStatusController: RequestHandler = async (
         }
 
         // Validate reason for rejected status
-        if (status === 'rejected' && !reason) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: 'Reason is required for rejected status',
-                data: null,
-                error: { message: 'Reason field is required when rejecting media' },
-                other: null
-            });
-            return;
-        }
+        // if (status === 'rejected' && !reason) {
+        //     res.status(400).json({
+        //         status: false,
+        //         code: 400,
+        //         message: 'Reason is required for rejected status',
+        //         data: null,
+        //         error: { message: 'Reason field is required when rejecting media' },
+        //         other: null
+        //     });
+        //     return;
+        // }
 
         console.log('Controller: Updating media status:', {
             media_id,

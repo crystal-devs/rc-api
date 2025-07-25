@@ -103,7 +103,7 @@ const mediaSchema = new mongoose.Schema({
         method: { type: String, enum: ['web', 'mobile', 'api'], default: 'web' },
         ip_address: { type: String, default: "" },
         user_agent: { type: String, default: "" },
-        share_token_used: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.SHARE_TOKEN, default: null }
+        // share_token_used: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.SHARE_TOKEN, default: null }
     },
 
     // Timestamps

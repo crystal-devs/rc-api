@@ -35,7 +35,7 @@ const coHostSchema = new mongoose.Schema({
     invited_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: true },
     status: {
         type: String,
-        enum: ['pending', 'approved', 'rejected', 'removed'],
+        enum: ['pending', 'approved', 'blocked', 'removed'],
         default: 'pending',
     },
     permissions: {

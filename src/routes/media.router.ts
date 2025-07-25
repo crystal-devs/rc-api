@@ -51,14 +51,6 @@ mediaRouter.post(
     guestUploadMediaController
 );
 
-// Guest upload - no auth required
-mediaRouter.post(
-    "/guest-upload",
-    upload.single('image'),
-    checkFileSizeLimitMiddleware as RequestHandler,
-    guestUploadMediaController
-);
-
 // Cover upload (always requires auth)
 mediaRouter.post("/upload-cover", authMiddleware, upload.single('image'), uploadCoverImageController);
 
