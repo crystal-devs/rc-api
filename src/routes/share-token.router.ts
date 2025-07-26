@@ -4,6 +4,7 @@ import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import { 
     tokenAccessMiddleware
 } from "@middlewares/event-access.middleware";
+import { optionalAuthMiddleware } from "@middlewares/conditional-auth.middleware";
 
 const shareTokenRouter = express.Router();
 
@@ -15,6 +16,7 @@ const shareTokenRouter = express.Router();
 
 // Get specific share token details
 shareTokenRouter.get("/:token_id", 
+    optionalAuthMiddleware,
     tokenAccessMiddleware,
     shareTokenController.getShareTokenDetailsController
 );

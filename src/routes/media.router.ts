@@ -14,13 +14,13 @@ import {
     getGuestMediaController
 } from "@controllers/media.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
-import { conditionalAuthMiddleware } from "@middlewares/conditional-auth.middleware";
 import {
     checkStorageLimitMiddleware,
     checkEventPhotoLimitMiddleware,
     checkFileSizeLimitMiddleware
 } from "@middlewares/subscription-limit.middleware";
 import { validateGuestTokenMiddleware } from "@middlewares/validate-share-token.middleware";
+import { optionalAuthMiddleware } from "@middlewares/conditional-auth.middleware";
 
 const mediaRouter = express.Router();
 
@@ -58,11 +58,10 @@ mediaRouter.post("/upload-cover", authMiddleware, upload.single('image'), upload
 mediaRouter.get("/event/:event_id", authMiddleware, getMediaByEventController);
 mediaRouter.get("/album/:album_id", authMiddleware, getMediaByAlbumController);
 
-mediaRouter.get("/guest/:share_token", 
-    // conditionalAuthMiddleware, // Sets req.user if auth token exists, but doesn't require it
+mediaRouter.get("/guest/:share_token",
+    optionalAuthMiddleware,
     getGuestMediaController
 );
-// mediaRouter.get("/event/:event_id/counts", conditionalAuthMiddleware, getMediaCountsController);
 
 // Single media status update
 mediaRouter.patch("/:media_id/status", authMiddleware, updateMediaStatusController);
