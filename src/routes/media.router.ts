@@ -44,12 +44,21 @@ mediaRouter.post(
 );
 
 // Guest upload - no auth required but event must allow it
+// mediaRouter.post(
+//     "/guest-upload",
+//     upload.single('image'),
+//     checkFileSizeLimitMiddleware as RequestHandler,
+//     guestUploadMediaController
+// );
+
 mediaRouter.post(
-    "/guest-upload",
-    upload.single('image'),
-    checkFileSizeLimitMiddleware as RequestHandler,
+    "/guest/:share_token/upload",  // Updated to use share_token
+    optionalAuthMiddleware,        // Allow both auth and non-auth users
+    upload.array('files', 10),    // Support multiple files
+    // checkFileSizeLimitMiddleware as RequestHandler,
     guestUploadMediaController
 );
+
 
 // Cover upload (always requires auth)
 mediaRouter.post("/upload-cover", authMiddleware, upload.single('image'), uploadCoverImageController);

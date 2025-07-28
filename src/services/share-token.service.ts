@@ -27,6 +27,7 @@ interface EventResponse {
     permissions?: {
         can_upload: boolean;
         can_download: boolean;
+        require_approval: boolean;
     };
 }
 
@@ -280,6 +281,7 @@ function buildEventResponse(event: any, userAccess: UserAccess): EventResponse {
         baseResponse.permissions = {
             can_upload: event.permissions?.can_upload || false,
             can_download: event.permissions?.can_download || false,
+            require_approval: event.permissions?.require_approval || false
         };
     }
 
