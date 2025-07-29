@@ -6,7 +6,6 @@ export const MODEL_NAMES = {
     MEDIA: "medias",
     ACCESS_CONTROL: "access-controls",
     ACTIVITY_LOG: "activity-logs",
-    SHARE_TOKEN: "share-tokens",
     USER_SUBSCRIPTION: "user-subscriptions",
     USER_USAGE: "user-usages",
     SUBSCRIPTION_PLAN: "subscription-plans",

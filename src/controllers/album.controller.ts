@@ -22,7 +22,7 @@ export const createAlbumController = async (req: injectedRequest, res: Response,
         if (description && typeof description !== "string") {
             throw new Error("Invalid data type for description");
         }
-        
+
         // Validate event_id is a valid ObjectId
         if (!mongoose.Types.ObjectId.isValid(event_id)) {
             throw new Error("Invalid event ID format");
@@ -35,7 +35,6 @@ export const createAlbumController = async (req: injectedRequest, res: Response,
             created_by: new mongoose.Types.ObjectId(req.user._id),
             created_at: new Date(),
             cover_image: cover_image || "",
-            is_private: !!is_private,
             is_default: false
         });
 
@@ -59,12 +58,12 @@ export const getUserAlbumsController = async (req: injectedRequest, res: Respons
 export const getEventAlbumsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const { event_id } = trimObject(req.params);
-        
+
         if (!event_id) throw new Error("Event ID is required");
         if (!mongoose.Types.ObjectId.isValid(event_id)) {
             throw new Error("Invalid event ID format");
         }
-        
+
         const response = await albumService.getAlbumsByParams({ event_id });
         sendResponse(res, response);
     } catch (_err) {
@@ -75,14 +74,14 @@ export const getEventAlbumsController = async (req: injectedRequest, res: Respon
 export const getAlbumController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const { album_id } = trimObject(req.params);
-        
+
         if (!album_id) throw new Error("Album ID is required");
         if (!mongoose.Types.ObjectId.isValid(album_id)) {
             throw new Error("Invalid album ID format");
         }
-        
+
         const response = await albumService.getAlbumsByParams({ album_id });
-        
+
         // If array is empty, album was not found
         if (response.status && (!response.data || response.data.length === 0)) {
             return sendResponse(res, {
@@ -94,7 +93,7 @@ export const getAlbumController = async (req: injectedRequest, res: Response, ne
                 other: null
             });
         }
-        
+
         // Return the first (and only) album in the array
         if (response.status && response.data && response.data.length > 0) {
             return sendResponse(res, {
@@ -102,7 +101,7 @@ export const getAlbumController = async (req: injectedRequest, res: Response, ne
                 data: response.data[0]
             });
         }
-        
+
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
@@ -128,16 +127,16 @@ export const updateAlbumController = async (req: injectedRequest, res: Response,
             if (typeof title !== "string") throw new Error("Invalid data type for title");
             updateData.title = title;
         }
-        
+
         if (description !== undefined) {
             if (typeof description !== "string") throw new Error("Invalid data type for description");
             updateData.description = description;
         }
-        
+
         if (is_private !== undefined) {
             updateData.is_private = !!is_private;
         }
-        
+
         if (cover_image !== undefined) {
             updateData.cover_image = cover_image;
         }
@@ -156,11 +155,11 @@ export const updateAlbumController = async (req: injectedRequest, res: Response,
 
         // Perform the update
         const response = await albumService.updateAlbumService(
-            album_id, 
+            album_id,
             updateData,
             req.user._id.toString()
         );
-        
+
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
@@ -182,7 +181,7 @@ export const deleteAlbumController = async (req: injectedRequest, res: Response,
             album_id,
             req.user._id.toString()
         );
-        
+
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
@@ -192,17 +191,17 @@ export const deleteAlbumController = async (req: injectedRequest, res: Response,
 export const getOrCreateDefaultAlbumController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const { event_id } = trimObject(req.params);
-        
+
         if (!event_id) throw new Error("Event ID is required");
         if (!mongoose.Types.ObjectId.isValid(event_id)) {
             throw new Error("Invalid event ID format");
         }
-        
+
         const response = await albumService.getOrCreateDefaultAlbum(
             event_id,
             req.user._id.toString()
         );
-        
+
         sendResponse(res, response);
     } catch (_err) {
         next(_err);

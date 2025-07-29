@@ -220,6 +220,7 @@ export const updateEventController = async (req: injectedRequest, res: Response,
         const userId = req.user._id.toString();
         const updateData = trimObject(req.body);
 
+        console.log(updateData, 'updateDataupdateData')
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
             res.status(400).json({
                 status: false,
@@ -259,7 +260,9 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             'end_date',
             'location',
             'visibility',
-            'default_guest_permissions'
+            'default_guest_permissions',
+            'cover_image',
+            
         ];
 
         // Process and validate update data

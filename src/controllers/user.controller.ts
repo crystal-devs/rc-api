@@ -7,7 +7,7 @@ import { SubscriptionPlan } from "@models/subscription-plan.model";
 /**
  * Get user profile information
  */
-export const getUserProfileController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+export const    getUserProfileController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
         // Extract user ID from request (assuming auth middleware sets req.user)
         const userId = req.user?._id;

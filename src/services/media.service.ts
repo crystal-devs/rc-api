@@ -9,6 +9,7 @@ import { updateUsageForUpload, updateUsageForDelete } from "@models/user-usage.m
 import { checkUserLimitsService } from "@services/user.service";
 import { logger } from "@utils/logger";
 import { validateGuestShareToken } from "./share-token.service";
+import { Event } from "@models/event.model";
 
 const imagekit = new ImageKit({
     publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
@@ -230,7 +231,7 @@ export const getMediaByEventService = async (
                     query['approval.status'] = 'rejected';
                     break;
                 case 'hidden':
-                    query['content_flags.inappropriate'] = true; // Or however you handle hidden
+                    query['approval.status'] = 'hidden';
                     break;
                 case 'auto_approved':
                     query['approval.status'] = 'auto_approved';
@@ -565,7 +566,7 @@ export const updateMediaStatusService = async (
                 break;
 
             case 'hidden':
-                updateObj['approval.status'] = 'rejected'; // or keep original status
+                updateObj['approval.status'] = 'hidden';
                 updateObj['content_flags.inappropriate'] = true;
                 updateObj['approval.rejection_reason'] = options.hideReason || 'Content hidden by admin';
                 if (options.adminId) {
@@ -714,6 +715,7 @@ export const bulkUpdateMediaStatusService = async (
                 break;
 
             case 'hidden':
+                updateObj['approval.status'] = 'hidden';
                 updateObj['content_flags.inappropriate'] = true;
                 updateObj['approval.rejection_reason'] = options.hideReason || 'Bulk hidden by admin';
                 break;
@@ -791,10 +793,27 @@ export const deleteMediaService = async (
     user_id: string
 ): Promise<ServiceResponse<any>> => {
     try {
+        logger.info(`Attempting to delete media ${media_id} for admin user ${user_id}`);
+
+        // Validate inputs
+        if (!media_id || !user_id) {
+            logger.error(`Invalid inputs - media_id: ${media_id}, user_id: ${user_id}`);
+            return {
+                status: false,
+                code: 400,
+                message: "Invalid media ID or user ID",
+                data: null,
+                error: { message: "Media ID and User ID are required" },
+                other: null,
+            };
+        }
+
         // Find the media to get its size before deletion
+        logger.info(`Finding media with ID: ${media_id}`);
         const media = await Media.findById(media_id);
 
         if (!media) {
+            logger.warn(`Media not found: ${media_id}`);
             return {
                 status: false,
                 code: 404,
@@ -805,42 +824,34 @@ export const deleteMediaService = async (
             };
         }
 
-        // Check if the user is authorized to delete this media
-        // This could be expanded to check if user is event owner or has admin permissions
-        const isAuthorized = media.uploaded_by.toString() === user_id;
-
-        if (!isAuthorized) {
-            return {
-                status: false,
-                code: 403,
-                message: "Not authorized",
-                data: null,
-                error: { message: "You do not have permission to delete this media" },
-                other: null,
-            };
-        }
+        logger.info(`Media found: ${media._id}`);
 
         // Get the media size or default to 0 if not recorded
         const mediaSizeMB = media.size_mb || 0;
+        logger.info(`Media size: ${mediaSizeMB}MB`);
 
         // Delete from imagekit if needed (this would require parsing the URL to get the file ID)
         // Example: const fileId = getFileIdFromUrl(media.url);
         // await imagekit.deleteFile(fileId);
 
         // Delete the media record
+        logger.info(`Deleting media record: ${media_id}`);
         await Media.findByIdAndDelete(media_id);
+        logger.info(`Media record deleted successfully: ${media_id}`);
 
-        // Update user usage metrics
+        // Update user usage metrics (if you want to update the original uploader's usage)
         try {
-            if (mediaSizeMB > 0) {
-                await updateUsageForDelete(user_id, mediaSizeMB);
-                logger.info(`Updated usage for user ${user_id} - Removed ${mediaSizeMB}MB`);
+            if (mediaSizeMB > 0 && media.uploaded_by) {
+                logger.info(`Updating usage for original uploader ${media.uploaded_by} - Removing ${mediaSizeMB}MB`);
+                await updateUsageForDelete(media.uploaded_by.toString(), mediaSizeMB);
+                logger.info(`Updated usage for user ${media.uploaded_by} - Removed ${mediaSizeMB}MB`);
             }
-        } catch (usageError) {
-            logger.error(`Failed to update usage for user ${user_id}: ${usageError}`);
+        } catch (usageError: any) {
+            logger.error(`Failed to update usage for user ${media.uploaded_by}:`, usageError);
             // Don't fail the deletion if usage tracking fails
         }
 
+        logger.info(`Media deletion completed successfully: ${media_id}`);
         return {
             status: true,
             code: 200,
@@ -850,146 +861,17 @@ export const deleteMediaService = async (
             other: null,
         };
     } catch (err: any) {
+        logger.error(`Error in deleteMediaService:`, {
+            error: err.message,
+            stack: err.stack,
+            media_id,
+            user_id
+        });
+
         return {
             status: false,
             code: 500,
             message: "Failed to delete media",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
-        };
-    }
-};
-
-/**
- * Upload guest media to ImageKit and create a Media record with guest context
- */
-export const uploadGuestMediaService = async (
-    file: Express.Multer.File,
-    event_owner_id: string, // Event owner acts as the uploader
-    album_id: string,
-    event_id: string,
-    guestInfo: {
-        name: string;
-        email: string | null;
-        ip_address: string;
-        user_agent: string;
-    }
-): Promise<ServiceResponse<MediaCreationType>> => {
-    try {
-        const fileBuffer = await fs.readFile(file.path);
-
-        const fileType = (() => {
-            if (file.mimetype.startsWith("image/")) return "image";
-            if (file.mimetype.startsWith("video/")) return "video";
-            return null;
-        })();
-
-        if (!fileType) {
-            await fs.unlink(file.path);
-            return {
-                status: false,
-                code: 400,
-                message: "Unsupported file type",
-                data: null,
-                error: { message: "Only image and video files are supported" },
-                other: null,
-            };
-        }
-
-        // Calculate file size in MB
-        const fileSizeInMB = file.size / (1024 * 1024);
-
-        // For guest uploads, we'll check against the event owner's limits
-        const canUpload = await checkUserLimitsService(event_owner_id, 'storage', fileSizeInMB);
-
-        if (!canUpload) {
-            await fs.unlink(file.path);
-            return {
-                status: false,
-                code: 403,
-                message: "Event storage limit exceeded",
-                data: null,
-                error: {
-                    message: "This event has reached its storage limit. Please contact the event organizer."
-                },
-                other: null,
-            };
-        }
-
-        // Upload file to ImageKit with guest prefix
-        const uploadResult = await imagekit.upload({
-            file: fileBuffer,
-            fileName: `guest_${Date.now()}_${file.originalname}`,
-            folder: `/media/guest-uploads`,
-        });
-
-        await fs.unlink(file.path); // Always clean up
-
-        // Create media record with guest context
-        const media = await Media.create({
-            url: uploadResult.url,
-            type: fileType,
-            album_id: new mongoose.Types.ObjectId(album_id),
-            event_id: new mongoose.Types.ObjectId(event_id),
-            uploaded_by: new mongoose.Types.ObjectId(event_owner_id), // Event owner as uploader
-            size_mb: fileSizeInMB,
-            original_filename: file.originalname,
-
-            // Guest-specific fields
-            approval: {
-                status: 'auto_approved', // Auto-approve guest uploads
-                auto_approval_reason: 'invited_guest',
-                approved_at: new Date()
-            },
-
-            upload_context: {
-                method: 'web',
-                ip_address: guestInfo.ip_address,
-                user_agent: guestInfo.user_agent
-            },
-
-            // Store guest info in metadata
-            metadata: {
-                ...{}, // other metadata
-                guest_info: {
-                    name: guestInfo.name,
-                    email: guestInfo.email,
-                    is_guest_upload: true
-                }
-            }
-        });
-
-        // Update event owner's usage metrics (since they're the "uploader")
-        try {
-            await updateUsageForUpload(event_owner_id, fileSizeInMB, event_id);
-            logger.info(`Updated usage for event owner ${event_owner_id} - Added ${fileSizeInMB}MB (guest upload)`);
-        } catch (usageError) {
-            logger.error(`Failed to update usage for event owner ${event_owner_id}: ${usageError}`);
-        }
-
-        return {
-            status: true,
-            code: 201,
-            message: "Guest media upload successful",
-            data: media,
-            error: null,
-            other: {
-                guest_name: guestInfo.name,
-                auto_approved: true
-            },
-        };
-
-    } catch (err: any) {
-        if (file?.path) await fs.unlink(file.path).catch(() => { });
-
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to upload guest media",
             data: null,
             error: {
                 message: err.message,

@@ -6,102 +6,106 @@ import { authMiddleware } from './clicky-auth.middleware';
 import { Event } from '@models/event.model';
 import { Album } from '@models/album.model';
 import { injectedRequest } from 'types/injected-types';
+import jwt from "jsonwebtoken";
+import { User } from '@models/user.model';
 
-export const conditionalAuthMiddleware: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+
+export const optionalAuthMiddleware = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+) => {
     try {
-        const eventId = req.params.event_id;
-        const albumId = req.params.album_id;
-        
-        let targetEventId = eventId;
-        
-        // If we have album_id, get the event_id from the album
-        if (albumId && !eventId) {
-            if (!mongoose.Types.ObjectId.isValid(albumId)) {
-                res.status(400).json({ 
-                    status: false,
-                    message: 'Invalid album ID',
-                    error: { message: 'Invalid album ID format' }
-                });
-                return;
-            }
+        const authHeader = req.headers.authorization;
 
-            const album = await Album.findById(new mongoose.Types.ObjectId(albumId)).lean();
-            if (!album) {
-                res.status(404).json({ 
-                    status: false,
-                    message: 'Album not found',
-                    error: { message: 'The specified album does not exist' }
-                });
-                return;
-            }
-            targetEventId = album.event_id.toString();
-        }
-        
-        if (!targetEventId) {
-            res.status(400).json({ 
-                status: false,
-                message: 'Event ID required',
-                error: { message: 'Event ID is required' }
-            });
-            return;
-        }
+        console.log('🔍 [optionalAuthMiddleware] Request headers check:', {
+            hasAuthHeader: !!authHeader,
+            headerValue: authHeader ? authHeader.substring(0, 30) + '...' : 'none',
+            userAgent: req.headers['user-agent']?.substring(0, 50) + '...'
+        });
 
-        // Validate event ID format
-        if (!mongoose.Types.ObjectId.isValid(targetEventId)) {
-            res.status(400).json({ 
-                status: false,
-                message: 'Invalid event ID',
-                error: { message: 'Invalid event ID format' }
-            });
-            return;
-        }
-        
-        // Check if event exists and get its settings
-        const event = await Event.findById(new mongoose.Types.ObjectId(targetEventId)).lean();
-        
-        if (!event) {
-            res.status(404).json({ 
-                status: false,
-                message: 'Event not found',
-                error: { message: 'The specified event does not exist' }
-            });
-            return;
-        }
-        
-        // If event allows guest access based on visibility and permissions
-        const allowsGuestAccess = event.visibility === 'anyone_with_link' && 
-                                 event.permissions?.can_view === true;
-        
-        if (allowsGuestAccess) {
-            // Set a flag to indicate this is a guest request
-            // req.isGuestAccess = true;
-            // req.guestEvent = {
-            //     id: event._id.toString(),
-            //     visibility: event.visibility,
-            //     permissions: {
-            //         can_view: event.permissions?.can_view || false,
-            //         can_upload: event.permissions?.can_upload || false,
-            //         can_download: event.permissions?.can_download || false,
-            //         require_approval: event.permissions?.require_approval || true,
-            //         allowed_media_types: event.permissions?.allowed_media_types || {
-            //             images: true,
-            //             videos: true
-            //         }
-            //     }
-            // };
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            // No auth header - continue as unauthenticated user
+            console.log('🔍 [optionalAuthMiddleware] No auth header - continuing as guest');
+            req.user = null;
             return next();
         }
-        
-        // If event requires auth, apply the auth middleware
-        return authMiddleware(req, res, next);
-        
-    } catch (error) {
-        console.error('Error in conditional auth middleware:', error);
-        res.status(500).json({ 
-            status: false,
-            message: 'Internal server error',
-            error: { message: 'An unexpected error occurred' }
+
+        const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+
+        console.log('🔑 [optionalAuthMiddleware] Extracted token:', {
+            length: token.length,
+            preview: token.substring(0, 30) + '...',
+            fullToken: token // Temporarily log full token for debugging
         });
-        return;
+
+        if (!token) {
+            // Empty token - continue as unauthenticated user
+            console.log('🔍 [optionalAuthMiddleware] Empty token - continuing as guest');
+            req.user = null;
+            return next();
+        }
+
+        // Check if JWT_SECRET is available
+        if (!process.env.JWT_SECRET) {
+            console.error('❌ [optionalAuthMiddleware] JWT_SECRET not found in environment');
+            req.user = null;
+            return next();
+        }
+
+        // Try to verify token
+        try {
+            console.log('🔐 [optionalAuthMiddleware] Attempting to verify token with secret:', process.env.JWT_SECRET?.substring(0, 10) + '...');
+
+            const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
+            console.log('✅ [optionalAuthMiddleware] Token decoded successfully:', {
+                payload: decoded,
+                hasUserId: !!decoded.user_id,
+                hasId: !!decoded.id,
+                hasExp: !!decoded.exp,
+                isExpired: decoded.exp ? Date.now() >= decoded.exp * 1000 : false
+            });
+
+            // Try both possible user ID fields (user_id and id)
+            const userId = decoded.user_id || decoded.id;
+
+            if (!userId) {
+                console.error('❌ [optionalAuthMiddleware] No user ID found in token payload');
+                req.user = null;
+                return next();
+            }
+
+            console.log('🔍 [optionalAuthMiddleware] Looking up user with ID:', userId);
+            const user = await User.findById(userId).select('_id name email avatar_url');
+
+            if (user) {
+                req.user = user;
+                console.log(`✅ [optionalAuthMiddleware] User authenticated successfully:`, {
+                    id: user._id.toString(),
+                    email: user.email,
+                    name: user.name
+                });
+            } else {
+                req.user = null;
+                console.log('❌ [optionalAuthMiddleware] User not found in database with ID:', userId);
+            }
+        } catch (tokenError: any) {
+            // Invalid token - continue as unauthenticated user
+            console.error('❌ [optionalAuthMiddleware] Token verification failed:', {
+                error: tokenError.message,
+                name: tokenError.name,
+                stack: tokenError.stack
+            });
+            req.user = null;
+        }
+
+        next();
+    } catch (error: any) {
+        console.error('💥 [optionalAuthMiddleware] Unexpected error:', {
+            message: error.message,
+            stack: error.stack
+        });
+        req.user = null;
+        next();
     }
 };

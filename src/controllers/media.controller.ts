@@ -1,13 +1,14 @@
 // controllers/media.controller.ts
 
 import { getOrCreateDefaultAlbum } from "@services/album.service";
-import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService, deleteMediaService, uploadGuestMediaService, updateMediaStatusService, bulkUpdateMediaStatusService, getGuestMediaService } from "@services/media.service";
+import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService, deleteMediaService, updateMediaStatusService, bulkUpdateMediaStatusService, getGuestMediaService } from "@services/media.service";
 import { sendResponse } from "@utils/express.util";
 import { NextFunction, RequestHandler, Response } from "express";
 import { injectedRequest } from "types/injected-types";
 import mongoose from "mongoose";
 import { Event } from "@models/event.model";
 import { Media } from "@models/media.model";
+import guestMediaUploadService from "@services/guest.service";
 
 /**
  * Regular media upload controller
@@ -405,17 +406,17 @@ export const updateMediaStatusController: RequestHandler = async (
         }
 
         // Validate reason for rejected status
-        if (status === 'rejected' && !reason) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: 'Reason is required for rejected status',
-                data: null,
-                error: { message: 'Reason field is required when rejecting media' },
-                other: null
-            });
-            return;
-        }
+        // if (status === 'rejected' && !reason) {
+        //     res.status(400).json({
+        //         status: false,
+        //         code: 400,
+        //         message: 'Reason is required for rejected status',
+        //         data: null,
+        //         error: { message: 'Reason field is required when rejecting media' },
+        //         other: null
+        //     });
+        //     return;
+        // }
 
         console.log('Controller: Updating media status:', {
             media_id,
@@ -680,103 +681,176 @@ export const deleteMediaController: RequestHandler = async (req: injectedRequest
 };
 
 
-export const guestUploadMediaController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+export const guestUploadMediaController: RequestHandler = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
     try {
-        const file = req.file;
-        let { album_id, event_id, guest_name, guest_email } = req.body;
+        const { share_token } = req.params;
+        const files = (req.files as Express.Multer.File[]) || (req.file ? [req.file] : []);
+        const { guest_name, guest_email, guest_phone } = req.body;
 
-        console.log('Guest media upload request:', {
-            file: file ? `File present: ${file.originalname}` : 'No file',
-            album_id: album_id ? `Album ID: ${album_id}` : 'No album ID',
-            event_id: event_id ? `Event ID: ${event_id}` : 'No event ID',
-            guest_name: guest_name || 'Anonymous',
-            guest_email: guest_email || 'Not provided',
-            body: JSON.stringify(req.body)
+        console.log('🔍 Guest upload request:', {
+            shareToken: share_token,
+            fileCount: files.length,
+            guestName: guest_name || 'Anonymous',
+            guestEmail: guest_email || 'Not provided',
+            isAuthenticated: !!req.user,
+            userId: req.user?._id?.toString()
         });
 
-        if (!file) {
+        // Validate share token
+        if (!share_token) {
             res.status(400).json({
                 status: false,
-                message: "Missing file",
-                error: { message: "File is required" },
+                message: "Share token is required",
+                error: { message: "Missing share token parameter" },
             });
             return;
         }
 
-        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+        // Validate files
+        if (!files || files.length === 0) {
             res.status(400).json({
                 status: false,
-                message: "Invalid or missing event_id",
-                error: { message: "A valid event_id is required" },
+                message: "No files provided",
+                error: { message: "At least one file is required" },
             });
             return;
         }
 
-        // Check if event exists and allows guest uploads
-        const event = await Event.findById(event_id);
+        // Find event by share token
+        const event = await Event.findOne({ share_token });
         if (!event) {
             res.status(404).json({
                 status: false,
                 message: "Event not found",
-                error: { message: "The specified event does not exist" },
+                error: { message: "Invalid share token" },
             });
             return;
         }
 
-        // Check if event allows guest uploads
+        console.log('✅ Event found:', {
+            eventId: event._id.toString(),
+            title: event.title,
+            canUpload: event.permissions.can_upload,
+            requireApproval: event.permissions.require_approval
+        });
+
+        // Check if event allows uploads
         if (!event.permissions.can_upload) {
             res.status(403).json({
                 status: false,
-                message: "Guest uploads not allowed",
-                error: { message: "This event does not allow guest uploads" },
-                requires_login: true
+                message: "Uploads not allowed",
+                error: { message: "This event does not allow photo uploads" },
             });
             return;
         }
 
-        // If no album_id provided, get or create default album
-        // For guest uploads, we'll use event owner as the album creator
-        if (!album_id) {
-            const defaultAlbumResponse = await getOrCreateDefaultAlbum(
-                event_id,
-                event.created_by.toString() // Use event owner instead of guest
-            );
-
-            if (!defaultAlbumResponse.status || !defaultAlbumResponse.data) {
-                res.status(500).json({
-                    status: false,
-                    message: "Failed to get or create default album",
-                    error: { message: "Could not create or find default album" },
-                });
-                return;
-            }
-
-            album_id = defaultAlbumResponse.data._id.toString();
-        }
-
-        // Create guest info object
+        // Prepare guest information
         const guestInfo = {
-            name: guest_name || 'Anonymous Guest',
-            email: guest_email || null,
-            ip_address: req.ip || req.connection.remoteAddress || '',
-            user_agent: req.get('User-Agent') || ''
+            name: guest_name || '',
+            email: guest_email || '',
+            phone: guest_phone || '',
+            sessionId: req.sessionID || '',
+            deviceInfo: {
+                userAgent: req.get('User-Agent') || '',
+                ip: req.ip || '',
+                platform: req.get('X-Platform') || 'web'
+            },
+            ipAddress: req.ip || '',
+            userAgent: req.get('User-Agent') || '',
+            uploadMethod: 'web'
         };
 
-        // Upload media using guest upload service
-        const response = await uploadGuestMediaService(
-            file,
-            event.created_by.toString(), // Use event owner as uploader
-            album_id,
-            event_id,
-            guestInfo
-        );
+        // Process uploads
+        const results = [];
+        const errors = [];
 
-        sendResponse(res, response);
-    } catch (_err) {
-        next(_err);
+        for (const file of files) {
+            try {
+                console.log(`📁 Processing file: ${file.originalname}`);
+
+                const uploadResult = await guestMediaUploadService.uploadGuestMedia(
+                    share_token,
+                    file,
+                    guestInfo,
+                    req.user?._id?.toString() // Pass user ID if authenticated
+                );
+
+                results.push({
+                    filename: file.originalname,
+                    ...uploadResult
+                });
+
+                console.log(`✅ Upload result for ${file.originalname}:`, uploadResult);
+
+            } catch (fileError: any) {
+                console.error(`❌ Error uploading ${file.originalname}:`, fileError);
+                errors.push({
+                    filename: file.originalname,
+                    error: fileError.message || 'Upload failed'
+                });
+            }
+        }
+
+        // Calculate summary
+        const successCount = results.filter(r => r.success).length;
+        const failCount = results.length - successCount;
+
+        console.log('📊 Upload summary:', {
+            total: files.length,
+            success: successCount,
+            failed: failCount
+        });
+
+        // Send response
+        const response = {
+            status: successCount > 0,
+            code: successCount > 0 ? 200 : 400,
+            message: failCount === 0 ?
+                `All ${successCount} file(s) uploaded successfully!` :
+                successCount > 0 ?
+                    `${successCount} file(s) uploaded, ${failCount} failed` :
+                    'All uploads failed',
+            data: {
+                results,
+                errors: errors.length > 0 ? errors : undefined,
+                summary: {
+                    total: files.length,
+                    success: successCount,
+                    failed: failCount,
+                    pending_approval: results.filter(r => r.approval_status === 'pending').length
+                }
+            },
+            error: errors.length > 0 ? { message: 'Some uploads failed', details: errors } : null,
+            other: {
+                event_id: event._id.toString(),
+                requires_approval: event.permissions.require_approval,
+                uploader_type: req.user ? 'registered_user' : 'guest'
+            }
+        };
+
+        res.status(response.code).json(response);
+
+    } catch (error: any) {
+        console.error('💥 Guest upload controller error:', {
+            message: error.message,
+            stack: error.stack,
+            shareToken: req.params.share_token
+        });
+
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Upload failed',
+            error: { message: 'Internal server error occurred' },
+            data: null,
+            other: null
+        });
     }
 };
-
 export const getGuestMediaController: RequestHandler = async (
     req: injectedRequest,
     res: Response,
@@ -784,7 +858,7 @@ export const getGuestMediaController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { share_token } = req.params;
-        
+
         console.log(share_token, 'share_tokenshare_token')
         if (!share_token) {
             res.status(400).json({
@@ -799,8 +873,8 @@ export const getGuestMediaController: RequestHandler = async (
         }
 
         // Get auth info if available (from conditionalAuthMiddleware)
-        const authToken = req.headers.authorization?.replace('Bearer ', '') || 
-                         req.headers['x-auth-token'] as string;
+        const authToken = req.headers.authorization?.replace('Bearer ', '') ||
+            req.headers['x-auth-token'] as string;
         const userEmail = req.user?.email;
 
         // Extract and validate query parameters

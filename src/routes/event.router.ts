@@ -124,12 +124,11 @@ eventRouter.patch("/:event_id/archive",
 
 // ============= CO-HOST MANAGEMENT =============
 
-eventRouter.post('/:event_id/cohost-invite', authMiddleware, cohostcontroller.generateCoHostInviteController);
 eventRouter.post('/join-cohost/:token', authMiddleware, cohostcontroller.joinAsCoHostController);
-eventRouter.delete('/:event_id/cohost-invite', authMiddleware, cohostcontroller.deactivateCoHostInviteController);
-eventRouter.patch('/:event_id/cohosts/:user_id', authMiddleware, cohostcontroller.manageCoHostController);
 eventRouter.get('/:event_id/cohost-invite', authMiddleware, cohostcontroller.getCoHostInviteController);
+
 eventRouter.get('/:event_id/cohosts', authMiddleware, cohostcontroller.getEventCoHostsController);
+eventRouter.patch('/:event_id/cohosts/:user_id', authMiddleware, cohostcontroller.manageCoHostController);
 
 
 export default eventRouter;
