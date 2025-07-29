@@ -18,12 +18,6 @@ export const optionalAuthMiddleware = async (
     try {
         const authHeader = req.headers.authorization;
 
-        console.log('🔍 [optionalAuthMiddleware] Request headers check:', {
-            hasAuthHeader: !!authHeader,
-            headerValue: authHeader ? authHeader.substring(0, 30) + '...' : 'none',
-            userAgent: req.headers['user-agent']?.substring(0, 50) + '...'
-        });
-
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
             // No auth header - continue as unauthenticated user
             console.log('🔍 [optionalAuthMiddleware] No auth header - continuing as guest');
@@ -32,12 +26,6 @@ export const optionalAuthMiddleware = async (
         }
 
         const token = authHeader.substring(7); // Remove 'Bearer ' prefix
-
-        console.log('🔑 [optionalAuthMiddleware] Extracted token:', {
-            length: token.length,
-            preview: token.substring(0, 30) + '...',
-            fullToken: token // Temporarily log full token for debugging
-        });
 
         if (!token) {
             // Empty token - continue as unauthenticated user
@@ -58,13 +46,6 @@ export const optionalAuthMiddleware = async (
             console.log('🔐 [optionalAuthMiddleware] Attempting to verify token with secret:', process.env.JWT_SECRET?.substring(0, 10) + '...');
 
             const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
-            console.log('✅ [optionalAuthMiddleware] Token decoded successfully:', {
-                payload: decoded,
-                hasUserId: !!decoded.user_id,
-                hasId: !!decoded.id,
-                hasExp: !!decoded.exp,
-                isExpired: decoded.exp ? Date.now() >= decoded.exp * 1000 : false
-            });
 
             // Try both possible user ID fields (user_id and id)
             const userId = decoded.user_id || decoded.id;

@@ -211,8 +211,6 @@ export const getMediaByEventService = async (
             };
         }
 
-        console.log('Searching for media with event_id:', eventId);
-
         // Build base query
         const query: any = {
             event_id: new mongoose.Types.ObjectId(eventId)
@@ -237,18 +235,15 @@ export const getMediaByEventService = async (
                     query['approval.status'] = 'auto_approved';
                     break;
             }
-            console.log('Applied status filter:', options.status, query['approval.status']);
         } else {
             // Legacy behavior - maintain backward compatibility
             if (options.includePending === false) {
                 query['approval.status'] = { $in: ['approved', 'auto_approved'] };
-                console.log('Applied legacy approval filter:', query['approval.status']);
             }
         }
 
         if (options.includeProcessing === false) {
             query['processing.status'] = 'completed';
-            console.log('Applied processing filter:', query['processing.status']);
         }
 
         // Handle cursor-based pagination for infinite scroll
@@ -257,7 +252,6 @@ export const getMediaByEventService = async (
                 const cursorDate = new Date(options.cursor);
                 if (!isNaN(cursorDate.getTime())) {
                     query.created_at = { $lt: cursorDate };
-                    console.log('Applied cursor filter:', options.cursor);
                 }
             } catch (cursorError) {
                 console.warn('Invalid cursor provided:', options.cursor);
@@ -276,23 +270,18 @@ export const getMediaByEventService = async (
                 } else {
                     query.created_at = { $gt: sinceDate };
                 }
-                console.log('Applied date filter:', options.since);
             } catch (dateError) {
                 console.warn('Invalid since date provided:', options.since);
             }
         }
 
-        console.log('Final query:', JSON.stringify(query, null, 2));
-
         // Debug: Check total count without filters first
         const totalCount = await Media.countDocuments({
             event_id: new mongoose.Types.ObjectId(eventId)
         });
-        console.log('Total media count for event (no filters):', totalCount);
 
         // Check count with filters
         const filteredCount = await Media.countDocuments(query);
-        console.log('Filtered media count:', filteredCount);
 
         if (filteredCount === 0) {
             return {
@@ -330,8 +319,6 @@ export const getMediaByEventService = async (
         }
 
         let media = await mediaQuery.lean().exec();
-
-        console.log('Found media count:', media.length);
 
         // Handle infinite scroll response
         let hasMore = false;
@@ -914,8 +901,6 @@ export const getGuestMediaService = async (
             // DON'T set includeProcessing: false - let it default to include all processing states
             // DON'T set includePending: false - status: 'approved' already handles this
         };
-
-        console.log('Getting guest media for event:', validation.event_id, 'with options:', mediaOptions);
 
         // Use your existing getMediaByEventService
         const mediaResponse = await getMediaByEventService(validation.event_id!, mediaOptions);

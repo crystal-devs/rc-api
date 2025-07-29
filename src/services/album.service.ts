@@ -16,11 +16,8 @@ export const createAlbumService = async (albumData: AlbumCreationType): Promise<
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
-        console.log(albumData, 'album being created');
-
         // Create the album
         const album = await Album.create([albumData], { session });
-        console.log(album, 'album created');
 
         if (!album[0]?._id || !albumData?.created_by) {
             throw new Error("Invalid album or creator ID");

@@ -71,8 +71,6 @@ export const createEventController = async (req: injectedRequest, res: Response,
             throw new Error('User authentication required');
         }
 
-        console.log('createEventController: req.user._id =', req.user._id);
-
         const { title, template, start_date, end_date } = trimObject(req.body) as EventCreationInput;
 
         // Validation
@@ -102,8 +100,6 @@ export const createEventController = async (req: injectedRequest, res: Response,
             // Other fields (description, timezone, location, cover_image, visibility, permissions, share_settings, co_hosts, stats)
             // are omitted to use schema defaults
         };
-
-        console.log('createEventController: eventData.created_by =', eventData.created_by.toString());
 
         const response = await eventService.createEventService(eventData);
 
@@ -220,7 +216,6 @@ export const updateEventController = async (req: injectedRequest, res: Response,
         const userId = req.user._id.toString();
         const updateData = trimObject(req.body);
 
-        console.log(updateData, 'updateDataupdateData')
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
             res.status(400).json({
                 status: false,

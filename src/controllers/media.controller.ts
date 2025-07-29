@@ -76,12 +76,6 @@ export const uploadMediaController: RequestHandler = async (req: injectedRequest
  */
 export const uploadCoverImageController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
-        // Log the request for debugging
-        console.log('Cover image upload request:', {
-            file: req.file ? 'File present' : 'No file',
-            body: req.body
-        });
-
         const file = req.file;
         // Get the folder parameter with 'covers' as default
         const { folder = 'covers' } = req.body;
@@ -288,19 +282,8 @@ export const getMediaByEventController: RequestHandler = async (
             options.since = since as string;
         }
 
-        console.log('Controller: Fetching media for event:', {
-            event_id,
-            options,
-        });
-
         // Call service
         const response = await getMediaByEventService(event_id, options);
-
-        console.log('Media fetched successfully:', {
-            dataCount: response.data?.length,
-            status: response.status,
-            scrollType: options.scrollType
-        });
 
         // Send response
         res.status(response.code).json(response);
@@ -975,21 +958,8 @@ export const getGuestMediaController: RequestHandler = async (
             }
         }
 
-        console.log('Guest Controller: Processing request for share_token:', share_token, {
-            userEmail,
-            hasAuth: !!authToken,
-            options
-        });
-
         // Call the guest media service
         const response = await getGuestMediaService(share_token, userEmail, authToken, options);
-
-        console.log('Guest media response:', {
-            status: response.status,
-            code: response.code,
-            dataCount: response.data?.length,
-            requiresAuth: response.other?.requires_auth
-        });
 
         res.status(response.code).json(response);
 
