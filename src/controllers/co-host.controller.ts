@@ -4,6 +4,7 @@ import * as eventService from "@services/event.service";
 import * as cohostService from "@services/cohost.service";
 import { sendResponse } from "@utils/express.util";
 import mongoose from "mongoose";
+import { Event } from "@models/event.model";
 
 export const generateCoHostInviteController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
@@ -91,48 +92,6 @@ export const getCoHostInviteController = async (req: injectedRequest, res: Respo
     }
 };
 
-// Deactivate co-host invite
-export const deactivateCoHostInviteController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
-    try {
-        const { event_id } = req.params;
-        const userId = req.user._id.toString();
-
-        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
-            res.status(400).json({
-                status: false,
-                message: 'Valid event ID is required',
-                data: null
-            });
-            return;
-        }
-
-        const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
-        if (!hasPermission) {
-            res.status(403).json({
-                status: false,
-                message: "You don't have permission to manage co-hosts for this event",
-                data: null
-            });
-            return;
-        }
-
-        const response = await cohostService.deactivateCoHostInvite(event_id, userId);
-
-        if (response.status) {
-            res.status(200).json(response);
-        } else {
-            res.status(400).json(response);
-        }
-    } catch (error) {
-        console.error('Error in deactivateCoHostInviteController:', error);
-        res.status(500).json({
-            status: false,
-            message: 'Internal server error',
-            data: null
-        });
-    }
-};
-
 // Join as co-host
 export const joinAsCoHostController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
@@ -150,10 +109,20 @@ export const joinAsCoHostController = async (req: injectedRequest, res: Response
 
         const response = await cohostService.joinAsCoHost(token, userId);
 
+        // 🔥 KEY FIX: Return the response even for "already co-host" case
         if (response.status) {
             res.status(200).json(response);
         } else {
-            res.status(400).json(response);
+            // Don't return 400 for "already co-host" - return 200 with the event_id
+            if (response.message.includes('already a co-host') && response.data?.event_id) {
+                res.status(200).json({
+                    ...response,
+                    status: true, // Change to true so frontend can redirect
+                    message: 'You are already a co-host for this event'
+                });
+            } else {
+                res.status(400).json(response);
+            }
         }
     } catch (error) {
         console.error('Error in joinAsCoHostController:', error);
@@ -190,11 +159,12 @@ export const manageCoHostController = async (req: injectedRequest, res: Response
             return;
         }
 
-        const validActions = ['approve', 'reject', 'remove'];
+        // Updated to include block and unblock actions
+        const validActions = ['approve', 'reject', 'remove', 'block', 'unblock'];
         if (!action || !validActions.includes(action)) {
             res.status(400).json({
                 status: false,
-                message: 'Valid action is required (approve, reject, remove)',
+                message: 'Valid action is required (approve, reject, remove, block, unblock)',
                 data: null
             });
             return;
@@ -233,7 +203,12 @@ export const getEventCoHostsController = async (req: injectedRequest, res: Respo
         const { event_id } = req.params;
         const userId = req.user._id.toString();
 
+        console.log('🔍 [getEventCoHostsController] Params:', req.params);
+        console.log('🔍 [getEventCoHostsController] Event ID:', event_id);
+        console.log('🔍 [getEventCoHostsController] User ID:', userId);
+
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            console.log('❌ [getEventCoHostsController] Invalid event ID');
             res.status(400).json({
                 status: false,
                 message: 'Valid event ID is required',
@@ -242,8 +217,27 @@ export const getEventCoHostsController = async (req: injectedRequest, res: Respo
             return;
         }
 
-        const hasPermission = await cohostService.checkViewPermission(event_id, userId);
-        if (!hasPermission) {
+        // Simplified permission check - just check if user has access to the event
+        const event = await Event.findById(event_id).select('created_by co_hosts');
+        
+        if (!event) {
+            console.log('❌ [getEventCoHostsController] Event not found');
+            res.status(404).json({
+                status: false,
+                message: 'Event not found',
+                data: null
+            });
+            return;
+        }
+
+        // Check if user is creator or co-host
+        const isCreator = event.created_by.toString() === userId;
+        const isCoHost = event.co_hosts.some(ch => 
+            ch.user_id.toString() === userId && ch.status === 'approved'
+        );
+
+        if (!isCreator && !isCoHost) {
+            console.log('❌ [getEventCoHostsController] No permission');
             res.status(403).json({
                 status: false,
                 message: "You don't have permission to view co-hosts for this event",
@@ -252,7 +246,10 @@ export const getEventCoHostsController = async (req: injectedRequest, res: Respo
             return;
         }
 
+        console.log('✅ [getEventCoHostsController] Permission granted, fetching co-hosts');
         const response = await cohostService.getEventCoHosts(event_id);
+
+        console.log('📊 [getEventCoHostsController] Service response:', response);
 
         if (response.status) {
             res.status(200).json(response);
@@ -260,7 +257,7 @@ export const getEventCoHostsController = async (req: injectedRequest, res: Respo
             res.status(404).json(response);
         }
     } catch (error) {
-        console.error('Error in getEventCoHostsController:', error);
+        console.error('💥 [getEventCoHostsController] Error:', error);
         res.status(500).json({
             status: false,
             message: 'Internal server error',

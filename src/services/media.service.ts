@@ -9,6 +9,7 @@ import { updateUsageForUpload, updateUsageForDelete } from "@models/user-usage.m
 import { checkUserLimitsService } from "@services/user.service";
 import { logger } from "@utils/logger";
 import { validateGuestShareToken } from "./share-token.service";
+import { Event } from "@models/event.model";
 
 const imagekit = new ImageKit({
     publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
@@ -230,7 +231,7 @@ export const getMediaByEventService = async (
                     query['approval.status'] = 'rejected';
                     break;
                 case 'hidden':
-                    query['content_flags.inappropriate'] = true; // Or however you handle hidden
+                    query['approval.status'] = 'hidden';
                     break;
                 case 'auto_approved':
                     query['approval.status'] = 'auto_approved';
@@ -565,7 +566,7 @@ export const updateMediaStatusService = async (
                 break;
 
             case 'hidden':
-                updateObj['approval.status'] = 'rejected'; // or keep original status
+                updateObj['approval.status'] = 'hidden';
                 updateObj['content_flags.inappropriate'] = true;
                 updateObj['approval.rejection_reason'] = options.hideReason || 'Content hidden by admin';
                 if (options.adminId) {
@@ -714,6 +715,7 @@ export const bulkUpdateMediaStatusService = async (
                 break;
 
             case 'hidden':
+                updateObj['approval.status'] = 'hidden';
                 updateObj['content_flags.inappropriate'] = true;
                 updateObj['approval.rejection_reason'] = options.hideReason || 'Bulk hidden by admin';
                 break;
@@ -920,6 +922,35 @@ export const uploadGuestMediaService = async (
             };
         }
 
+        // Fetch event to check approval requirements
+        const event = await Event.findById(event_id);
+        if (!event) {
+            await fs.unlink(file.path);
+            return {
+                status: false,
+                code: 404,
+                message: "Event not found",
+                data: null,
+                error: { message: "The specified event does not exist" },
+                other: null,
+            };
+        }
+
+        // Determine approval status based on event permissions
+        const requiresApproval = event.permissions?.require_approval ?? true; // Default to true if not set
+        
+        const approvalData = requiresApproval 
+            ? {
+                status: 'pending' as const,
+                auto_approval_reason: null as any,
+                approved_at: null as any
+              }
+            : {
+                status: 'auto_approved' as const,
+                auto_approval_reason: 'invited_guest' as const,
+                approved_at: new Date()
+              };
+
         // Upload file to ImageKit with guest prefix
         const uploadResult = await imagekit.upload({
             file: fileBuffer,
@@ -929,7 +960,7 @@ export const uploadGuestMediaService = async (
 
         await fs.unlink(file.path); // Always clean up
 
-        // Create media record with guest context
+        // Create media record with guest context and event-based approval
         const media = await Media.create({
             url: uploadResult.url,
             type: fileType,
@@ -939,12 +970,8 @@ export const uploadGuestMediaService = async (
             size_mb: fileSizeInMB,
             original_filename: file.originalname,
 
-            // Guest-specific fields
-            approval: {
-                status: 'auto_approved', // Auto-approve guest uploads
-                auto_approval_reason: 'invited_guest',
-                approved_at: new Date()
-            },
+            // Event-based approval settings
+            approval: approvalData,
 
             upload_context: {
                 method: 'web',
@@ -971,15 +998,34 @@ export const uploadGuestMediaService = async (
             logger.error(`Failed to update usage for event owner ${event_owner_id}: ${usageError}`);
         }
 
+        // Update event stats - increment pending_approval if requires approval
+        if (requiresApproval) {
+            try {
+                await Event.findByIdAndUpdate(
+                    event_id,
+                    { 
+                        $inc: { 'stats.pending_approval': 1 },
+                        updated_at: new Date()
+                    }
+                );
+            } catch (statsError) {
+                logger.error(`Failed to update event stats for pending approval: ${statsError}`);
+            }
+        }
+
         return {
             status: true,
             code: 201,
-            message: "Guest media upload successful",
+            message: requiresApproval 
+                ? "Guest media uploaded successfully - pending approval" 
+                : "Guest media upload successful",
             data: media,
             error: null,
             other: {
                 guest_name: guestInfo.name,
-                auto_approved: true
+                auto_approved: !requiresApproval,
+                requires_approval: requiresApproval,
+                approval_status: approvalData.status
             },
         };
 

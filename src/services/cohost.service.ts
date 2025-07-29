@@ -1,6 +1,7 @@
 import { Event } from "@models/event.model";
 import mongoose from "mongoose";
 
+// Improved backend service - always return event info
 export const joinAsCoHost = async (token: string, userId: string): Promise<any> => {
     try {
         console.log('🔄 Backend: joinAsCoHost called with:', { token, userId });
@@ -21,7 +22,7 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<any> 
             return {
                 status: false,
                 message: 'Invalid co-host invite token',
-                data: null
+                data: { event_id: null }  // Always include event_id field
             };
         }
 
@@ -35,7 +36,11 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<any> 
             return {
                 status: false,
                 message: 'You are already a co-host for this event',
-                data: { status: existingCoHost.status }
+                data: {
+                    event_id: event._id.toString(),  // 🔥 KEY: Return the ACTUAL event._id, not token ID
+                    event_title: event.title,
+                    status: existingCoHost.status
+                }
             };
         }
 
@@ -45,46 +50,50 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<any> 
             return {
                 status: false,
                 message: 'Event creator cannot be added as co-host',
-                data: null
+                data: {
+                    event_id: event._id,  // 🔥 Also return event_id here
+                    event_title: event.title
+                }
             };
         }
 
-        // Add user as approved co-host
+        // Add user as APPROVED co-host (skip pending status for invite links)
         const newCoHost = {
             user_id: new mongoose.Types.ObjectId(userId),
-            invited_by: event.co_host_invite_token.created_by,
-            status: 'approved',
+            invited_by: event.created_by, // Use event creator as invited_by
+            status: 'approved', // 🔥 KEY: Auto-approve via invite link
             permissions: {
                 manage_content: true,
                 manage_guests: false,
                 manage_settings: false,
                 approve_content: true
             },
-            joined_at: new Date()
+            invited_at: new Date(),
+            approved_at: new Date() // Set approved_at since we're auto-approving
         };
 
-        console.log('✅ Backend: Adding new co-host:', newCoHost);
+        console.log('✅ Backend: Adding new co-host as APPROVED:', newCoHost);
 
-        // Update event with new co-host - no need to increment usage count
+        // Update event with new co-host
         const updatedEvent = await Event.findByIdAndUpdate(
             event._id,
             {
                 $push: { co_hosts: newCoHost },
-                $inc: { 
-                    'stats.participants': 1  // Updated based on new schema
+                $inc: {
+                    'stats.participants': 1
                 },
                 $set: { updated_at: new Date() }
             },
             { new: true }
         ).populate('co_hosts.user_id', 'name email avatar');
 
-        console.log('✅ Backend: Successfully added co-host');
+        console.log('✅ Backend: Successfully added co-host with APPROVED status');
 
         return {
             status: true,
-            message: 'Successfully joined as co-host.',
+            message: 'Successfully joined as co-host and approved!',
             data: {
-                event_id: event._id,
+                event_id: event._id.toString(), // 🔥 Convert to string for consistency
                 event_title: event.title,
                 status: 'approved',
                 co_host: newCoHost
@@ -95,52 +104,12 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<any> 
         return {
             status: false,
             message: error.message || 'Failed to join as co-host',
-            data: null
+            data: { event_id: null }
         };
     }
 };
 
-// Deactivate co-host invite token
-export const deactivateCoHostInvite = async (eventId: string, userId: string): Promise<any> => {
-    try {
-        // Simply remove the co_host_invite_token from the event
-        const updatedEvent = await Event.findByIdAndUpdate(
-            eventId,
-            {
-                $unset: {
-                    'co_host_invite_token': ""
-                },
-                $set: { updated_at: new Date() }
-            },
-            { new: true }
-        );
-
-        if (!updatedEvent) {
-            return {
-                status: false,
-                message: 'Event not found',
-                data: null
-            };
-        }
-
-        return {
-            status: true,
-            message: 'Co-host invite token deactivated successfully',
-            data: {
-                event_id: eventId,
-                token_deactivated: true
-            }
-        };
-    } catch (error) {
-        return {
-            status: false,
-            message: error.message || 'Failed to deactivate co-host invite',
-            data: null
-        };
-    }
-};
-
-// Manage co-host (approve/reject/remove)
+// Updated manageCoHost service with block/remove logic
 export const manageCoHost = async (
     eventId: string,
     coHostUserId: string,
@@ -186,7 +155,7 @@ export const manageCoHost = async (
                 updateQuery = {
                     $set: {
                         [`co_hosts.${coHostIndex}.status`]: 'approved',
-                        [`co_hosts.${coHostIndex}.approved_by`]: new mongoose.Types.ObjectId(adminUserId),
+                        [`co_hosts.${coHostIndex}.approved_at`]: new Date(),
                         updated_at: new Date()
                     }
                 };
@@ -204,7 +173,6 @@ export const manageCoHost = async (
                 updateQuery = {
                     $set: {
                         [`co_hosts.${coHostIndex}.status`]: 'rejected',
-                        [`co_hosts.${coHostIndex}.approved_by`]: new mongoose.Types.ObjectId(adminUserId),
                         updated_at: new Date()
                     }
                 };
@@ -212,28 +180,61 @@ export const manageCoHost = async (
                 break;
 
             case 'remove':
-                if (coHost.status === 'removed') {
+                // 🗑️ HARD DELETE: Remove completely from array (they can rejoin via invite)
+                updateQuery = {
+                    $pull: { co_hosts: { user_id: new mongoose.Types.ObjectId(coHostUserId) } },
+                    $inc: { 'stats.participants': coHost.status === 'approved' ? -1 : 0 },
+                    $set: { updated_at: new Date() }
+                };
+                message = 'Co-host removed successfully (they can rejoin using the invite link)';
+                console.log('🗑️ Hard deleting co-host from array - they can rejoin via invite');
+                break;
+
+            case 'block':
+                // 🚫 BLOCK: Set status to blocked (prevents rejoining via invite)
+                updateQuery = {
+                    $set: {
+                        [`co_hosts.${coHostIndex}.status`]: 'blocked',
+                        [`co_hosts.${coHostIndex}.blocked_at`]: new Date(),
+                        [`co_hosts.${coHostIndex}.blocked_by`]: new mongoose.Types.ObjectId(adminUserId),
+                        updated_at: new Date()
+                    },
+                    $inc: { 'stats.participants': coHost.status === 'approved' ? -1 : 0 } // Only decrement if was active
+                };
+                message = 'Co-host blocked successfully (they cannot rejoin via invite link)';
+                console.log('🚫 Blocking co-host - they cannot rejoin via invite');
+                break;
+
+            case 'unblock':
+                if (coHost.status !== 'blocked') {
                     return {
                         status: false,
-                        message: 'Co-host is already removed',
+                        message: 'Only blocked co-hosts can be unblocked',
                         data: null
                     };
                 }
+
+                // Unblock and make them approved
                 updateQuery = {
                     $set: {
-                        [`co_hosts.${coHostIndex}.status`]: 'removed',
-                        [`co_hosts.${coHostIndex}.approved_by`]: new mongoose.Types.ObjectId(adminUserId),
+                        [`co_hosts.${coHostIndex}.status`]: 'approved',
+                        [`co_hosts.${coHostIndex}.approved_at`]: new Date(),
+                        [`co_hosts.${coHostIndex}.unblocked_at`]: new Date(),
                         updated_at: new Date()
                     },
-                    $inc: { 'stats.participants': -1 }  // Updated based on new schema
+                    $unset: {
+                        [`co_hosts.${coHostIndex}.blocked_at`]: "",
+                        [`co_hosts.${coHostIndex}.blocked_by`]: ""
+                    },
+                    $inc: { 'stats.participants': 1 }
                 };
-                message = 'Co-host removed successfully';
+                message = 'Co-host unblocked and restored successfully';
                 break;
 
             default:
                 return {
                     status: false,
-                    message: 'Invalid action',
+                    message: 'Invalid action. Use: approve, reject, remove, block, unblock',
                     data: null
                 };
         }
@@ -249,8 +250,8 @@ export const manageCoHost = async (
             message,
             data: {
                 event_id: eventId,
-                co_host: updatedEvent.co_hosts[coHostIndex],
-                action_taken: action
+                action_taken: action,
+                co_host_id: coHostUserId
             }
         };
     } catch (error) {
@@ -261,16 +262,19 @@ export const manageCoHost = async (
         };
     }
 };
-
 // Get event co-hosts
 export const getEventCoHosts = async (eventId: string): Promise<any> => {
     try {
+        console.log('🔍 [getEventCoHosts] Fetching for event:', eventId);
+
         const event = await Event.findById(eventId)
-            .select('title co_hosts created_by stats.participants')  // Updated field selection
+            .select('title co_hosts created_by stats.participants')
             .populate('co_hosts.user_id', 'name email avatar')
             .populate('co_hosts.invited_by', 'name email')
-            .populate('co_hosts.approved_by', 'name email')
+            // ❌ REMOVED: .populate('co_hosts.approved_by', 'name email') - This field doesn't exist
             .populate('created_by', 'name email avatar');
+
+        console.log('📊 [getEventCoHosts] Event found:', !!event);
 
         if (!event) {
             return {
@@ -280,15 +284,17 @@ export const getEventCoHosts = async (eventId: string): Promise<any> => {
             };
         }
 
+        console.log('📊 [getEventCoHosts] Co-hosts count:', event.co_hosts.length);
+
         // Separate co-hosts by status
         const coHostsByStatus = {
             approved: event.co_hosts.filter(ch => ch.status === 'approved'),
             pending: event.co_hosts.filter(ch => ch.status === 'pending'),
-            rejected: event.co_hosts.filter(ch => ch.status === 'rejected'),
+            blocked: event.co_hosts.filter(ch => ch.status === 'blocked'),
             removed: event.co_hosts.filter(ch => ch.status === 'removed')
         };
 
-        return {
+        const result = {
             status: true,
             message: 'Co-hosts retrieved successfully',
             data: {
@@ -299,12 +305,16 @@ export const getEventCoHosts = async (eventId: string): Promise<any> => {
                 summary: {
                     approved: coHostsByStatus.approved.length,
                     pending: coHostsByStatus.pending.length,
-                    rejected: coHostsByStatus.rejected.length,
+                    blocked: coHostsByStatus.blocked.length,
                     removed: coHostsByStatus.removed.length
                 }
             }
         };
+
+        console.log('✅ [getEventCoHosts] Returning result:', result);
+        return result;
     } catch (error) {
+        console.error('💥 [getEventCoHosts] Error:', error);
         return {
             status: false,
             message: error.message || 'Failed to get event co-hosts',
@@ -312,7 +322,6 @@ export const getEventCoHosts = async (eventId: string): Promise<any> => {
         };
     }
 };
-
 // Check view permission (for co-hosts list)
 export const checkViewPermission = async (eventId: string, userId: string): Promise<boolean> => {
     try {
