@@ -947,32 +947,128 @@ export const processLocationData = (
     };
 };
 
+const processCoverImageData = (coverImageData: any): any => {
+    if (!coverImageData || typeof coverImageData !== 'object') {
+        return { url: '', public_id: '', uploaded_by: null, thumbnail_url: '' };
+    }
 
-export const processCoverImageData = (
-    coverImage: any,
-    userId: string
-): { url: string; public_id: string; uploaded_by: mongoose.Types.ObjectId } => {
-    const defaultObj = {
-        url: '',
-        public_id: '',
-        uploaded_by: new mongoose.Types.ObjectId(userId),
-    };
-
-    if (!coverImage) return defaultObj;
-
-    if (typeof coverImage === 'string') {
-        return {
-            url: coverImage,
-            public_id: '',
-            uploaded_by: new mongoose.Types.ObjectId(userId),
-        };
+    // Validate URL if provided
+    if (coverImageData.url && typeof coverImageData.url !== 'string') {
+        throw new Error('Cover image URL must be a string');
     }
 
     return {
-        url: coverImage.url || '',
-        public_id: coverImage.public_id || '',
-        uploaded_by: new mongoose.Types.ObjectId(userId),
+        url: coverImageData.url?.trim() || '',
+        public_id: coverImageData.public_id?.trim() || '',
+        uploaded_by: coverImageData.uploaded_by || null,
+        thumbnail_url: coverImageData.thumbnail_url?.trim() || ''
     };
+};
+
+const processPermissionsData = (permissionsData: any): any => {
+    if (!permissionsData || typeof permissionsData !== 'object') {
+        throw new Error('Invalid permissions data');
+    }
+
+    const processed: any = {};
+
+    if (permissionsData.can_view !== undefined) {
+        processed.can_view = Boolean(permissionsData.can_view);
+    }
+    if (permissionsData.can_upload !== undefined) {
+        processed.can_upload = Boolean(permissionsData.can_upload);
+    }
+    if (permissionsData.can_download !== undefined) {
+        processed.can_download = Boolean(permissionsData.can_download);
+    }
+    if (permissionsData.require_approval !== undefined) {
+        processed.require_approval = Boolean(permissionsData.require_approval);
+    }
+
+    if (permissionsData.allowed_media_types !== undefined) {
+        if (typeof permissionsData.allowed_media_types !== 'object') {
+            throw new Error('Invalid allowed_media_types format');
+        }
+        processed.allowed_media_types = {
+            images: Boolean(permissionsData.allowed_media_types.images),
+            videos: Boolean(permissionsData.allowed_media_types.videos)
+        };
+    }
+
+    return processed;
+};
+
+const processShareSettingsData = (shareSettingsData: any): any => {
+    if (!shareSettingsData || typeof shareSettingsData !== 'object') {
+        return { is_active: true, password: null, expires_at: null };
+    }
+
+    const processed: any = {};
+
+    if (shareSettingsData.is_active !== undefined) {
+        processed.is_active = Boolean(shareSettingsData.is_active);
+    }
+
+    if (shareSettingsData.password !== undefined) {
+        processed.password = shareSettingsData.password ? shareSettingsData.password.trim() : null;
+    }
+
+    if (shareSettingsData.expires_at !== undefined) {
+        if (shareSettingsData.expires_at) {
+            const expiresDate = new Date(shareSettingsData.expires_at);
+            if (isNaN(expiresDate.getTime())) {
+                throw new Error('Invalid expires_at date format');
+            }
+            if (expiresDate <= new Date()) {
+                throw new Error('Expiration date must be in the future');
+            }
+            processed.expires_at = expiresDate;
+        } else {
+            processed.expires_at = null;
+        }
+    }
+
+    return processed;
+};
+
+const processCoHostInviteTokenData = (tokenData: any): any => {
+    if (!tokenData || typeof tokenData !== 'object') {
+        throw new Error('Invalid co-host invite token data');
+    }
+
+    const processed: any = {};
+
+    // Usually token shouldn't be manually updated, but including for completeness
+    if (tokenData.token !== undefined) {
+        if (tokenData.token && !/^coh_[a-zA-Z0-9]{24}_[a-zA-Z0-9]{6}$/.test(tokenData.token)) {
+            throw new Error('Invalid co-host invite token format');
+        }
+        processed.token = tokenData.token;
+    }
+
+    if (tokenData.expires_at !== undefined) {
+        if (tokenData.expires_at) {
+            const expiresDate = new Date(tokenData.expires_at);
+            if (isNaN(expiresDate.getTime())) {
+                throw new Error('Invalid token expires_at date format');
+            }
+            processed.expires_at = expiresDate;
+        }
+    }
+
+    if (tokenData.is_active !== undefined) {
+        processed.is_active = Boolean(tokenData.is_active);
+    }
+
+    if (tokenData.max_uses !== undefined) {
+        const maxUses = Number(tokenData.max_uses);
+        if (isNaN(maxUses) || maxUses < 1) {
+            throw new Error('max_uses must be a positive number');
+        }
+        processed.max_uses = maxUses;
+    }
+
+    return processed;
 };
 
 export const validateCoHosts = async (coHosts: string[]): Promise<mongoose.Types.ObjectId[]> => {
@@ -1037,76 +1133,118 @@ export const checkUpdatePermission = async (eventId: string, userId: string): Pr
 
 export const processEventUpdateData = async (
     updateData: any,
-    processFields: string[] = [
-        'title',
-        'description',
-        'start_date',
-        'end_date',
-        'location',
-        'visibility',
-        'default_guest_permissions'
-    ]
+    currentEvent: any
 ): Promise<Record<string, any>> => {
     const processed: Record<string, any> = {};
 
-    // Process specified fields
-    if (processFields.includes('title') && updateData.title) {
-        if (typeof updateData.title !== 'string' || !updateData.title.trim()) {
-            throw new Error('Invalid title');
+    try {
+        // Basic event information
+        if (updateData.title !== undefined) {
+            if (!updateData.title || typeof updateData.title !== 'string' || !updateData.title.trim()) {
+                throw new Error('Title is required and must be a valid string');
+            }
+            if (updateData.title.length > 100) {
+                throw new Error('Title must be less than 100 characters');
+            }
+            processed.title = updateData.title.trim();
         }
-        if (updateData.title.length > 100) {
-            throw new Error('Title must be less than 100 characters');
+
+        if (updateData.description !== undefined) {
+            if (updateData.description && updateData.description.length > 1000) {
+                throw new Error('Description must be less than 1000 characters');
+            }
+            processed.description = updateData.description?.trim() || '';
         }
-        processed.title = updateData.title.trim();
-    }
 
-    if (processFields.includes('description') && updateData.description !== undefined) {
-        if (updateData.description && updateData.description.length > 1000) {
-            throw new Error('Description must be less than 1000 characters');
+        if (updateData.template !== undefined) {
+            const validTemplates = ['wedding', 'birthday', 'concert', 'corporate', 'vacation', 'custom'];
+            if (!validTemplates.includes(updateData.template)) {
+                throw new Error('Invalid template type');
+            }
+            processed.template = updateData.template;
         }
-        processed.description = updateData.description?.trim() || '';
+
+        // Date handling
+        if (updateData.start_date !== undefined) {
+            if (updateData.start_date) {
+                const startDate = new Date(updateData.start_date);
+                if (isNaN(startDate.getTime())) {
+                    throw new Error('Invalid start date format');
+                }
+                processed.start_date = startDate;
+            }
+        }
+
+        if (updateData.end_date !== undefined) {
+            if (updateData.end_date) {
+                const endDate = new Date(updateData.end_date);
+                if (isNaN(endDate.getTime())) {
+                    throw new Error('Invalid end date format');
+                }
+                processed.end_date = endDate;
+            } else {
+                // Explicitly set to null if provided as null
+                processed.end_date = null;
+            }
+        }
+
+        // Validate date logic if both dates are being updated
+        const finalStartDate = processed.start_date || currentEvent.start_date;
+        const finalEndDate = processed.end_date !== undefined ? processed.end_date : currentEvent.end_date;
+
+        if (finalStartDate && finalEndDate && finalStartDate >= finalEndDate) {
+            throw new Error('End date must be after start date');
+        }
+
+        // Location handling
+        if (updateData.location !== undefined) {
+            processed.location = processLocationData(updateData.location);
+        }
+
+        // Cover image handling
+        if (updateData.cover_image !== undefined) {
+            processed.cover_image = processCoverImageData(updateData.cover_image);
+        }
+
+        // Visibility and permissions
+        if (updateData.visibility !== undefined) {
+            const validVisibility = ['anyone_with_link', 'invited_only', 'private'];
+            if (!validVisibility.includes(updateData.visibility)) {
+                throw new Error('Invalid visibility type');
+            }
+            processed.visibility = updateData.visibility;
+        }
+
+        if (updateData.permissions !== undefined) {
+            processed.permissions = processPermissionsData(updateData.permissions);
+        }
+
+        // Share settings
+        if (updateData.share_settings !== undefined) {
+            processed.share_settings = processShareSettingsData(updateData.share_settings);
+        }
+
+        // Share token (usually shouldn't be updated manually, but including for completeness)
+        if (updateData.share_token !== undefined && updateData.share_token !== currentEvent.share_token) {
+            // Validate share token format
+            if (updateData.share_token && !/^evt_[a-zA-Z0-9]{6}$/.test(updateData.share_token)) {
+                throw new Error('Invalid share token format');
+            }
+            processed.share_token = updateData.share_token;
+        }
+
+        // Co-host invite token handling (usually shouldn't be updated manually)
+        if (updateData.co_host_invite_token !== undefined) {
+            processed.co_host_invite_token = processCoHostInviteTokenData(updateData.co_host_invite_token);
+        }
+
+        // Always update the timestamp
+        processed.updated_at = new Date();
+
+        return processed;
+    } catch (error: any) {
+        throw new Error(`Data processing failed: ${error.message}`);
     }
-
-    if (processFields.includes('start_date') && updateData.start_date) {
-        const startDate = new Date(updateData.start_date);
-        if (isNaN(startDate.getTime())) throw new Error('Invalid start date');
-        processed.start_date = startDate;
-    }
-
-    if (processFields.includes('end_date') && updateData.end_date) {
-        const endDate = new Date(updateData.end_date);
-        if (isNaN(endDate.getTime())) throw new Error('Invalid end date');
-        processed.end_date = endDate;
-    }
-
-    // Validate date logic
-    if (processed.start_date && processed.end_date && processed.start_date >= processed.end_date) {
-        throw new Error('End date must be after start date');
-    }
-
-    if (processFields.includes('location') && updateData.location) {
-        processed.location = processLocationData(updateData.location);
-    }
-
-    if (processFields.includes('visibility') && updateData.visibility) {
-        processed.visibility = updateData.visibility;
-    }
-
-    if (processFields.includes('default_guest_permissions') && updateData.default_guest_permissions) {
-        processed.default_guest_permissions = processGuestPermissions(updateData.default_guest_permissions);
-    }
-
-    if (processFields.includes('cover_image') && updateData.cover_image?.url) {
-        processed.cover_image = {
-            url: updateData.cover_image.url.trim()
-        };
-    }
-
-
-    // Always update the updated_at timestamp
-    processed.updated_at = new Date();
-
-    return processed;
 };
 
 const processGuestPermissions = (permissions: any): any => {
@@ -1230,36 +1368,60 @@ export const updateEventService = async (
     updateData: any,
     userId: string
 ): Promise<any> => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
         const updatedEvent = await Event.findByIdAndUpdate(
             eventId,
             { $set: updateData },
             {
                 new: true,
-                runValidators: true
+                runValidators: true,
+                session
             }
         ).populate('created_by', 'name email avatar')
             .populate('co_hosts.user_id', 'name email avatar');
 
         if (!updatedEvent) {
+            await session.abortTransaction();
             return {
                 status: false,
+                code: 404,
                 message: 'Event not found',
-                data: null
+                data: null,
+                error: null,
+                other: null
             };
         }
 
+        await session.commitTransaction();
+
         return {
             status: true,
+            code: 200,
             message: 'Event updated successfully',
-            data: updatedEvent
+            data: updatedEvent,
+            error: null,
+            other: null
         };
-    } catch (error) {
+    } catch (error: any) {
+        await session.abortTransaction();
+        console.error('Error in updateEventService:', error);
+
         return {
             status: false,
+            code: 500,
             message: error.message || 'Failed to update event',
-            data: null
+            data: null,
+            error: {
+                message: error.message,
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            },
+            other: null
         };
+    } finally {
+        await session.endSession();
     }
 };
 

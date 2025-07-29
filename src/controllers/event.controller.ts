@@ -268,24 +268,6 @@ export const updateEventController = async (req: injectedRequest, res: Response,
         // Process and validate update data
         const processedUpdateData = await eventService.processEventUpdateData(updateData, fieldsToProcess);
 
-        // Handle visibility transitions if privacy is being updated
-        // let transitionResult = null;
-        // if (processedUpdateData?.visibility &&
-        //     processedUpdateData.visibility !== currentEvent.visibility) {
-
-        //     try {
-        //         transitionResult = await eventService.handleVisibilityTransition(
-        //             event_id,
-        //             currentEvent.visibility,
-        //             processedUpdateData.visibility,
-        //             userId
-        //         );
-        //     } catch (transitionError) {
-        //         console.error('Error handling visibility transition:', transitionError);
-        //         // Continue with update even if transition handling fails
-        //     }
-        // }
-
         const response = await eventService.updateEventService(event_id, processedUpdateData, userId);
 
         // Check if response has proper structure
