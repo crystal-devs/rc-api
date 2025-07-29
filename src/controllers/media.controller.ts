@@ -1,7 +1,7 @@
 // controllers/media.controller.ts
 
 import { getOrCreateDefaultAlbum } from "@services/album.service";
-import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService, deleteMediaService, uploadGuestMediaService, updateMediaStatusService, bulkUpdateMediaStatusService, getGuestMediaService } from "@services/media.service";
+import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService, deleteMediaService, updateMediaStatusService, bulkUpdateMediaStatusService, getGuestMediaService } from "@services/media.service";
 import { sendResponse } from "@utils/express.util";
 import { NextFunction, RequestHandler, Response } from "express";
 import { injectedRequest } from "types/injected-types";

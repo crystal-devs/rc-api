@@ -48,11 +48,6 @@ const userSchema = new mongoose.Schema({
         emailNotifications: {
             type: Boolean,
             default: true
-        },
-        defaultEventPrivacy: {
-            type: String,
-            enum: ["public", "private"],
-            default: "private"
         }
     },
     lastLoginAt: {

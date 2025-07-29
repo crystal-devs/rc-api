@@ -1,5 +1,4 @@
 // services/event.service.ts
-import { AccessControl } from "@models/access.model";
 import { ActivityLog } from "@models/activity-log.model";
 import { Event } from "@models/event.model";
 import { User } from "@models/user.model";
@@ -40,18 +39,6 @@ export const createEventService = async (
 
         const eventId = event[0]._id;
         const creatorId = eventData.created_by;
-
-        // Create access control for owner
-        await AccessControl.create(
-            [
-                {
-                    resource_id: eventId,
-                    resource_type: 'event',
-                    permissions: [{ user_id: creatorId, role: 'owner' }],
-                },
-            ],
-            { session }
-        );
 
         // Create activity log
         await ActivityLog.create(
@@ -374,7 +361,7 @@ export const getEventDetailService = async (
 
         // Build match condition based on identifier type
         let matchCondition: any;
-        
+
         if (mongoose.Types.ObjectId.isValid(identifier)) {
             // It's a valid ObjectId, treat as eventId
             matchCondition = { _id: new mongoose.Types.ObjectId(identifier) };
@@ -465,7 +452,7 @@ export const getEventDetailService = async (
             {
                 $lookup: {
                     from: MODEL_NAMES.USER,
-                    let: { 
+                    let: {
                         coHostUserIds: '$co_hosts.user_id',
                         isOwner: { $eq: ['$created_by', new mongoose.Types.ObjectId(userId)] }
                     },
@@ -487,7 +474,7 @@ export const getEventDetailService = async (
             {
                 $lookup: {
                     from: MODEL_NAMES.ALBUM,
-                    let: { 
+                    let: {
                         eventId: '$_id',
                         isOwnerOrCoHost: {
                             $or: [
@@ -563,11 +550,11 @@ export const getEventDetailService = async (
                                     cond: {
                                         $or: [
                                             { $eq: ['$created_by', new mongoose.Types.ObjectId(userId)] }, // Owner sees all
-                                            { 
+                                            {
                                                 $eq: [
-                                                    { $getField: { field: 'status', input: { $arrayElemAt: ['$this', 0] } } }, 
+                                                    { $getField: { field: 'status', input: { $arrayElemAt: ['$this', 0] } } },
                                                     'approved'
-                                                ] 
+                                                ]
                                             }, // Others see only approved
                                         ],
                                     },
@@ -583,7 +570,7 @@ export const getEventDetailService = async (
                         },
                     },
                     albums: '$albums_detail',
-                    
+
                     // Determine user role based on new logic
                     user_role: {
                         $cond: {
@@ -635,7 +622,7 @@ export const getEventDetailService = async (
                             },
                         },
                     },
-                    
+
                     // Set user permissions based on role and event permissions
                     user_permissions: {
                         $cond: {
@@ -716,7 +703,7 @@ export const getEventDetailService = async (
                             },
                         },
                     },
-                    
+
                     // Participant statistics
                     participants_stats: {
                         $arrayToObject: {
@@ -730,7 +717,7 @@ export const getEventDetailService = async (
                             },
                         },
                     },
-                    
+
                     // Recent joiners (only non-null entries)
                     recent_joiners: {
                         $reduce: {
@@ -784,7 +771,7 @@ export const getEventDetailService = async (
             const existingCoHost = event.co_hosts?.find(
                 (coHost: any) => coHost.user_id.toString() === userId
             );
-            
+
             if (!existingCoHost) {
                 // Add user as pending co-host
                 await Event.findByIdAndUpdate(
@@ -809,7 +796,7 @@ export const getEventDetailService = async (
                         },
                     }
                 );
-                
+
                 // Update user role to reflect pending status
                 event.user_role = 'co_host_pending';
             }
@@ -866,36 +853,10 @@ export const deleteEventService = async (
             };
         }
 
-        // Check if user is owner
-        const accessControl = await AccessControl.findOne({
-            resource_id: new mongoose.Types.ObjectId(eventId),
-            resource_type: "event",
-            "permissions.user_id": new mongoose.Types.ObjectId(userId),
-            "permissions.role": "owner"
-        }).session(session);
-
-        if (!accessControl) {
-            await session.abortTransaction();
-            return {
-                status: false,
-                code: 403,
-                message: "You don't have permission to delete this event",
-                data: null,
-                error: null,
-                other: null
-            };
-        }
-
         // Delete event and related data
         await Promise.all([
             // Delete the event
             Event.findOneAndDelete({ _id: new mongoose.Types.ObjectId(eventId) }, { session }),
-
-            // Delete access controls
-            AccessControl.deleteMany({
-                resource_id: new mongoose.Types.ObjectId(eventId),
-                resource_type: "event"
-            }, { session }),
         ]);
 
         // Log deletion activity
@@ -1048,25 +1009,30 @@ export const addCreatorAsParticipant = async (
     }
 };
 
-export const checkEventAccess = async (eventId: string, userId: string): Promise<boolean> => {
-    const access = await AccessControl.findOne({
-        resource_id: new mongoose.Types.ObjectId(eventId),
-        resource_type: "event",
-        "permissions.user_id": new mongoose.Types.ObjectId(userId)
-    });
-
-    return !!access;
-};
-
 export const checkUpdatePermission = async (eventId: string, userId: string): Promise<boolean> => {
-    const access = await AccessControl.findOne({
-        resource_id: new mongoose.Types.ObjectId(eventId),
-        resource_type: "event",
-        "permissions.user_id": new mongoose.Types.ObjectId(userId),
-        "permissions.role": { $in: ["owner", "co_host"] }
-    });
+    try {
+        const event = await Event.findById(eventId);
 
-    return !!access;
+        if (!event) {
+            return false;
+        }
+
+        // Check if user is the event owner (created_by)
+        if (event.created_by && event.created_by.toString() === userId) {
+            return true;
+        }
+
+        // Check if user is an approved co-host
+        const isCoHost = event.co_hosts.some(coHost =>
+            coHost.user_id.toString() === userId &&
+            coHost.status === 'approved'
+        );
+
+        return isCoHost;
+    } catch (error) {
+        console.error('Error checking update permission:', error);
+        return false;
+    }
 };
 
 export const processEventUpdateData = async (
@@ -1129,6 +1095,13 @@ export const processEventUpdateData = async (
     if (processFields.includes('default_guest_permissions') && updateData.default_guest_permissions) {
         processed.default_guest_permissions = processGuestPermissions(updateData.default_guest_permissions);
     }
+
+    if (processFields.includes('cover_image') && updateData.cover_image?.url) {
+        processed.cover_image = {
+            url: updateData.cover_image.url.trim()
+        };
+    }
+
 
     // Always update the updated_at timestamp
     processed.updated_at = new Date();
@@ -1291,69 +1264,40 @@ export const updateEventService = async (
 };
 
 export const getUserEventStats = async (userId: string) => {
-    const stats = await AccessControl.aggregate([
-        {
-            $match: {
-                "permissions.user_id": new mongoose.Types.ObjectId(userId),
-                resource_type: "event"
-            }
-        },
-        {
-            $lookup: {
-                from: MODEL_NAMES.EVENT,
-                localField: "resource_id",
-                foreignField: "_id",
-                as: "event"
-            }
-        },
-        { $unwind: "$event" },
-        {
-            $group: {
-                _id: null,
-                total_events: { $sum: 1 },
-                active_events: {
-                    $sum: {
-                        $cond: [{ $eq: ["$event.archived_at", null] }, 1, 0]
-                    }
-                },
-                archived_events: {
-                    $sum: {
-                        $cond: [{ $ne: ["$event.archived_at", null] }, 1, 0]
-                    }
-                },
-                owned_events: {
-                    $sum: {
-                        $cond: [
-                            {
-                                $in: ["owner", "$permissions.role"]
-                            },
-                            1,
-                            0
-                        ]
-                    }
-                },
-                co_hosted_events: {
-                    $sum: {
-                        $cond: [
-                            {
-                                $in: ["co_host", "$permissions.role"]
-                            },
-                            1,
-                            0
-                        ]
-                    }
-                }
-            }
-        }
-    ]);
+    try {
+        const userObjectId = new mongoose.Types.ObjectId(userId);
 
-    return stats[0] || {
-        total_events: 0,
-        active_events: 0,
-        archived_events: 0,
-        owned_events: 0,
-        co_hosted_events: 0
-    };
+        // Get owned events
+        const ownedEvents = await Event.find({ created_by: userObjectId });
+
+        // Get co-hosted events (approved only)
+        const coHostedEvents = await Event.find({
+            created_by: { $ne: userObjectId },
+            "co_hosts.user_id": userObjectId,
+            "co_hosts.status": "approved"
+        });
+
+        const allUserEvents = [...ownedEvents, ...coHostedEvents];
+
+        const stats = {
+            total_events: allUserEvents.length,
+            active_events: allUserEvents.filter(event => !event.archived_at).length,
+            archived_events: allUserEvents.filter(event => event.archived_at).length,
+            owned_events: ownedEvents.length,
+            co_hosted_events: coHostedEvents.length
+        };
+
+        return stats;
+    } catch (error) {
+        console.error('Error getting user event stats:', error);
+        return {
+            total_events: 0,
+            active_events: 0,
+            archived_events: 0,
+            owned_events: 0,
+            co_hosted_events: 0
+        };
+    }
 };
 
 export const recordEventActivity = async (eventId: string, userId: string, action: string, additionalDetails: any = {}) => {

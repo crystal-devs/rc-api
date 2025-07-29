@@ -8,7 +8,6 @@ const albumSchema = new mongoose.Schema({
     cover_image: { type: String, default: "" },
     created_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: true },
     created_at: { type: Date, default: Date.now },
-    is_private: { type: Boolean, default: false },
     is_default: { type: Boolean, default: false },
 });
 
