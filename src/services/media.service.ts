@@ -443,29 +443,255 @@ export const getMediaByEventService = async (
  * Get all media for a specific album
  */
 export const getMediaByAlbumService = async (
-    album_id: string
+    albumId: string,
+    options: {
+        includeProcessing?: boolean;
+        includePending?: boolean;
+        page?: number;
+        limit?: number;
+        quality?: 'thumbnail' | 'display' | 'full';
+        since?: string;
+        // New options for status filtering and infinite scroll
+        status?: 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved';
+        cursor?: string; // For infinite scroll
+        scrollType?: 'pagination' | 'infinite'; // Toggle between pagination and infinite scroll
+    } = {},
 ): Promise<ServiceResponse<any[]>> => {
     try {
-        const media = await Media.find({ album_id: new mongoose.Types.ObjectId(album_id) })
-            .sort({ created_at: -1 });
+        // Validate album_id
+        if (!mongoose.Types.ObjectId.isValid(albumId)) {
+            return {
+                status: false,
+                code: 400,
+                message: 'Invalid album ID',
+                data: null,
+                error: { message: 'Invalid ObjectId format' },
+                other: null,
+            };
+        }
 
-        return {
-            status: true,
-            code: 200,
-            message: "Media retrieved successfully",
-            data: media,
-            error: null,
-            other: null,
+        // Build base query
+        const query: any = {
+            album_id: new mongoose.Types.ObjectId(albumId)
         };
+
+        // Handle status-based filtering (new approach)
+        if (options.status) {
+            switch (options.status) {
+                case 'approved':
+                    query['approval.status'] = { $in: ['approved', 'auto_approved'] };
+                    break;
+                case 'pending':
+                    query['approval.status'] = 'pending';
+                    break;
+                case 'rejected':
+                    query['approval.status'] = 'rejected';
+                    break;
+                case 'hidden':
+                    query['approval.status'] = 'hidden';
+                    break;
+                case 'auto_approved':
+                    query['approval.status'] = 'auto_approved';
+                    break;
+            }
+        } else {
+            // Legacy behavior - maintain backward compatibility
+            if (options.includePending === false) {
+                query['approval.status'] = { $in: ['approved', 'auto_approved'] };
+            }
+        }
+
+        if (options.includeProcessing === false) {
+            query['processing.status'] = 'completed';
+        }
+
+        // Handle cursor-based pagination for infinite scroll
+        if (options.scrollType === 'infinite' && options.cursor) {
+            try {
+                const cursorDate = new Date(options.cursor);
+                if (!isNaN(cursorDate.getTime())) {
+                    query.created_at = { $lt: cursorDate };
+                }
+            } catch (cursorError) {
+                console.warn('Invalid cursor provided:', options.cursor);
+            }
+        }
+
+        if (options.since) {
+            try {
+                const sinceDate = new Date(options.since);
+                if (isNaN(sinceDate.getTime())) {
+                    throw new Error('Invalid date format');
+                }
+                // Merge with existing created_at filter if cursor exists
+                if (query.created_at) {
+                    query.created_at = { ...query.created_at, $gt: sinceDate };
+                } else {
+                    query.created_at = { $gt: sinceDate };
+                }
+            } catch (dateError) {
+                console.warn('Invalid since date provided:', options.since);
+            }
+        }
+
+        // Debug: Check total count without filters first
+        const totalCount = await Media.countDocuments({
+            album_id: new mongoose.Types.ObjectId(albumId)
+        });
+
+        // Check count with filters
+        const filteredCount = await Media.countDocuments(query);
+
+        if (filteredCount === 0) {
+            return {
+                status: true,
+                code: 200,
+                message: 'No media found for this album with the given filters',
+                data: [],
+                error: null,
+                other: {
+                    totalCount,
+                    filteredCount: 0,
+                    appliedFilters: {
+                        includePending: options.includePending,
+                        includeProcessing: options.includeProcessing,
+                        since: options.since,
+                        status: options.status,
+                        scrollType: options.scrollType
+                    }
+                },
+            };
+        }
+
+        // Handle pagination vs infinite scroll
+        const limit = Math.max(1, Math.min(100, options.limit || 20));
+        let mediaQuery = Media.find(query).sort({ created_at: -1 });
+
+        if (options.scrollType === 'infinite') {
+            // For infinite scroll, fetch one extra item to check if there's more
+            mediaQuery = mediaQuery.limit(limit + 1);
+        } else {
+            // Traditional pagination
+            const page = Math.max(1, options.page || 1);
+            const skip = (page - 1) * limit;
+            mediaQuery = mediaQuery.skip(skip).limit(limit);
+        }
+
+        let media = await mediaQuery.lean().exec();
+
+        // Handle infinite scroll response
+        let hasMore = false;
+        let nextCursor = null;
+
+        if (options.scrollType === 'infinite') {
+            hasMore = media.length > limit;
+            if (hasMore) {
+                media = media.slice(0, -1); // Remove the extra item
+            }
+            if (media.length > 0) {
+                nextCursor = media[media.length - 1].created_at;
+            }
+        }
+
+        // Post-process for quality requirements
+        if (options.quality && options.quality !== 'full' && media.length > 0) {
+            media = media.map(item => {
+                const processedItem = { ...item };
+
+                if (options.quality === 'thumbnail') {
+                    const thumbnail = item.processing?.compressed_versions?.find(
+                        (v: any) => v.quality === 'low'
+                    );
+                    if (thumbnail?.url) {
+                        processedItem.url = thumbnail.url;
+                    }
+                } else if (options.quality === 'display') {
+                    const display = item.processing?.compressed_versions?.find(
+                        (v: any) => v.quality === 'medium'
+                    );
+                    if (display?.url) {
+                        processedItem.url = display.url;
+                    }
+                }
+
+                return processedItem;
+            });
+        }
+
+        // Prepare response based on scroll type
+        if (options.scrollType === 'infinite') {
+            return {
+                status: true,
+                code: 200,
+                message: 'Media retrieved successfully',
+                data: media,
+                error: null,
+                other: {
+                    infinite: {
+                        hasMore,
+                        nextCursor,
+                        count: media.length
+                    },
+                    appliedFilters: {
+                        includePending: options.includePending,
+                        includeProcessing: options.includeProcessing,
+                        quality: options.quality,
+                        since: options.since,
+                        status: options.status,
+                        scrollType: options.scrollType
+                    }
+                },
+            };
+        } else {
+            // Traditional pagination response
+            const page = Math.max(1, options.page || 1);
+            const totalPages = Math.ceil(filteredCount / limit);
+            const hasNext = page < totalPages;
+            const hasPrev = page > 1;
+
+            return {
+                status: true,
+                code: 200,
+                message: 'Media retrieved successfully',
+                data: media,
+                error: null,
+                other: {
+                    pagination: {
+                        page,
+                        limit,
+                        totalCount: filteredCount,
+                        totalPages,
+                        hasNext,
+                        hasPrev
+                    },
+                    appliedFilters: {
+                        includePending: options.includePending,
+                        includeProcessing: options.includeProcessing,
+                        quality: options.quality,
+                        since: options.since,
+                        status: options.status,
+                        scrollType: options.scrollType
+                    }
+                },
+            };
+        }
+
     } catch (err: any) {
+        console.error(`[getMediaByAlbumService] Error:`, {
+            message: err.message,
+            stack: err.stack,
+            albumId,
+            options
+        });
+
         return {
             status: false,
             code: 500,
-            message: "Failed to retrieve media",
+            message: 'Failed to retrieve media',
             data: null,
             error: {
                 message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+                stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
             },
             other: null,
         };

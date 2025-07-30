@@ -313,26 +313,211 @@ export const getMediaByEventController: RequestHandler = async (
 /**
  * Get all media for a specific album
  */
-export const getMediaByAlbumController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+export const getMediaByAlbumController: RequestHandler = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
     try {
         const { album_id } = req.params;
 
-        // Validate album_id
+        // Validate album_id first
         if (!album_id || !mongoose.Types.ObjectId.isValid(album_id)) {
             res.status(400).json({
                 status: false,
-                message: "Invalid album ID",
-                error: { message: "A valid album ID is required" },
+                code: 400,
+                message: 'Invalid or missing album ID',
+                data: null,
+                error: { message: 'A valid album ID is required' },
+                other: null
             });
             return;
         }
 
-        // Fetch media for the album
-        const response = await getMediaByAlbumService(album_id);
-        sendResponse(res, response);
-    } catch (_err) {
-        console.error('Error in getMediaByAlbumController:', _err);
-        next(_err);
+        // Extract and validate query parameters (same as event controller)
+        const {
+            include_processing,
+            include_pending,
+            page,
+            limit,
+            quality,
+            since,
+            // New parameters
+            status,
+            cursor,
+            scroll_type
+        } = req.query;
+
+        // Parse and validate query parameters with proper defaults
+        const options: {
+            includeProcessing?: boolean;
+            includePending?: boolean;
+            page?: number;
+            limit?: number;
+            quality?: 'thumbnail' | 'display' | 'full';
+            since?: string;
+            status?: 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved';
+            cursor?: string;
+            scrollType?: 'pagination' | 'infinite';
+        } = {};
+
+        // Handle boolean parameters - only set if explicitly provided
+        if (include_processing !== undefined) {
+            options.includeProcessing = include_processing === 'true';
+        }
+
+        if (include_pending !== undefined) {
+            options.includePending = include_pending === 'true';
+        }
+
+        // Handle scroll type parameter
+        if (scroll_type) {
+            const validScrollTypes = ['pagination', 'infinite'];
+            if (!validScrollTypes.includes(scroll_type as string)) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid scroll_type parameter',
+                    data: null,
+                    error: { message: 'scroll_type must be one of: pagination, infinite' },
+                    other: null
+                });
+                return;
+            }
+            options.scrollType = scroll_type as 'pagination' | 'infinite';
+        } else {
+            // Default to pagination for backward compatibility
+            options.scrollType = 'pagination';
+        }
+
+        // Handle status parameter for filtering
+        if (status) {
+            const validStatuses = ['approved', 'pending', 'rejected', 'hidden', 'auto_approved'];
+            if (!validStatuses.includes(status as string)) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid status parameter',
+                    data: null,
+                    error: {
+                        message: 'Status must be one of: approved, pending, rejected, hidden, auto_approved'
+                    },
+                    other: null
+                });
+                return;
+            }
+            options.status = status as 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved';
+        }
+
+        // Handle cursor parameter for infinite scroll
+        if (cursor) {
+            const cursorDate = new Date(cursor as string);
+            if (isNaN(cursorDate.getTime())) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid cursor format',
+                    data: null,
+                    error: { message: 'Cursor must be a valid ISO date string' },
+                    other: null
+                });
+                return;
+            }
+            options.cursor = cursor as string;
+        }
+
+        // Handle numeric parameters with validation
+        if (page && options.scrollType === 'pagination') {
+            const pageNum = parseInt(page as string, 10);
+            if (isNaN(pageNum) || pageNum < 1) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid page number',
+                    data: null,
+                    error: { message: 'Page must be a positive integer' },
+                    other: null
+                });
+                return;
+            }
+            options.page = pageNum;
+        }
+
+        if (limit) {
+            const limitNum = parseInt(limit as string, 10);
+            if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid limit',
+                    data: null,
+                    error: { message: 'Limit must be between 1 and 100' },
+                    other: null
+                });
+                return;
+            }
+            options.limit = limitNum;
+        }
+
+        // Handle quality parameter
+        if (quality) {
+            const validQualities = ['thumbnail', 'display', 'full'];
+            if (!validQualities.includes(quality as string)) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid quality parameter',
+                    data: null,
+                    error: { message: 'Quality must be one of: thumbnail, display, full' },
+                    other: null
+                });
+                return;
+            }
+            options.quality = quality as 'thumbnail' | 'display' | 'full';
+        }
+
+        // Handle since parameter
+        if (since) {
+            const sinceDate = new Date(since as string);
+            if (isNaN(sinceDate.getTime())) {
+                res.status(400).json({
+                    status: false,
+                    code: 400,
+                    message: 'Invalid date format for since parameter',
+                    data: null,
+                    error: { message: 'Since parameter must be a valid ISO date string' },
+                    other: null
+                });
+                return;
+            }
+            options.since = since as string;
+        }
+
+        // Call service
+        const response = await getMediaByAlbumService(album_id, options);
+
+        // Send response
+        res.status(response.code).json(response);
+
+    } catch (err: any) {
+        console.error('Error in getMediaByAlbumController:', {
+            message: err.message,
+            stack: err.stack,
+            params: req.params,
+            query: req.query
+        });
+
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Internal server error',
+            data: null,
+            error: {
+                message: 'An unexpected error occurred',
+                details: process.env.NODE_ENV === 'development' ? err.message : undefined
+            },
+            other: null
+        });
     }
 };
 

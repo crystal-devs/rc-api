@@ -63,7 +63,6 @@ mediaRouter.post(
 // Cover upload (always requires auth)
 mediaRouter.post("/upload-cover", authMiddleware, upload.single('image'), uploadCoverImageController);
 
-// Get media routes (conditional auth)
 mediaRouter.get("/event/:event_id", authMiddleware, getMediaByEventController);
 mediaRouter.get("/album/:album_id", authMiddleware, getMediaByAlbumController);
 
