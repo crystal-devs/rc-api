@@ -1,6 +1,5 @@
 // services/album.service.ts (updated with default album functionality)
 
-import { AccessControl } from "@models/access.model";
 import { ActivityLog } from "@models/activity-log.model";
 import { Album, AlbumCreationType, AlbumType } from "@models/album.model";
 import { MODEL_NAMES } from "@models/names";
@@ -18,24 +17,14 @@ export const createAlbumService = async (albumData: AlbumCreationType): Promise<
     session.startTransaction();
     try {
         console.log(albumData, 'album being created');
-        
+
         // Create the album
         const album = await Album.create([albumData], { session });
         console.log(album, 'album created');
-        
+
         if (!album[0]?._id || !albumData?.created_by) {
             throw new Error("Invalid album or creator ID");
         }
-
-        // Create access control record for the album
-        await AccessControl.create([{
-            resource_id: new mongoose.Types.ObjectId(album[0]._id),
-            resource_type: "album",
-            permissions: [{
-                user_id: new mongoose.Types.ObjectId(albumData.created_by),
-                role: "owner",
-            }],
-        }], { session });
 
         // Create activity log entry
         await ActivityLog.create([{
@@ -110,7 +99,6 @@ export const createDefaultAlbumForEvent = async (
             event_id: new mongoose.Types.ObjectId(event_id),
             created_by: new mongoose.Types.ObjectId(user_id),
             created_at: new Date(),
-            is_private: false,
             is_default: true,
             cover_image: ""
         };
@@ -118,7 +106,7 @@ export const createDefaultAlbumForEvent = async (
         return await createAlbumService(defaultAlbumData);
     } catch (err) {
         logger.error(`[createDefaultAlbumForEvent] Error creating default album: ${err.message}`);
-        
+
         return {
             status: false,
             code: 500,
@@ -165,7 +153,7 @@ export const getOrCreateDefaultAlbum = async (
         return await createDefaultAlbumForEvent(event_id, user_id);
     } catch (err) {
         logger.error(`[getOrCreateDefaultAlbum] Error getting or creating default album: ${err.message}`);
-        
+
         return {
             status: false,
             code: 500,
@@ -185,52 +173,60 @@ export const getOrCreateDefaultAlbum = async (
  * @param params Parameters to filter albums
  * @returns Service response with albums or error
  */
-export const getAlbumsByParams = async ({ 
-    album_id, 
-    event_id, 
-    user_id 
-}: { 
-    album_id?: string, 
-    event_id?: string, 
-    user_id?: string 
+export const getAlbumsByParams = async ({
+    album_id,
+    event_id,
+    user_id
+}: {
+    album_id?: string,
+    event_id?: string,
+    user_id?: string
 }): Promise<ServiceResponse<AlbumType[]>> => {
     try {
         let albums: AlbumType[] = [];
 
-        // Fetch albums by user ID through access control
+        // Fetch albums by user ID using aggregation
         if (user_id) {
-            albums = await AccessControl.aggregate([
-                {
-                    $match: {
-                        "permissions.user_id": new mongoose.Types.ObjectId(user_id),
-                        resource_type: "album"
-                    }
-                },
+            const userObjectId = new mongoose.Types.ObjectId(user_id);
+
+            albums = await Album.aggregate([
                 {
                     $lookup: {
-                        from: MODEL_NAMES.ALBUM,
-                        localField: "resource_id",
+                        from: MODEL_NAMES.EVENT,
+                        localField: "event_id",
                         foreignField: "_id",
-                        as: "albumData"
+                        as: "event"
                     }
                 },
-                { $unwind: "$albumData" },
-                { $replaceRoot: { newRoot: "$albumData" } },
+                { $unwind: "$event" },
+                {
+                    $match: {
+                        $or: [
+                            { "event.created_by": userObjectId },
+                            {
+                                "event.co_hosts.user_id": userObjectId,
+                                "event.co_hosts.status": "approved"
+                            }
+                        ]
+                    }
+                },
+                {
+                    $project: {
+                        event: 0 // Remove the event data, keep only album fields
+                    }
+                }
             ]);
         }
 
         // Fetch albums by event ID
         if (event_id) {
-            const eventAlbums = await Album.find({ 
-                event_id: new mongoose.Types.ObjectId(event_id) 
+            const eventAlbums = await Album.find({
+                event_id: new mongoose.Types.ObjectId(event_id)
             }).lean();
-            
+
             if (eventAlbums.length > 0) {
-                // If we already have albums from user_id, merge them rather than replace
                 if (albums.length > 0) {
-                    // Get IDs of existing albums to avoid duplicates
                     const existingIds = new Set(albums.map(a => a._id.toString()));
-                    // Add only new albums (no duplicates)
                     eventAlbums.forEach(album => {
                         if (!existingIds.has(album._id.toString())) {
                             albums.push(album);
@@ -246,7 +242,6 @@ export const getAlbumsByParams = async ({
         if (album_id) {
             const album = await Album.findById(album_id).lean();
             if (album) {
-                // If we already have this album from previous queries, don't add duplicate
                 const exists = albums.some(a => a._id.toString() === album._id.toString());
                 if (!exists) {
                     albums.push(album);
@@ -316,7 +311,7 @@ export const getDefaultAlbum = async (
         };
     } catch (err) {
         logger.error(`[getDefaultAlbum] Error getting default album: ${err.message}`);
-        
+
         return {
             status: false,
             code: 500,
@@ -344,35 +339,12 @@ export const updateAlbumService = async (
 ): Promise<ServiceResponse<AlbumType>> => {
     const session = await mongoose.startSession();
     session.startTransaction();
-    
+
     try {
         const objectId = new mongoose.Types.ObjectId(album_id);
 
-        // First verify user has permission to update this album
-        const accessControl = await AccessControl.findOne({
-            resource_id: objectId,
-            resource_type: "album",
-            "permissions.user_id": new mongoose.Types.ObjectId(user_id),
-            "permissions.role": "owner"
-        });
-
-        if (!accessControl) {
-            return {
-                status: false,
-                code: 403,
-                message: "You don't have permission to update this album",
-                data: null,
-                error: null,
-                other: null
-            };
-        }
-
-        // Update the album
-        const album = await Album.findOneAndUpdate(
-            { _id: objectId },
-            { $set: dataToUpdate },
-            { new: true, session }
-        );
+        // Get the album and populate the event to check permissions
+        const album = await Album.findById(objectId).populate('event_id').session(session);
 
         if (!album) {
             await session.abortTransaction();
@@ -386,14 +358,57 @@ export const updateAlbumService = async (
             };
         }
 
-        // Log the update activity
-        await ActivityLog.create([{
-            user_id: new mongoose.Types.ObjectId(user_id),
-            resource_id: objectId,
-            resource_type: "album",
-            action: "edited",
-            details: { updated_fields: Object.keys(dataToUpdate) }
-        }], { session });
+        const event = album.event_id as any; // TypeScript casting needed due to populate
+
+        if (!event) {
+            await session.abortTransaction();
+            return {
+                status: false,
+                code: 404,
+                message: "Associated event not found",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Check if user has permission to update this album
+        // User can update if they are event owner or approved co-host
+        const isEventOwner = event.created_by && event.created_by.toString() === user_id;
+        const isApprovedCoHost = event.co_hosts.some((coHost: any) => 
+            coHost.user_id.toString() === user_id && 
+            coHost.status === 'approved'
+        );
+
+        if (!isEventOwner && !isApprovedCoHost) {
+            await session.abortTransaction();
+            return {
+                status: false,
+                code: 403,
+                message: "You don't have permission to update this album",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Update the album
+        const updatedAlbum = await Album.findOneAndUpdate(
+            { _id: objectId },
+            { $set: dataToUpdate },
+            { new: true, session }
+        );
+
+        // Log the update activity (if you still have ActivityLog)
+        if (typeof ActivityLog !== 'undefined') {
+            await ActivityLog.create([{
+                user_id: new mongoose.Types.ObjectId(user_id),
+                resource_id: objectId,
+                resource_type: "album",
+                action: "edited",
+                details: { updated_fields: Object.keys(dataToUpdate) }
+            }], { session });
+        }
 
         await session.commitTransaction();
 
@@ -401,14 +416,14 @@ export const updateAlbumService = async (
             status: true,
             code: 200,
             message: "Album updated successfully",
-            data: album,
+            data: updatedAlbum!,
             error: null,
             other: null
         };
-    } catch (err) {
+    } catch (err: any) {
         logger.error(`[updateAlbumService] Error updating album: ${err.message}`);
         await session.abortTransaction();
-        
+
         return {
             status: false,
             code: 500,
@@ -437,32 +452,15 @@ export const deleteAlbumService = async (
 ): Promise<ServiceResponse<null>> => {
     const session = await mongoose.startSession();
     session.startTransaction();
-    
+
     try {
         const objectId = new mongoose.Types.ObjectId(album_id);
 
-        // First verify user has permission to delete this album
-        const accessControl = await AccessControl.findOne({
-            resource_id: objectId,
-            resource_type: "album",
-            "permissions.user_id": new mongoose.Types.ObjectId(user_id),
-            "permissions.role": "owner"
-        });
+        // Get the album and populate the event to check permissions
+        const album = await Album.findById(objectId).populate('event_id').session(session);
 
-        if (!accessControl) {
-            return {
-                status: false,
-                code: 403,
-                message: "You don't have permission to delete this album",
-                data: null,
-                error: null,
-                other: null
-            };
-        }
-
-        // Get album details before deletion (for event_id)
-        const album = await Album.findById(objectId);
         if (!album) {
+            await session.abortTransaction();
             return {
                 status: false,
                 code: 404,
@@ -475,6 +473,7 @@ export const deleteAlbumService = async (
 
         // Check if this is a default album - don't allow deleting default albums
         if (album.is_default) {
+            await session.abortTransaction();
             return {
                 status: false,
                 code: 400,
@@ -485,23 +484,54 @@ export const deleteAlbumService = async (
             };
         }
 
+        const event = album.event_id as any; // TypeScript casting needed due to populate
+
+        if (!event) {
+            await session.abortTransaction();
+            return {
+                status: false,
+                code: 404,
+                message: "Associated event not found",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Check if user has permission to delete this album
+        // User can delete if they are event owner or approved co-host with manage_content permission
+        const isEventOwner = event.created_by && event.created_by.toString() === user_id;
+        const approvedCoHost = event.co_hosts.find((coHost: any) => 
+            coHost.user_id.toString() === user_id && 
+            coHost.status === 'approved'
+        );
+        const canManageContent = approvedCoHost && approvedCoHost.permissions.manage_content;
+
+        if (!isEventOwner && !canManageContent) {
+            await session.abortTransaction();
+            return {
+                status: false,
+                code: 403,
+                message: "You don't have permission to delete this album",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
         // Delete the album
         await Album.deleteOne({ _id: objectId }, { session });
 
-        // Delete related access controls
-        await AccessControl.deleteMany({ 
-            resource_id: objectId,
-            resource_type: "album"
-        }, { session });
-
-        // Log the deletion activity
-        await ActivityLog.create([{
-            user_id: new mongoose.Types.ObjectId(user_id),
-            resource_id: objectId,
-            resource_type: "album",
-            action: "deleted",
-            details: { event_id: album.event_id }
-        }], { session });
+        // Log the deletion activity (if you still have ActivityLog)
+        if (typeof ActivityLog !== 'undefined') {
+            await ActivityLog.create([{
+                user_id: new mongoose.Types.ObjectId(user_id),
+                resource_id: objectId,
+                resource_type: "album",
+                action: "deleted",
+                details: { event_id: album.event_id }
+            }], { session });
+        }
 
         await session.commitTransaction();
 
@@ -513,10 +543,10 @@ export const deleteAlbumService = async (
             error: null,
             other: null
         };
-    } catch (err) {
+    } catch (err: any) {
         logger.error(`[deleteAlbumService] Error deleting album: ${err.message}`);
         await session.abortTransaction();
-        
+
         return {
             status: false,
             code: 500,
