@@ -1,18 +1,21 @@
-// routes/media.routes.ts - Updated for guest uploads
+// routes/media.routes.ts - Updated and cleaned up
 
 import express, { RequestHandler } from "express";
 import multer from "multer";
 import {
-    uploadMediaController,
-    guestUploadMediaController, // New controller for guest uploads
+    guestUploadMediaController,
     uploadCoverImageController,
     getMediaByEventController,
     getMediaByAlbumController,
     deleteMediaController,
     updateMediaStatusController,
     bulkUpdateMediaStatusController,
-    getGuestMediaController
+    getGuestMediaController,
+    getMediaByIdController,
+    getMediaVariantsController,
+    getBatchOptimizedUrlsController
 } from "@controllers/media.controller";
+import { uploadMediaController } from "@controllers/upload.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import {
     checkStorageLimitMiddleware,
@@ -24,15 +27,24 @@ import { optionalAuthMiddleware } from "@middlewares/conditional-auth.middleware
 
 const mediaRouter = express.Router();
 
-// Configure multer for file uploads
+// Configure multer for file uploads with better error handling
 const upload = multer({
     dest: 'uploads/',
     limits: {
-        fileSize: 10 * 1024 * 1024 // 10MB limit
+        fileSize: 10 * 1024 * 1024, // 10MB limit
+        files: 10 // Maximum 10 files
+    },
+    fileFilter: (req, file, cb) => {
+        // Accept images and videos
+        if (file.mimetype.match(/^(image|video)\//)) {
+            cb(null, true);
+        } else {
+            cb(new Error('Only image and video files are allowed'));
+        }
     }
 });
 
-// Authenticated upload (existing functionality)
+// === AUTHENTICATED UPLOADS ===
 mediaRouter.post(
     "/upload",
     authMiddleware,
@@ -43,42 +55,86 @@ mediaRouter.post(
     uploadMediaController
 );
 
-// Guest upload - no auth required but event must allow it
-// mediaRouter.post(
-//     "/guest-upload",
-//     upload.single('image'),
-//     checkFileSizeLimitMiddleware as RequestHandler,
-//     guestUploadMediaController
-// );
-
+// Cover image upload (always requires auth)
 mediaRouter.post(
-    "/guest/:share_token/upload",  // Updated to use share_token
+    "/upload-cover",
+    authMiddleware,
+    upload.single('image'),
+    uploadCoverImageController
+);
+
+// === GUEST UPLOADS ===
+mediaRouter.post(
+    "/guest/:share_token/upload",
     optionalAuthMiddleware,        // Allow both auth and non-auth users
     upload.array('files', 10),    // Support multiple files
-    // checkFileSizeLimitMiddleware as RequestHandler,
     guestUploadMediaController
 );
 
+// === MEDIA RETRIEVAL ===
+// Get media by event (authenticated)
+mediaRouter.get(
+    "/event/:eventId",
+    authMiddleware,
+    getMediaByEventController
+);
 
-// Cover upload (always requires auth)
-mediaRouter.post("/upload-cover", authMiddleware, upload.single('image'), uploadCoverImageController);
+// Get media by album (authenticated)
+mediaRouter.get(
+    "/album/:albumId",
+    authMiddleware,
+    getMediaByAlbumController
+);
 
-mediaRouter.get("/event/:event_id", authMiddleware, getMediaByEventController);
-mediaRouter.get("/album/:album_id", authMiddleware, getMediaByAlbumController);
-
-mediaRouter.get("/guest/:share_token",
+// Get guest media (public access with token)
+mediaRouter.get(
+    "/guest/:shareToken",
     optionalAuthMiddleware,
     getGuestMediaController
 );
 
+// Get specific media by ID
+mediaRouter.get(
+    "/:media_id",
+    authMiddleware,
+    getMediaByIdController
+);
+
+// === MEDIA MANAGEMENT ===
 // Single media status update
-mediaRouter.patch("/:media_id/status", authMiddleware, updateMediaStatusController);
+mediaRouter.patch(
+    "/:media_id/status",
+    authMiddleware,
+    updateMediaStatusController
+);
 
 // Bulk media status update
-mediaRouter.patch("/event/:event_id/bulk-status", authMiddleware, bulkUpdateMediaStatusController);
-
+mediaRouter.patch(
+    "/event/:event_id/bulk-status",
+    authMiddleware,
+    bulkUpdateMediaStatusController
+);
 
 // Delete media (always requires auth)
-mediaRouter.delete("/:media_id", authMiddleware, deleteMediaController);
+mediaRouter.delete(
+    "/:media_id",
+    authMiddleware,
+    deleteMediaController
+);
+
+// === OPTIMIZATION ENDPOINTS ===
+// Get media variants information
+mediaRouter.get(
+    "/:mediaId/variants",
+    authMiddleware,
+    getMediaVariantsController
+);
+
+// Batch get optimized URLs
+mediaRouter.post(
+    "/batch/optimized-urls",
+    authMiddleware,
+    getBatchOptimizedUrlsController
+);
 
 export default mediaRouter;

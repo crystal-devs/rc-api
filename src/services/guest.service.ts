@@ -1,503 +1,560 @@
-// services/guest-upload.service.ts - FIXED VERSION
+// services/guest.service.ts - Guest media upload service matching your model
 
-import { Event } from '@models/event.model';
-import { createGuestUploaderInfo, Media } from '@models/media.model';
-import ImageKit from 'imagekit';
+import fs from 'fs/promises';
 import mongoose from 'mongoose';
+import ImageKit from 'imagekit';
+import { logger } from '@utils/logger';
+import { Media, createGuestUploaderInfo, generateGuestId } from '@models/media.model';
+import { Event } from '@models/event.model';
+import { getOrCreateDefaultAlbum } from '@services/album.service';
+import { imageProcessingService } from '@services/imageProcessing.service';
+import { determineApprovalStatus } from '@utils/user.utils';
+import { getFileType, isValidImageFormat, cleanupFile, bytesToMB } from '@utils/file.util';
 
-export const guestMediaUploadService = {
+// ImageKit configuration
+const imagekit = new ImageKit({
+    publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
+    privateKey: process.env.IMAGE_KIT_PRIVATE_KEY!,
+    urlEndpoint: "https://ik.imagekit.io/roseclick",
+});
+interface GuestUploadResult {
+    success: boolean;
+    media_id?: string;
+    url?: string;
+    approval_status?: string;
+    message?: string;
+    error?: string;
+}
+
+interface GuestUploadInfo {
+    name?: string;
+    email?: string;
+    phone?: string;
+    sessionId?: string;
+    deviceFingerprint?: string;
+    uploadMethod?: string;
+    platformInfo?: any;
+}
+
+class GuestMediaUploadService {
+    /**
+     * Upload media as a guest user
+     */
     async uploadGuestMedia(
         shareToken: string,
-        fileData: any,
-        guestInfo: {
-            name?: string;
-            email?: string;
-            phone?: string;
-            sessionId?: string;
-            deviceInfo?: any;
-            ipAddress?: string;
-            userAgent?: string;
-            uploadMethod?: string;
-        },
+        file: Express.Multer.File,
+        guestInfo: GuestUploadInfo,
         authenticatedUserId?: string
-    ) {
+    ): Promise<GuestUploadResult> {
         try {
-            // 1. Find and validate event
+            logger.info(`🔗 Guest upload started`, {
+                shareToken: shareToken.substring(0, 8) + '...',
+                fileName: file.originalname,
+                fileSize: bytesToMB(file.size) + 'MB',
+                guestInfo: {
+                    name: guestInfo.name || 'Anonymous',
+                    email: guestInfo.email ? 'provided' : 'not provided',
+                    authenticated: !!authenticatedUserId
+                }
+            });
+
+            // Find event by share token
             const event = await Event.findOne({ share_token: shareToken });
             if (!event) {
-                return { success: false, message: 'Event not found' };
+                await cleanupFile(file);
+                return {
+                    success: false,
+                    error: 'Invalid share token or event not found'
+                };
             }
 
-            console.log('✅ Event found for guest upload:', {
-                eventId: event._id.toString(),
-                title: event.title,
-                canUpload: event.permissions.can_upload,
-                requireApproval: event.permissions.require_approval
-            });
-
-            // 2. Check if uploads are enabled
-            if (!event.permissions.can_upload) {
-                return { success: false, message: 'Uploads are not enabled for this event' };
+            // Check if uploads are allowed
+            if (!event.permissions?.can_upload) {
+                await cleanupFile(file);
+                return {
+                    success: false,
+                    error: 'Uploads are not allowed for this event'
+                };
             }
 
-            // 3. Validate file type
-            const fileType = (() => {
-                if (fileData.mimetype.startsWith("image/")) return "image";
-                if (fileData.mimetype.startsWith("video/")) return "video";
-                return null;
-            })();
-
+            // Validate file type
+            const fileType = getFileType(file);
             if (!fileType) {
+                await cleanupFile(file);
                 return {
                     success: false,
-                    message: "Unsupported file type. Only image and video files are supported"
+                    error: 'Unsupported file type. Only images and videos are allowed.'
                 };
             }
 
-            // 4. Calculate file size in MB
-            const fileSizeInMB = fileData.size / (1024 * 1024);
-
-            // 5. Check event owner's storage limits
-            const eventOwnerId = event.created_by.toString();
-            const canUpload = await this.checkUserStorageLimits(eventOwnerId, fileSizeInMB);
-            if (!canUpload) {
+            // For images, validate format
+            if (fileType === 'image' && !isValidImageFormat(file)) {
+                await cleanupFile(file);
                 return {
                     success: false,
-                    message: "Event storage limit exceeded. Please contact the event organizer."
+                    error: 'Unsupported image format. Supported formats: JPEG, PNG, WebP, HEIC'
                 };
             }
 
-            // 6. Determine if this is a registered user or guest
-            const isRegisteredUser = !!authenticatedUserId;
+            // Check file size limits (you can adjust these based on your event settings)
+            const maxSizeMB = 10;
+            const fileSizeMB = bytesToMB(file.size);
+            if (fileSizeMB > maxSizeMB) {
+                await cleanupFile(file);
+                return {
+                    success: false,
+                    error: `File size exceeds limit of ${maxSizeMB}MB`
+                };
+            }
 
-            // 7. For guests, check upload limits
-            if (!isRegisteredUser) {
-                const limitCheck = await this.checkGuestUploadLimits(
+            // Get or create default album
+            const defaultAlbumResponse = await getOrCreateDefaultAlbum(
+                event._id.toString(),
+                authenticatedUserId || 'guest'
+            );
+
+            if (!defaultAlbumResponse.status) {
+                await cleanupFile(file);
+                return {
+                    success: false,
+                    error: 'Failed to get or create album for upload'
+                };
+            }
+
+            // Determine approval status
+            const approvalConfig = await determineApprovalStatus(
+                event._id.toString(),
+                authenticatedUserId || null
+            );
+
+            // Create guest uploader info matching your model structure
+            const guestUploaderInfo = createGuestUploaderInfo(guestInfo, true);
+
+            // Process upload based on file type
+            if (fileType === 'image') {
+                return await this.processGuestImageUpload(
+                    file,
                     event._id.toString(),
-                    guestInfo
+                    defaultAlbumResponse.data._id.toString(),
+                    guestUploaderInfo,
+                    approvalConfig,
+                    authenticatedUserId
                 );
-                if (!limitCheck.allowed) {
-                    return { success: false, message: limitCheck.reason };
-                }
-            }
-
-            // 8. Determine approval status - FIXED LOGIC
-            const requiresApproval = event.permissions?.require_approval ?? true;
-            let approvalStatus = 'pending';
-            let autoApprovalReason = null;
-
-            if (isRegisteredUser) {
-                // Authenticated users get auto-approved
-                approvalStatus = 'auto_approved';
-                autoApprovalReason = 'authenticated_user';
             } else {
-                // Guest approval based on event settings
-                if (!requiresApproval) {
-                    approvalStatus = 'auto_approved';
-                    autoApprovalReason = 'guest_auto_approve';
-                } else {
-                    // KEEP AS PENDING - don't auto-approve
-                    approvalStatus = 'pending';
-                    autoApprovalReason = null;
-                }
-            }
-
-            console.log('📋 Upload approval status:', {
-                requiresApproval,
-                approvalStatus,
-                autoApprovalReason,
-                isRegisteredUser
-            });
-
-            // 9. Handle guest identification
-            let guestUploaderInfo = null;
-            if (!isRegisteredUser) {
-                const existingGuestUploads = await this.findExistingGuest(
+                return await this.processGuestVideoUpload(
+                    file,
                     event._id.toString(),
-                    guestInfo
+                    defaultAlbumResponse.data._id.toString(),
+                    guestUploaderInfo,
+                    approvalConfig,
+                    authenticatedUserId
                 );
-
-                if (existingGuestUploads.found) {
-                    guestUploaderInfo = {
-                        ...existingGuestUploads.guestInfo,
-                        total_uploads: existingGuestUploads.uploadCount + 1
-                    };
-                } else {
-                    guestUploaderInfo = createGuestUploaderInfo(
-                        {
-                            name: guestInfo.name,
-                            email: guestInfo.email,
-                            phone: guestInfo.phone,
-                            sessionId: guestInfo.sessionId,
-                            deviceFingerprint: this.generateDeviceFingerprint(guestInfo.deviceInfo),
-                            uploadMethod: guestInfo.uploadMethod || 'web',
-                            platformInfo: {}
-                        },
-                        true
-                    );
-                }
             }
 
-            // 10. Get or create album
-            const albumId = await this.getOrCreateDefaultAlbum(event._id.toString(), eventOwnerId);
-
-            // 11. Upload file to ImageKit
-            const uploadResult = await this.uploadToStorage(fileData, event._id.toString());
-            if (!uploadResult.success) {
-                return { success: false, message: uploadResult.error || 'Failed to upload file' };
-            }
-
-            // 12. Create media record - FIXED UPLOADER LOGIC
-            const mediaData = {
-                url: uploadResult.url,
-                public_id: uploadResult.public_id,
-                type: fileType,
-                event_id: event._id,
-                album_id: albumId,
-                
-                // FIXED: Only set uploaded_by for registered users
-                uploaded_by: isRegisteredUser ? new mongoose.Types.ObjectId(authenticatedUserId) : null,
-                
-                // FIXED: Always set guest_uploader for guests, null for registered users
-                guest_uploader: isRegisteredUser ? null : guestUploaderInfo,
-                
-                // FIXED: Correct uploader_type
-                uploader_type: isRegisteredUser ? 'registered_user' : 'guest',
-                
-                original_filename: fileData.originalname,
-                size_mb: fileSizeInMB,
-                format: fileData.mimetype.split('/')[1],
-                
-                // FIXED: Explicit approval object
-                approval: {
-                    status: approvalStatus,
-                    approved_at: approvalStatus === 'auto_approved' ? new Date() : null,
-                    auto_approval_reason: autoApprovalReason,
-                    approved_by: null as any, // Will be set later if needed
-                    rejection_reason: ''
-                },
-                
-                upload_context: {
-                    method: 'guest_upload',
-                    ip_address: guestInfo.ipAddress || '',
-                    user_agent: guestInfo.userAgent || '',
-                    upload_session_id: guestInfo.sessionId || '',
-                    platform: 'web',
-                    referrer_url: ''
-                },
-                
-                metadata: {
-                    width: 0,
-                    height: 0,
-                    duration: 0,
-                    device_info: guestInfo.deviceInfo || {},
-                    location: {
-                        latitude: null as number | null,
-                        longitude: null as number | null,
-                        address: ''
-                    },
-                    timestamp: new Date(),
-                    // Store guest info in metadata for compatibility
-                    guest_info: !isRegisteredUser ? {
-                        name: guestInfo.name || '',
-                        email: guestInfo.email || null,
-                        is_guest_upload: true
-                    } : undefined
-                },
-                
-                // Set other required fields
-                stats: {
-                    views: 0,
-                    downloads: 0,
-                    shares: 0,
-                    likes: 0,
-                    comments_count: 0
-                },
-                
-                content_flags: {
-                    inappropriate: false,
-                    duplicate: false,
-                    low_quality: false,
-                    ai_flagged: false
-                },
-                
-                processing: {
-                    status: 'pending',
-                    thumbnails_generated: false,
-                    ai_analysis: {
-                        completed: false,
-                        content_score: 0,
-                        tags: [] as string[],
-                        faces_detected: 0
-                    },
-                }
-            };
-
-            // IMPORTANT: Create media document and disable the pre-save middleware override
-            const media = new Media(mediaData);
-            
-            // Force the approval status to stay as we set it
-            console.log('🔒 Creating media with approval status:', media.approval.status);
-            
-            await media.save();
-            
-            // Verify the status after save
-            console.log('✅ Media saved with approval status:', media.approval.status);
-
-            // 13. Update event owner's usage metrics
-            try {
-                await this.updateUsageForUpload(eventOwnerId, fileSizeInMB, event._id.toString());
-                console.log(`📊 Updated usage for event owner ${eventOwnerId} - Added ${fileSizeInMB}MB (guest upload)`);
-            } catch (usageError) {
-                console.error(`Failed to update usage for event owner ${eventOwnerId}:`, usageError);
-            }
-
-            // 14. Update event stats
-            const statUpdates: any = {
-                'stats.total_size_mb': fileSizeInMB
-            };
-
-            if (fileType === 'image') statUpdates['stats.photos'] = 1;
-            if (fileType === 'video') statUpdates['stats.videos'] = 1;
-            if (approvalStatus === 'pending') statUpdates['stats.pending_approval'] = 1;
-
-            await Event.findByIdAndUpdate(event._id, {
-                $inc: statUpdates,
-                $set: { updated_at: new Date() }
+        } catch (error: any) {
+            logger.error('Guest upload error:', {
+                error: error.message,
+                shareToken: shareToken.substring(0, 8) + '...',
+                fileName: file.originalname
             });
 
-            // 15. Send notifications if needed
-            if (approvalStatus === 'pending') {
-                await this.notifyHostOfPendingUpload(event, media, guestUploaderInfo);
-            }
-
-            return {
-                success: true,
-                message: approvalStatus === 'auto_approved' ?
-                    'Photo uploaded successfully!' :
-                    'Photo uploaded and pending approval',
-                media_id: media._id,
-                approval_status: approvalStatus,
-                uploader_type: isRegisteredUser ? 'registered_user' : 'guest'
-            };
-
-        } catch (error) {
-            console.error('❌ Guest media upload error:', error);
-            return { success: false, message: 'Upload failed. Please try again.' };
-        }
-    },
-
-    // ... rest of your methods remain the same
-    async checkGuestUploadLimits(eventId: string, guestInfo: any) {
-        const maxUploadsPerGuest = 20;
-        const timeWindow = 24 * 60 * 60 * 1000;
-
-        const guestIdentifiers = [];
-        if (guestInfo.email) guestIdentifiers.push({ 'guest_uploader.email': guestInfo.email });
-        if (guestInfo.sessionId) guestIdentifiers.push({ 'upload_context.upload_session_id': guestInfo.sessionId });
-
-        if (guestIdentifiers.length === 0) {
-            return { allowed: true };
-        }
-
-        const recentUploads = await Media.countDocuments({
-            event_id: new mongoose.Types.ObjectId(eventId),
-            uploader_type: 'guest',
-            created_at: { $gte: new Date(Date.now() - timeWindow) },
-            $or: guestIdentifiers
-        });
-
-        if (recentUploads >= maxUploadsPerGuest) {
-            return {
-                allowed: false,
-                reason: `Upload limit reached (${maxUploadsPerGuest} photos per day)`
-            };
-        }
-
-        return { allowed: true };
-    },
-
-    async findExistingGuest(eventId: string, guestInfo: any) {
-        const query: any = {
-            event_id: new mongoose.Types.ObjectId(eventId),
-            uploader_type: 'guest'
-        };
-
-        if (guestInfo.email) {
-            query['guest_uploader.email'] = guestInfo.email;
-        } else if (guestInfo.sessionId) {
-            query['upload_context.upload_session_id'] = guestInfo.sessionId;
-        } else {
-            return { found: false, guestInfo: null, uploadCount: 0 };
-        }
-
-        const existingUploads = await Media.find(query)
-            .sort({ created_at: -1 })
-            .limit(1);
-
-        if (existingUploads.length > 0) {
-            const totalUploads = await Media.countDocuments(query);
-            return {
-                found: true,
-                guestInfo: existingUploads[0].guest_uploader,
-                uploadCount: totalUploads
-            };
-        }
-
-        return { found: false, guestInfo: null, uploadCount: 0 };
-    },
-
-    generateDeviceFingerprint(deviceInfo: any): string {
-        if (!deviceInfo) return '';
-
-        const fingerprint = [
-            deviceInfo.userAgent || '',
-            deviceInfo.screen || '',
-            deviceInfo.timezone || '',
-            deviceInfo.language || ''
-        ].join('|');
-
-        return Buffer.from(fingerprint).toString('base64').substring(0, 16);
-    },
-
-    async uploadToStorage(fileData: any, eventId: string) {
-        try {
-            const fs = require('fs').promises;
-            const imagekit = new ImageKit({
-                publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
-                privateKey: process.env.IMAGE_KIT_PRIVATE_KEY!,
-                urlEndpoint: "https://ik.imagekit.io/roseclick",
-            });
-
-            let fileBuffer;
-            if (fileData.path) {
-                fileBuffer = await fs.readFile(fileData.path);
-            } else if (fileData.buffer) {
-                fileBuffer = fileData.buffer;
-            } else {
-                throw new Error('No file data available');
-            }
-
-            const fileSizeInMB = fileData.size / (1024 * 1024);
-
-            const uploadResult = await imagekit.upload({
-                file: fileBuffer,
-                fileName: `guest_${Date.now()}_${fileData.originalname}`,
-                folder: `/media`,
-            });
-
-            if (fileData.path) {
-                try {
-                    await fs.unlink(fileData.path);
-                } catch (unlinkError) {
-                    console.error('Failed to cleanup temp file:', unlinkError);
-                }
-            }
-
-            console.log('✅ ImageKit upload successful:', {
-                fileId: uploadResult.fileId,
-                url: uploadResult.url,
-                fileName: uploadResult.name,
-                size: fileSizeInMB
-            });
-
-            return {
-                success: true,
-                url: uploadResult.url,
-                public_id: uploadResult.fileId,
-                file_size_mb: fileSizeInMB
-            };
-
-        } catch (error) {
-            console.error('❌ ImageKit upload error:', error);
-
-            if (fileData.path) {
-                try {
-                    const fs = require('fs').promises;
-                    await fs.unlink(fileData.path);
-                } catch (unlinkError) {
-                    console.error('Failed to cleanup temp file after error:', unlinkError);
-                }
-            }
-
+            await cleanupFile(file);
             return {
                 success: false,
-                error: error.message || 'Failed to upload to ImageKit'
+                error: 'Upload failed due to server error'
             };
         }
-    },
-
-    async getOrCreateDefaultAlbum(eventId: string, eventOwnerId: string) {
-        try {
-            const { getOrCreateDefaultAlbum } = require('@/services/album.service');
-            const albumResponse = await getOrCreateDefaultAlbum(eventId, eventOwnerId);
-
-            if (albumResponse.status && albumResponse.data) {
-                return new mongoose.Types.ObjectId(albumResponse.data._id);
-            } else {
-                console.error('Failed to get/create default album, using fallback');
-                return new mongoose.Types.ObjectId();
-            }
-        } catch (error) {
-            console.error('Error getting/creating album:', error);
-            return new mongoose.Types.ObjectId();
-        }
-    },
-
-    async checkUserStorageLimits(userId: string, fileSizeInMB: number): Promise<boolean> {
-        try {
-            const { checkUserLimitsService } = require('@/services/limits.service');
-            const canUpload = await checkUserLimitsService(userId, 'storage', fileSizeInMB);
-            return canUpload;
-        } catch (error) {
-            console.error('Error checking user storage limits:', error);
-            return true;
-        }
-    },
-
-    async updateUsageForUpload(userId: string, fileSizeInMB: number, eventId: string) {
-        try {
-            const { updateUsageForUpload } = require('@/services/usage.service');
-            await updateUsageForUpload(userId, fileSizeInMB, eventId);
-        } catch (error) {
-            console.error('Error updating usage metrics:', error);
-        }
-    },
-
-    async notifyHostOfPendingUpload(event: any, media: any, guestInfo: any) {
-        console.log(`📸 New guest upload pending approval for event ${event._id}:`, {
-            guestName: guestInfo?.name || 'Anonymous',
-            filename: media.original_filename,
-            uploadedAt: media.created_at
-        });
-    },
-
-    async getEventGuestUploads(eventId: string, options: {
-        includeApproved?: boolean;
-        includePending?: boolean;
-        guestId?: string;
-    } = {}) {
-        const query: any = {
-            event_id: new mongoose.Types.ObjectId(eventId),
-            uploader_type: 'guest'
-        };
-
-        if (options.guestId) {
-            query['guest_uploader.guest_id'] = options.guestId;
-        }
-
-        if (options.includeApproved === false) {
-            query['approval.status'] = { $ne: 'approved' };
-        }
-
-        if (options.includePending === false) {
-            query['approval.status'] = { $ne: 'pending' };
-        }
-
-        return Media.find(query)
-            .sort({ created_at: -1 })
-            .populate('approved_by', 'name email');
     }
-};
 
+    /**
+     * Process guest image upload with variants
+     */
+    private async processGuestImageUpload(
+        file: Express.Multer.File,
+        eventId: string,
+        albumId: string,
+        guestUploaderInfo: any,
+        approvalConfig: any,
+        authenticatedUserId?: string
+    ): Promise<GuestUploadResult> {
+        try {
+            const fileSizeMB = bytesToMB(file.size);
+
+            // Create media record first (with processing status)
+            const media = new Media({
+                url: '', // Will be updated after processing
+                type: 'image',
+                album_id: new mongoose.Types.ObjectId(albumId),
+                event_id: new mongoose.Types.ObjectId(eventId),
+                uploaded_by: authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : null,
+                guest_uploader: !authenticatedUserId ? guestUploaderInfo : null,
+                uploader_type: authenticatedUserId ? 'registered_user' : 'guest',
+                original_filename: file.originalname,
+                size_mb: fileSizeMB,
+                format: file.mimetype.split('/')[1],
+                processing: {
+                    status: 'processing',
+                    started_at: new Date(),
+                    completed_at: null,
+                    processing_time_ms: 0,
+                    variants_generated: false,
+                    variants_count: 0,
+                    total_variants_size_mb: 0,
+                    error_message: '',
+                    retry_count: 0
+                },
+                approval: {
+                    status: approvalConfig.status,
+                    auto_approval_reason: approvalConfig.autoApprovalReason,
+                    approved_at: approvalConfig.approvedAt,
+                    approved_by: approvalConfig.approvedBy,
+                    rejection_reason: ''
+                },
+                upload_context: {
+                    method: 'guest_upload',
+                    ip_address: guestUploaderInfo.session_id.split('_')[0] || '',
+                    user_agent: guestUploaderInfo.device_fingerprint || '',
+                    upload_session_id: guestUploaderInfo.session_id || '',
+                    referrer_url: guestUploaderInfo.platform_info?.referrer || '',
+                    platform: 'web'
+                }
+            });
+
+            await media.save();
+            const mediaId = media._id.toString();
+
+            try {
+                // Process image and generate variants
+                const processingResult = await imageProcessingService.processImage(file, eventId, mediaId);
+
+                // Update media with processing results matching your model structure
+                media.url = processingResult.original.url;
+                media.image_variants = {
+                    original: processingResult.original,
+                    small: processingResult.variants.small,
+                    medium: processingResult.variants.medium,
+                    large: processingResult.variants.large
+                };
+
+                // Update metadata
+                media.metadata = {
+                    width: processingResult.original.width || 0,
+                    height: processingResult.original.height || 0,
+                    duration: 0,
+                    aspect_ratio: processingResult.original.height && processingResult.original.width ?
+                        processingResult.original.height / processingResult.original.width : 1,
+                    color_profile: '',
+                    has_transparency: false,
+                    timestamp: new Date(),
+                    device_info: {
+                        brand: '',
+                        model: '',
+                        os: ''
+                    },
+                    location: {
+                        latitude: null,
+                        longitude: null,
+                        address: ''
+                    },
+                    camera_settings: {
+                        iso: null,
+                        aperture: '',
+                        shutter_speed: '',
+                        focal_length: ''
+                    }
+                };
+
+                // Update processing status
+                const processingStartTime = media.processing.started_at?.getTime() || Date.now();
+                media.processing = {
+                    status: 'completed',
+                    started_at: media.processing.started_at,
+                    completed_at: new Date(),
+                    processing_time_ms: Date.now() - processingStartTime,
+                    variants_generated: true,
+                    variants_count: 6, // 3 sizes × 2 formats
+                    total_variants_size_mb: this.calculateTotalVariantsSize(processingResult.variants),
+                    error_message: '',
+                    retry_count: 0
+                };
+
+                await media.save();
+
+                logger.info(`✅ Guest image upload completed`, {
+                    mediaId,
+                    fileName: file.originalname,
+                    processingTime: media.processing.processing_time_ms + 'ms',
+                    approvalStatus: media.approval.status
+                });
+
+                return {
+                    success: true,
+                    media_id: mediaId,
+                    url: media.url,
+                    approval_status: media.approval.status,
+                    message: 'Image uploaded and processed successfully'
+                };
+
+            } catch (processingError: any) {
+                logger.error(`❌ Guest image processing failed:`, processingError);
+
+                // Update processing status with error
+                const processingStartTime = media.processing.started_at?.getTime() || Date.now();
+                media.processing = {
+                    status: 'failed',
+                    started_at: media.processing.started_at,
+                    completed_at: new Date(),
+                    processing_time_ms: Date.now() - processingStartTime,
+                    variants_generated: false,
+                    variants_count: 0,
+                    total_variants_size_mb: 0,
+                    error_message: processingError.message,
+                    retry_count: 0
+                };
+
+                // Try to upload original to ImageKit as fallback
+                try {
+                    const fileBuffer = await fs.readFile(file.path);
+                    const uploadResult = await imagekit.upload({
+                        file: fileBuffer,
+                        fileName: `${mediaId}_original_${file.originalname}`,
+                        folder: `/events/${eventId}/images`,
+                    });
+                    media.url = uploadResult.url;
+                    await media.save();
+
+                    return {
+                        success: true,
+                        media_id: mediaId,
+                        url: media.url,
+                        approval_status: media.approval.status,
+                        message: 'Image uploaded but processing failed - original image saved'
+                    };
+                } catch (uploadError) {
+                    logger.error('Failed to upload original image after processing failure:', uploadError);
+                    return {
+                        success: false,
+                        error: 'Image processing and upload failed'
+                    };
+                }
+            }
+
+        } catch (error: any) {
+            logger.error('Guest image upload error:', error);
+            return {
+                success: false,
+                error: 'Failed to upload image'
+            };
+        } finally {
+            await cleanupFile(file);
+        }
+    }
+
+    /**
+     * Process guest video upload (simplified)
+     */
+    private async processGuestVideoUpload(
+        file: Express.Multer.File,
+        eventId: string,
+        albumId: string,
+        guestUploaderInfo: any,
+        approvalConfig: any,
+        authenticatedUserId?: string
+    ): Promise<GuestUploadResult> {
+        try {
+            const fileSizeMB = bytesToMB(file.size);
+
+            // Upload video to ImageKit
+            const fileBuffer = await fs.readFile(file.path);
+            const uploadResult = await imagekit.upload({
+                file: fileBuffer,
+                fileName: `${Date.now()}_guest_${file.originalname}`,
+                folder: `/events/${eventId}/videos`,
+                transformation: {
+                    pre: 'q_auto,f_auto' // Auto quality and format optimization
+                }
+            });
+
+            // Create media record
+            const media = new Media({
+                url: uploadResult.url,
+                type: 'video',
+                album_id: new mongoose.Types.ObjectId(albumId),
+                event_id: new mongoose.Types.ObjectId(eventId),
+                uploaded_by: authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : null,
+                guest_uploader: !authenticatedUserId ? guestUploaderInfo : null,
+                uploader_type: authenticatedUserId ? 'registered_user' : 'guest',
+                original_filename: file.originalname,
+                size_mb: fileSizeMB,
+                format: file.mimetype.split('/')[1],
+                processing: {
+                    status: 'completed',
+                    started_at: new Date(),
+                    completed_at: new Date(),
+                    processing_time_ms: 0,
+                    variants_generated: false,
+                    variants_count: 0,
+                    total_variants_size_mb: 0,
+                    error_message: '',
+                    retry_count: 0
+                },
+                approval: {
+                    status: approvalConfig.status,
+                    auto_approval_reason: approvalConfig.autoApprovalReason,
+                    approved_at: approvalConfig.approvedAt,
+                    approved_by: approvalConfig.approvedBy,
+                    rejection_reason: ''
+                },
+                upload_context: {
+                    method: 'guest_upload',
+                    ip_address: guestUploaderInfo.session_id.split('_')[0] || '',
+                    user_agent: guestUploaderInfo.device_fingerprint || '',
+                    upload_session_id: guestUploaderInfo.session_id || '',
+                    referrer_url: guestUploaderInfo.platform_info?.referrer || '',
+                    platform: 'web'
+                }
+            });
+
+            await media.save();
+
+            logger.info(`✅ Guest video upload completed`, {
+                mediaId: media._id.toString(),
+                fileName: file.originalname,
+                approvalStatus: media.approval.status
+            });
+
+            return {
+                success: true,
+                media_id: media._id.toString(),
+                url: media.url,
+                approval_status: media.approval.status,
+                message: 'Video uploaded successfully'
+            };
+
+        } catch (error: any) {
+            logger.error('Guest video upload error:', error);
+            return {
+                success: false,
+                error: 'Failed to upload video'
+            };
+        } finally {
+            await cleanupFile(file);
+        }
+    }
+
+    /**
+     * Calculate total size of variants
+     */
+    private calculateTotalVariantsSize(variants: any): number {
+        let total = 0;
+        try {
+            Object.values(variants).forEach((sizeVariants: any) => {
+                if (sizeVariants && typeof sizeVariants === 'object') {
+                    Object.values(sizeVariants).forEach((formatVariant: any) => {
+                        if (formatVariant && formatVariant.size_mb) {
+                            total += formatVariant.size_mb;
+                        }
+                    });
+                }
+            });
+        } catch (error) {
+            logger.warn('Error calculating variants size:', error);
+        }
+        return Math.round(total * 100) / 100;
+    }
+
+    /**
+     * Check if guest has permission to upload
+     */
+    async checkGuestUploadPermission(shareToken: string): Promise<{
+        allowed: boolean;
+        event?: any;
+        reason?: string;
+    }> {
+        try {
+            const event = await Event.findOne({ share_token: shareToken });
+
+            if (!event) {
+                return {
+                    allowed: false,
+                    reason: 'Event not found'
+                };
+            }
+
+            if (!event.permissions?.can_upload) {
+                return {
+                    allowed: false,
+                    event,
+                    reason: 'Uploads not allowed for this event'
+                };
+            }
+
+            return {
+                allowed: true,
+                event
+            };
+
+        } catch (error: any) {
+            logger.error('Error checking guest upload permission:', error);
+            return {
+                allowed: false,
+                reason: 'Server error'
+            };
+        }
+    }
+
+    /**
+     * Get guest upload statistics for an event
+     */
+    async getGuestUploadStats(eventId: string): Promise<{
+        totalGuestUploads: number;
+        totalGuestUploaders: number;
+        recentUploads: number; // Last 24 hours
+        avgUploadsPerGuest: number;
+    }> {
+        try {
+            const eventObjectId = new mongoose.Types.ObjectId(eventId);
+
+            // Total guest uploads
+            const totalGuestUploads = await Media.countDocuments({
+                event_id: eventObjectId,
+                uploader_type: 'guest'
+            });
+
+            // Unique guest uploaders
+            const uniqueGuests = await Media.distinct('guest_uploader.guest_id', {
+                event_id: eventObjectId,
+                uploader_type: 'guest'
+            });
+
+            // Recent uploads (last 24 hours)
+            const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+            const recentUploads = await Media.countDocuments({
+                event_id: eventObjectId,
+                uploader_type: 'guest',
+                created_at: { $gte: oneDayAgo }
+            });
+
+            return {
+                totalGuestUploads,
+                totalGuestUploaders: uniqueGuests.length,
+                recentUploads,
+                avgUploadsPerGuest: uniqueGuests.length > 0 ?
+                    Math.round(totalGuestUploads / uniqueGuests.length * 100) / 100 : 0
+            };
+
+        } catch (error: any) {
+            logger.error('Error getting guest upload stats:', error);
+            return {
+                totalGuestUploads: 0,
+                totalGuestUploaders: 0,
+                recentUploads: 0,
+                avgUploadsPerGuest: 0
+            };
+        }
+    }
+}
+
+// Export singleton instance
+const guestMediaUploadService = new GuestMediaUploadService();
 export default guestMediaUploadService;

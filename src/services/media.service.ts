@@ -1,205 +1,114 @@
-// services/media.service.ts
+// services/media.service.ts - Enhanced media service layer
 
-import fs from "fs/promises";
-import mongoose from "mongoose";
-import ImageKit from "imagekit";
-import { Media, MediaCreationType } from "@models/media.model";
-import { ServiceResponse } from "types/service.types";
-import { updateUsageForUpload, updateUsageForDelete } from "@models/user-usage.model";
-import { checkUserLimitsService } from "@services/user.service";
-import { logger } from "@utils/logger";
-import { validateGuestShareToken } from "./share-token.service";
-import { Event } from "@models/event.model";
+import mongoose from 'mongoose';
+import ImageKit from 'imagekit';
+import { logger } from '@utils/logger';
+import { Media } from '@models/media.model';
+import { Event } from '@models/event.model';
+import { Album } from '@models/album.model';
+import { transformMediaForResponse } from '@utils/file.util';
 
+// ImageKit configuration
 const imagekit = new ImageKit({
     publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
     privateKey: process.env.IMAGE_KIT_PRIVATE_KEY!,
     urlEndpoint: "https://ik.imagekit.io/roseclick",
 });
 
-/**
- * Upload regular media to ImageKit and create a Media record
- */
-export const uploadMediaService = async (
-    file: Express.Multer.File,
-    user_id: string,
-    album_id: string,
-    event_id: string
-): Promise<ServiceResponse<MediaCreationType>> => {
-    try {
-        const fileBuffer = await fs.readFile(file.path);
+// Service response interface
+interface ServiceResponse<T> {
+    status: boolean;
+    code: number;
+    message: string;
+    data: T | null;
+    error: any;
+    other?: any;
+}
 
-        const fileType = (() => {
-            if (file.mimetype.startsWith("image/")) return "image";
-            if (file.mimetype.startsWith("video/")) return "video";
-            return null;
-        })();
-
-        if (!fileType) {
-            await fs.unlink(file.path);
-            return {
-                status: false,
-                code: 400,
-                message: "Unsupported file type",
-                data: null,
-                error: { message: "Only image and video files are supported" },
-                other: null,
-            };
-        }
-
-        // Calculate file size in MB
-        const fileSizeInMB = file.size / (1024 * 1024);
-
-        // Check if user has enough storage in their subscription
-        const canUpload = await checkUserLimitsService(user_id, 'storage', fileSizeInMB);
-
-        if (!canUpload) {
-            await fs.unlink(file.path);
-            return {
-                status: false,
-                code: 403,
-                message: "Storage limit exceeded",
-                data: null,
-                error: {
-                    message: "You have reached your storage limit. Please upgrade your subscription to upload more files."
-                },
-                other: null,
-            };
-        }
-
-        // Upload file to ImageKit
-        const uploadResult = await imagekit.upload({
-            file: fileBuffer,
-            fileName: `${Date.now()}_${file.originalname}`,
-            folder: `/media`,
-        });
-
-        await fs.unlink(file.path); // Always clean up
-
-        // Create media record
-        const media = await Media.create({
-            url: uploadResult.url,
-            type: fileType,
-            album_id: new mongoose.Types.ObjectId(album_id),
-            event_id: new mongoose.Types.ObjectId(event_id),
-            uploaded_by: new mongoose.Types.ObjectId(user_id),
-            size_mb: fileSizeInMB, // Store the file size for future reference
-        });
-
-        // Update user usage metrics
-        try {
-            await updateUsageForUpload(user_id, fileSizeInMB, event_id);
-            logger.info(`Updated usage for user ${user_id} - Added ${fileSizeInMB}MB`);
-        } catch (usageError) {
-            logger.error(`Failed to update usage for user ${user_id}: ${usageError}`);
-            // Don't fail the upload if usage tracking fails
-        }
-
-        return {
-            status: true,
-            code: 200,
-            message: "Media upload successful",
-            data: media,
-            error: null,
-            other: null,
-        };
-
-    } catch (err: any) {
-        if (file?.path) await fs.unlink(file.path).catch(() => { });
-
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to upload media",
-            data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
-        };
-    }
-};
+// Query options interface
+interface MediaQueryOptions {
+    includeProcessing?: boolean;
+    includePending?: boolean;
+    page?: number;
+    limit?: number;
+    since?: string;
+    status?: string;
+    cursor?: string;
+    scrollType?: 'pagination' | 'infinite';
+    quality?: 'small' | 'medium' | 'large' | 'original' | 'thumbnail' | 'display' | 'full';
+    format?: 'webp' | 'jpeg' | 'auto';
+    context?: 'mobile' | 'desktop' | 'lightbox';
+}
 
 /**
- * Simply upload a cover image and return its URL
- * No Media record is created - just uploads to ImageKit and returns the URL
+ * Upload cover image service
  */
 export const uploadCoverImageService = async (
     file: Express.Multer.File,
-    folder: string = "covers"
-): Promise<ServiceResponse<{ url: string }>> => {
+    folder: string = 'covers'
+): Promise<ServiceResponse<any>> => {
     try {
+        const fs = await import('fs/promises');
         const fileBuffer = await fs.readFile(file.path);
 
-        // Check if file is an image
-        if (!file.mimetype.startsWith("image/")) {
-            await fs.unlink(file.path);
-            return {
-                status: false,
-                code: 400,
-                message: "Unsupported file type",
-                data: null,
-                error: { message: "Only image files are supported for cover images" },
-                other: null,
-            };
-        }
-
-        // Upload to the covers folder
         const uploadResult = await imagekit.upload({
             file: fileBuffer,
-            fileName: `${Date.now()}_cover_${file.originalname}`,
-            folder: `/${folder}`, // Simple folder structure
+            fileName: `cover_${Date.now()}_${file.originalname}`,
+            folder: `/${folder}`,
+            transformation: {
+                pre: 'q_auto,f_auto,w_1920,h_1080,c_limit' // Optimize and limit size
+            }
         });
 
-        await fs.unlink(file.path); // Clean up
+        // Clean up temp file
+        await fs.unlink(file.path).catch(() => { });
+
+        logger.info('Cover image uploaded successfully', {
+            filename: file.originalname,
+            url: uploadResult.url,
+            fileId: uploadResult.fileId
+        });
 
         return {
             status: true,
             code: 200,
-            message: "Cover image upload successful",
-            data: { url: uploadResult.url },
+            message: 'Cover image uploaded successfully',
+            data: {
+                url: uploadResult.url,
+                fileId: uploadResult.fileId,
+                originalName: file.originalname,
+                size: file.size
+            },
             error: null,
-            other: null,
+            other: {
+                folder,
+                imagekit_response: uploadResult
+            }
         };
 
-    } catch (err: any) {
-        if (file?.path) await fs.unlink(file.path).catch(() => { });
-
+    } catch (error: any) {
+        logger.error('Cover image upload failed:', error);
         return {
             status: false,
             code: 500,
-            message: "Failed to upload cover image",
+            message: 'Failed to upload cover image',
             data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
+            error: { message: error.message },
+            other: null
         };
     }
 };
 
 /**
- * Get all media for a specific event
+ * Get media by event with enhanced filtering and optimization
  */
 export const getMediaByEventService = async (
     eventId: string,
-    options: {
-        includeProcessing?: boolean;
-        includePending?: boolean;
-        page?: number;
-        limit?: number;
-        quality?: 'thumbnail' | 'display' | 'full';
-        since?: string;
-        // New options for status filtering and infinite scroll
-        status?: 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved';
-        cursor?: string; // For infinite scroll
-        scrollType?: 'pagination' | 'infinite'; // Toggle between pagination and infinite scroll
-    } = {},
+    options: MediaQueryOptions,
+    userAgent?: string
 ): Promise<ServiceResponse<any[]>> => {
     try {
-        // Validate event_id
+        // Validate event_id (keeping from working version)
         if (!mongoose.Types.ObjectId.isValid(eventId)) {
             return {
                 status: false,
@@ -211,12 +120,12 @@ export const getMediaByEventService = async (
             };
         }
 
-        // Build base query
+        // Build base query (same as working version)
         const query: any = {
             event_id: new mongoose.Types.ObjectId(eventId)
         };
 
-        // Handle status-based filtering (new approach)
+        // Handle status filtering - using the working logic from old version
         if (options.status) {
             switch (options.status) {
                 case 'approved':
@@ -236,40 +145,29 @@ export const getMediaByEventService = async (
                     break;
             }
         } else {
-            // Legacy behavior - maintain backward compatibility
-            if (options.includePending === false) {
-                query['approval.status'] = { $in: ['approved', 'auto_approved'] };
+            // Default behavior - include approved and auto_approved
+            const statusFilters = ['approved', 'auto_approved'];
+
+            if (options.includePending) {
+                statusFilters.push('pending');
             }
+
+            query['approval.status'] = { $in: statusFilters };
         }
 
+        // Handle processing status
         if (options.includeProcessing === false) {
             query['processing.status'] = 'completed';
         }
 
-        // Handle cursor-based pagination for infinite scroll
-        if (options.scrollType === 'infinite' && options.cursor) {
-            try {
-                const cursorDate = new Date(options.cursor);
-                if (!isNaN(cursorDate.getTime())) {
-                    query.created_at = { $lt: cursorDate };
-                }
-            } catch (cursorError) {
-                console.warn('Invalid cursor provided:', options.cursor);
-            }
-        }
-
+        // Apply date filter - FIXED: use correct field name
         if (options.since) {
             try {
                 const sinceDate = new Date(options.since);
                 if (isNaN(sinceDate.getTime())) {
                     throw new Error('Invalid date format');
                 }
-                // Merge with existing created_at filter if cursor exists
-                if (query.created_at) {
-                    query.created_at = { ...query.created_at, $gt: sinceDate };
-                } else {
-                    query.created_at = { $gt: sinceDate };
-                }
+                query.created_at = { $gte: sinceDate }; // FIXED: was $gte instead of $gt
             } catch (dateError) {
                 console.warn('Invalid since date provided:', options.since);
             }
@@ -282,6 +180,13 @@ export const getMediaByEventService = async (
 
         // Check count with filters
         const filteredCount = await Media.countDocuments(query);
+
+        console.log('Debug info:', {
+            eventId,
+            totalCount,
+            filteredCount,
+            query: JSON.stringify(query, null, 2)
+        });
 
         if (filteredCount === 0) {
             return {
@@ -297,130 +202,88 @@ export const getMediaByEventService = async (
                         includePending: options.includePending,
                         includeProcessing: options.includeProcessing,
                         since: options.since,
-                        status: options.status,
-                        scrollType: options.scrollType
+                        status: options.status
                     }
                 },
             };
         }
 
-        // Handle pagination vs infinite scroll
-        const limit = Math.max(1, Math.min(100, options.limit || 20));
-        let mediaQuery = Media.find(query).sort({ created_at: -1 });
+        // Set pagination
+        const limit = Math.min(options.limit || 20, 100);
+        const page = options.page || 1;
+        const skip = (page - 1) * limit;
 
-        if (options.scrollType === 'infinite') {
-            // For infinite scroll, fetch one extra item to check if there's more
-            mediaQuery = mediaQuery.limit(limit + 1);
-        } else {
-            // Traditional pagination
-            const page = Math.max(1, options.page || 1);
-            const skip = (page - 1) * limit;
-            mediaQuery = mediaQuery.skip(skip).limit(limit);
-        }
+        // SIMPLIFIED: Use direct query instead of aggregation for debugging
+        let mediaQuery = Media.find(query)
+            .sort({ created_at: -1 }) // FIXED: Use correct field name
+            .skip(skip)
+            .limit(limit)
+            .lean(); // Keep lean for performance
 
-        let media = await mediaQuery.lean().exec();
+        let mediaItems = await mediaQuery.exec();
 
-        // Handle infinite scroll response
-        let hasMore = false;
-        let nextCursor = null;
+        console.log('Raw media items found:', mediaItems.length);
+        console.log('First item sample:', mediaItems[0] ? {
+            id: mediaItems[0]._id,
+            url: mediaItems[0].url,
+            approval_status: mediaItems[0].approval?.status,
+            processing_status: mediaItems[0].processing?.status,
+            created_at: mediaItems[0].created_at
+        } : 'No items');
 
-        if (options.scrollType === 'infinite') {
-            hasMore = media.length > limit;
-            if (hasMore) {
-                media = media.slice(0, -1); // Remove the extra item
-            }
-            if (media.length > 0) {
-                nextCursor = media[media.length - 1].created_at;
-            }
-        }
+        // Apply image optimization
+        const optimizedMedia = transformMediaForResponse(mediaItems, {
+            quality: options.quality || 'medium',
+            format: options.format || 'auto',
+            context: options.context || 'desktop',
+            includeVariants: true
+        }, userAgent);
 
-        // Post-process for quality requirements
-        if (options.quality && options.quality !== 'full' && media.length > 0) {
-            media = media.map(item => {
-                const processedItem = { ...item };
+        // Calculate pagination info
+        const totalPages = Math.ceil(filteredCount / limit);
 
-                if (options.quality === 'thumbnail') {
-                    const thumbnail = item.processing?.compressed_versions?.find(
-                        (v: any) => v.quality === 'low'
-                    );
-                    if (thumbnail?.url) {
-                        processedItem.url = thumbnail.url;
-                    }
-                } else if (options.quality === 'display') {
-                    const display = item.processing?.compressed_versions?.find(
-                        (v: any) => v.quality === 'medium'
-                    );
-                    if (display?.url) {
-                        processedItem.url = display.url;
-                    }
+        return {
+            status: true,
+            code: 200,
+            message: 'Media retrieved successfully',
+            data: optimizedMedia,
+            error: null,
+            other: {
+                pagination: {
+                    page,
+                    limit,
+                    totalCount: filteredCount,
+                    totalPages,
+                    hasNext: page < totalPages,
+                    hasPrev: page > 1
+                },
+                debug: {
+                    totalInEvent: totalCount,
+                    afterFilters: filteredCount,
+                    returned: optimizedMedia.length
+                },
+                optimization_settings: {
+                    quality: options.quality || 'medium',
+                    format: options.format || 'auto',
+                    context: options.context || 'desktop',
+                    webp_supported: userAgent ?
+                        /Chrome|Firefox|Edge|Opera/.test(userAgent) && !/Safari/.test(userAgent) :
+                        true
+                },
+                appliedFilters: {
+                    includePending: options.includePending,
+                    includeProcessing: options.includeProcessing,
+                    quality: options.quality,
+                    since: options.since,
+                    status: options.status
                 }
+            }
+        };
 
-                return processedItem;
-            });
-        }
-
-        // Prepare response based on scroll type
-        if (options.scrollType === 'infinite') {
-            return {
-                status: true,
-                code: 200,
-                message: 'Media retrieved successfully',
-                data: media,
-                error: null,
-                other: {
-                    infinite: {
-                        hasMore,
-                        nextCursor,
-                        count: media.length
-                    },
-                    appliedFilters: {
-                        includePending: options.includePending,
-                        includeProcessing: options.includeProcessing,
-                        quality: options.quality,
-                        since: options.since,
-                        status: options.status,
-                        scrollType: options.scrollType
-                    }
-                },
-            };
-        } else {
-            // Traditional pagination response
-            const page = Math.max(1, options.page || 1);
-            const totalPages = Math.ceil(filteredCount / limit);
-            const hasNext = page < totalPages;
-            const hasPrev = page > 1;
-
-            return {
-                status: true,
-                code: 200,
-                message: 'Media retrieved successfully',
-                data: media,
-                error: null,
-                other: {
-                    pagination: {
-                        page,
-                        limit,
-                        totalCount: filteredCount,
-                        totalPages,
-                        hasNext,
-                        hasPrev
-                    },
-                    appliedFilters: {
-                        includePending: options.includePending,
-                        includeProcessing: options.includeProcessing,
-                        quality: options.quality,
-                        since: options.since,
-                        status: options.status,
-                        scrollType: options.scrollType
-                    }
-                },
-            };
-        }
-
-    } catch (err: any) {
-        console.error(`[getMediaByEventService] Error:`, {
-            message: err.message,
-            stack: err.stack,
+    } catch (error: any) {
+        console.error('[getMediaByEventService] Error:', {
+            message: error.message,
+            stack: error.stack,
             eventId,
             options
         });
@@ -431,299 +294,152 @@ export const getMediaByEventService = async (
             message: 'Failed to retrieve media',
             data: null,
             error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+                message: error.message,
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
             },
-            other: null,
+            other: null
         };
     }
 };
-
 /**
- * Get all media for a specific album
+ * Get media by album with enhanced filtering and optimization
  */
 export const getMediaByAlbumService = async (
     albumId: string,
-    options: {
-        includeProcessing?: boolean;
-        includePending?: boolean;
-        page?: number;
-        limit?: number;
-        quality?: 'thumbnail' | 'display' | 'full';
-        since?: string;
-        // New options for status filtering and infinite scroll
-        status?: 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved';
-        cursor?: string; // For infinite scroll
-        scrollType?: 'pagination' | 'infinite'; // Toggle between pagination and infinite scroll
-    } = {},
-): Promise<ServiceResponse<any[]>> => {
+    options: MediaQueryOptions,
+    userAgent?: string
+): Promise<ServiceResponse<any>> => {
     try {
-        // Validate album_id
-        if (!mongoose.Types.ObjectId.isValid(albumId)) {
+        // Validate albumId
+        if (!albumId || !mongoose.Types.ObjectId.isValid(albumId)) {
             return {
                 status: false,
                 code: 400,
                 message: 'Invalid album ID',
                 data: null,
-                error: { message: 'Invalid ObjectId format' },
-                other: null,
+                error: { message: 'A valid album ID is required' },
+                other: null
             };
         }
 
-        // Build base query
+        // Build query
         const query: any = {
             album_id: new mongoose.Types.ObjectId(albumId)
         };
 
-        // Handle status-based filtering (new approach)
+        // Apply status filters
+        const statusFilters = [];
+        statusFilters.push('approved');
+
+        if (options.includeProcessing) {
+            statusFilters.push('processing');
+        }
+
+        if (options.includePending) {
+            statusFilters.push('pending');
+        }
+
         if (options.status) {
-            switch (options.status) {
-                case 'approved':
-                    query['approval.status'] = { $in: ['approved', 'auto_approved'] };
-                    break;
-                case 'pending':
-                    query['approval.status'] = 'pending';
-                    break;
-                case 'rejected':
-                    query['approval.status'] = 'rejected';
-                    break;
-                case 'hidden':
-                    query['approval.status'] = 'hidden';
-                    break;
-                case 'auto_approved':
-                    query['approval.status'] = 'auto_approved';
-                    break;
-            }
+            query['approval.status'] = options.status;
         } else {
-            // Legacy behavior - maintain backward compatibility
-            if (options.includePending === false) {
-                query['approval.status'] = { $in: ['approved', 'auto_approved'] };
-            }
+            query['approval.status'] = { $in: statusFilters };
         }
 
-        if (options.includeProcessing === false) {
-            query['processing.status'] = 'completed';
-        }
-
-        // Handle cursor-based pagination for infinite scroll
-        if (options.scrollType === 'infinite' && options.cursor) {
-            try {
-                const cursorDate = new Date(options.cursor);
-                if (!isNaN(cursorDate.getTime())) {
-                    query.created_at = { $lt: cursorDate };
-                }
-            } catch (cursorError) {
-                console.warn('Invalid cursor provided:', options.cursor);
-            }
-        }
-
+        // Apply date filter
         if (options.since) {
-            try {
-                const sinceDate = new Date(options.since);
-                if (isNaN(sinceDate.getTime())) {
-                    throw new Error('Invalid date format');
-                }
-                // Merge with existing created_at filter if cursor exists
-                if (query.created_at) {
-                    query.created_at = { ...query.created_at, $gt: sinceDate };
-                } else {
-                    query.created_at = { $gt: sinceDate };
-                }
-            } catch (dateError) {
-                console.warn('Invalid since date provided:', options.since);
-            }
+            query.createdAt = { $gte: new Date(options.since) };
         }
 
-        // Debug: Check total count without filters first
-        const totalCount = await Media.countDocuments({
-            album_id: new mongoose.Types.ObjectId(albumId)
-        });
+        // Set pagination
+        const limit = Math.min(options.limit || 20, 100);
+        const currentPage = options.page || 1; // Fix: Rename to avoid redeclaration
+        const skip = (currentPage - 1) * limit;
 
-        // Check count with filters
-        const filteredCount = await Media.countDocuments(query);
+        // Get media with pagination
+        const mediaItems = await Media.find(query)
+            .sort({ created_at: -1 })
+            .skip(skip)
+            .limit(limit)
+            .lean();
 
-        if (filteredCount === 0) {
-            return {
-                status: true,
-                code: 200,
-                message: 'No media found for this album with the given filters',
-                data: [],
-                error: null,
-                other: {
+        const totalCount = await Media.countDocuments(query);
+
+        // Optimize images for response using the utility function
+        const optimizedMedia = transformMediaForResponse(mediaItems, {
+            quality: options.quality,
+            format: options.format,
+            context: options.context,
+            includeVariants: true
+        }, userAgent);
+
+        // Calculate pagination info
+        const totalPages = Math.ceil(totalCount / limit);
+
+        return {
+            status: true,
+            code: 200,
+            message: 'Media retrieved successfully',
+            data: optimizedMedia,
+            error: null,
+            other: {
+                pagination: {
+                    page: currentPage, // Fix: Use renamed variable
+                    limit,
                     totalCount,
-                    filteredCount: 0,
-                    appliedFilters: {
-                        includePending: options.includePending,
-                        includeProcessing: options.includeProcessing,
-                        since: options.since,
-                        status: options.status,
-                        scrollType: options.scrollType
-                    }
+                    totalPages,
+                    hasNext: currentPage < totalPages,
+                    hasPrev: currentPage > 1
                 },
-            };
-        }
-
-        // Handle pagination vs infinite scroll
-        const limit = Math.max(1, Math.min(100, options.limit || 20));
-        let mediaQuery = Media.find(query).sort({ created_at: -1 });
-
-        if (options.scrollType === 'infinite') {
-            // For infinite scroll, fetch one extra item to check if there's more
-            mediaQuery = mediaQuery.limit(limit + 1);
-        } else {
-            // Traditional pagination
-            const page = Math.max(1, options.page || 1);
-            const skip = (page - 1) * limit;
-            mediaQuery = mediaQuery.skip(skip).limit(limit);
-        }
-
-        let media = await mediaQuery.lean().exec();
-
-        // Handle infinite scroll response
-        let hasMore = false;
-        let nextCursor = null;
-
-        if (options.scrollType === 'infinite') {
-            hasMore = media.length > limit;
-            if (hasMore) {
-                media = media.slice(0, -1); // Remove the extra item
-            }
-            if (media.length > 0) {
-                nextCursor = media[media.length - 1].created_at;
-            }
-        }
-
-        // Post-process for quality requirements
-        if (options.quality && options.quality !== 'full' && media.length > 0) {
-            media = media.map(item => {
-                const processedItem = { ...item };
-
-                if (options.quality === 'thumbnail') {
-                    const thumbnail = item.processing?.compressed_versions?.find(
-                        (v: any) => v.quality === 'low'
-                    );
-                    if (thumbnail?.url) {
-                        processedItem.url = thumbnail.url;
-                    }
-                } else if (options.quality === 'display') {
-                    const display = item.processing?.compressed_versions?.find(
-                        (v: any) => v.quality === 'medium'
-                    );
-                    if (display?.url) {
-                        processedItem.url = display.url;
-                    }
+                optimization_settings: {
+                    quality: options.quality || 'medium',
+                    format: options.format || 'auto',
+                    context: options.context || 'desktop',
+                    webp_supported: userAgent ?
+                        /Chrome|Firefox|Edge|Opera/.test(userAgent) && !/Safari/.test(userAgent) :
+                        true
                 }
+            }
+        };
 
-                return processedItem;
-            });
-        }
-
-        // Prepare response based on scroll type
-        if (options.scrollType === 'infinite') {
-            return {
-                status: true,
-                code: 200,
-                message: 'Media retrieved successfully',
-                data: media,
-                error: null,
-                other: {
-                    infinite: {
-                        hasMore,
-                        nextCursor,
-                        count: media.length
-                    },
-                    appliedFilters: {
-                        includePending: options.includePending,
-                        includeProcessing: options.includeProcessing,
-                        quality: options.quality,
-                        since: options.since,
-                        status: options.status,
-                        scrollType: options.scrollType
-                    }
-                },
-            };
-        } else {
-            // Traditional pagination response
-            const page = Math.max(1, options.page || 1);
-            const totalPages = Math.ceil(filteredCount / limit);
-            const hasNext = page < totalPages;
-            const hasPrev = page > 1;
-
-            return {
-                status: true,
-                code: 200,
-                message: 'Media retrieved successfully',
-                data: media,
-                error: null,
-                other: {
-                    pagination: {
-                        page,
-                        limit,
-                        totalCount: filteredCount,
-                        totalPages,
-                        hasNext,
-                        hasPrev
-                    },
-                    appliedFilters: {
-                        includePending: options.includePending,
-                        includeProcessing: options.includeProcessing,
-                        quality: options.quality,
-                        since: options.since,
-                        status: options.status,
-                        scrollType: options.scrollType
-                    }
-                },
-            };
-        }
-
-    } catch (err: any) {
-        console.error(`[getMediaByAlbumService] Error:`, {
-            message: err.message,
-            stack: err.stack,
-            albumId,
-            options
-        });
-
+    } catch (error: any) {
+        logger.error('Error in getMediaByAlbumService:', error);
         return {
             status: false,
             code: 500,
             message: 'Failed to retrieve media',
             data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
-            },
-            other: null,
+            error: { message: error.message },
+            other: null
         };
     }
 };
 
+/**
+ * Update single media status
+ */
 export const updateMediaStatusService = async (
     mediaId: string,
-    newStatus: 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved',
+    status: string,
     options: {
         adminId?: string;
         reason?: string;
         hideReason?: string;
-        bulkUpdate?: boolean;
-        eventId?: string;
-    } = {}
+    }
 ): Promise<ServiceResponse<any>> => {
     try {
-        console.log(newStatus, 'newStatusnewStatusnewStatus')
         // Validate mediaId
-        if (!mongoose.Types.ObjectId.isValid(mediaId)) {
+        if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
             return {
                 status: false,
                 code: 400,
                 message: 'Invalid media ID',
                 data: null,
-                error: { message: 'Invalid ObjectId format' },
-                other: null,
+                error: { message: 'A valid media ID is required' },
+                other: null
             };
         }
 
-        // Find the media item first
+        // Find the media item
         const media = await Media.findById(mediaId);
         if (!media) {
             return {
@@ -732,105 +448,41 @@ export const updateMediaStatusService = async (
                 message: 'Media not found',
                 data: null,
                 error: { message: 'Media with the provided ID does not exist' },
-                other: null,
+                other: null
             };
         }
 
-        // Store previous status for response/logging
-        const previousStatus = media.approval.status;
+        const previousStatus = media.approval?.status;
 
-        // Prepare update object
+        // Update the media status
         const updateObj: any = {
+            'approval.status': status,
             updated_at: new Date()
         };
 
-        // Handle different status changes
-        switch (newStatus) {
-            case 'approved':
-                updateObj['approval.status'] = 'approved';
-                updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
-                updateObj['approval.approved_at'] = new Date();
-                updateObj['approval.rejection_reason'] = '';
-                updateObj['approval.auto_approval_reason'] = null;
-                break;
-
-            case 'auto_approved':
-                updateObj['approval.status'] = 'auto_approved';
-                updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
-                updateObj['approval.approved_at'] = new Date();
-                updateObj['approval.rejection_reason'] = '';
-                updateObj['approval.auto_approval_reason'] = 'admin_action';
-                break;
-
-            case 'pending':
-                updateObj['approval.status'] = 'pending';
-                updateObj['approval.approved_by'] = null;
-                updateObj['approval.approved_at'] = null;
-                updateObj['approval.rejection_reason'] = '';
-                updateObj['approval.auto_approval_reason'] = null;
-                break;
-
-            case 'rejected':
-                updateObj['approval.status'] = 'rejected';
-                updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
-                updateObj['approval.approved_at'] = null;
-                updateObj['approval.rejection_reason'] = options.reason || 'No reason provided';
-                updateObj['approval.auto_approval_reason'] = null;
-                break;
-
-            case 'hidden':
-                updateObj['approval.status'] = 'hidden';
-                updateObj['content_flags.inappropriate'] = true;
-                updateObj['approval.rejection_reason'] = options.hideReason || 'Content hidden by admin';
-                if (options.adminId) {
-                    updateObj['approval.approved_by'] = new mongoose.Types.ObjectId(options.adminId);
-                }
-                break;
-
-            default:
-                return {
-                    status: false,
-                    code: 400,
-                    message: 'Invalid status provided',
-                    data: null,
-                    error: { message: 'Status must be one of: approved, pending, rejected, hidden, auto_approved' },
-                    other: null,
-                };
+        if (status === 'approved' || status === 'auto_approved') {
+            updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
+            updateObj['approval.approved_at'] = new Date();
+            updateObj['approval.rejection_reason'] = '';
+        } else if (status === 'rejected') {
+            updateObj['approval.rejection_reason'] = options.reason || 'Rejected by admin';
+            updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
+        } else if (status === 'hidden') {
+            updateObj['approval.rejection_reason'] = options.hideReason || 'Hidden by admin';
+            updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
         }
 
-        console.log('Updating media status:', {
-            mediaId,
-            previousStatus,
-            newStatus,
-            updateObj
-        });
-
-        // Update the media
         const updatedMedia = await Media.findByIdAndUpdate(
             mediaId,
             updateObj,
-            {
-                new: true,
-                runValidators: true,
-                lean: true
-            }
+            { new: true, lean: true }
         );
 
-        if (!updatedMedia) {
-            return {
-                status: false,
-                code: 500,
-                message: 'Failed to update media status',
-                data: null,
-                error: { message: 'Update operation failed' },
-                other: null,
-            };
-        }
-
-        console.log('Media status updated successfully:', {
+        logger.info('Media status updated:', {
             mediaId,
             previousStatus,
-            newStatus: updatedMedia.approval.status
+            newStatus: status,
+            adminId: options.adminId
         });
 
         return {
@@ -841,56 +493,46 @@ export const updateMediaStatusService = async (
             error: null,
             other: {
                 previousStatus,
-                newStatus: updatedMedia.approval.status,
-                updatedAt: updatedMedia.updated_at,
-                updatedBy: options.adminId || 'system'
-            },
+                newStatus: status
+            }
         };
 
-    } catch (err: any) {
-        console.error(`[updateMediaStatusService] Error:`, {
-            message: err.message,
-            stack: err.stack,
-            mediaId,
-            newStatus,
-            options
-        });
-
+    } catch (error: any) {
+        logger.error('Error in updateMediaStatusService:', error);
         return {
             status: false,
             code: 500,
             message: 'Failed to update media status',
             data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
-            },
-            other: null,
+            error: { message: error.message },
+            other: null
         };
     }
 };
 
-// NEW: Bulk status update service
+/**
+ * Bulk update media status
+ */
 export const bulkUpdateMediaStatusService = async (
     eventId: string,
     mediaIds: string[],
-    newStatus: 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved',
+    status: string,
     options: {
         adminId?: string;
         reason?: string;
         hideReason?: string;
-    } = {}
+    }
 ): Promise<ServiceResponse<any>> => {
     try {
         // Validate eventId
-        if (!mongoose.Types.ObjectId.isValid(eventId)) {
+        if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
             return {
                 status: false,
                 code: 400,
                 message: 'Invalid event ID',
                 data: null,
-                error: { message: 'Invalid ObjectId format' },
-                other: null,
+                error: { message: 'A valid event ID is required' },
+                other: null
             };
         }
 
@@ -903,44 +545,26 @@ export const bulkUpdateMediaStatusService = async (
                 message: 'No valid media IDs provided',
                 data: null,
                 error: { message: 'At least one valid media ID is required' },
-                other: null,
+                other: null
             };
         }
 
-        // Prepare update object (similar to single update)
+        // Prepare update object
         const updateObj: any = {
+            'approval.status': status,
             updated_at: new Date()
         };
 
-        switch (newStatus) {
-            case 'approved':
-                updateObj['approval.status'] = 'approved';
-                updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
-                updateObj['approval.approved_at'] = new Date();
-                updateObj['approval.rejection_reason'] = '';
-                break;
-
-            case 'rejected':
-                updateObj['approval.status'] = 'rejected';
-                updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
-                updateObj['approval.approved_at'] = null;
-                updateObj['approval.rejection_reason'] = options.reason || 'Bulk rejection';
-                break;
-
-            case 'hidden':
-                updateObj['approval.status'] = 'hidden';
-                updateObj['content_flags.inappropriate'] = true;
-                updateObj['approval.rejection_reason'] = options.hideReason || 'Bulk hidden by admin';
-                break;
-
-            case 'pending':
-                updateObj['approval.status'] = 'pending';
-                updateObj['approval.approved_by'] = null;
-                updateObj['approval.approved_at'] = null;
-                updateObj['approval.rejection_reason'] = '';
-                break;
-
-            // Add other cases as needed
+        if (status === 'approved' || status === 'auto_approved') {
+            updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
+            updateObj['approval.approved_at'] = new Date();
+            updateObj['approval.rejection_reason'] = '';
+        } else if (status === 'rejected') {
+            updateObj['approval.rejection_reason'] = options.reason || 'Bulk rejected by admin';
+            updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
+        } else if (status === 'hidden') {
+            updateObj['approval.rejection_reason'] = options.hideReason || 'Bulk hidden by admin';
+            updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
         }
 
         // Perform bulk update
@@ -952,11 +576,11 @@ export const bulkUpdateMediaStatusService = async (
             updateObj
         );
 
-        console.log('Bulk update completed:', {
+        logger.info('Bulk media status update completed:', {
             eventId,
             mediaCount: validMediaIds.length,
             modifiedCount: result.modifiedCount,
-            newStatus
+            status
         });
 
         return {
@@ -969,188 +593,160 @@ export const bulkUpdateMediaStatusService = async (
             },
             error: null,
             other: {
-                newStatus,
-                updatedBy: options.adminId || 'system',
-                updatedAt: new Date()
-            },
+                newStatus: status,
+                updatedBy: options.adminId || 'system'
+            }
         };
 
-    } catch (err: any) {
-        console.error(`[bulkUpdateMediaStatusService] Error:`, {
-            message: err.message,
-            eventId,
-            mediaIds,
-            newStatus
-        });
-
+    } catch (error: any) {
+        logger.error('Error in bulkUpdateMediaStatusService:', error);
         return {
             status: false,
             code: 500,
             message: 'Failed to bulk update media status',
             data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
-            },
-            other: null,
+            error: { message: error.message },
+            other: null
         };
     }
 };
 
-
 /**
- * Delete a media item and update user usage
+ * Delete a media item
  */
 export const deleteMediaService = async (
-    media_id: string,
-    user_id: string
+    mediaId: string,
+    userId: string
 ): Promise<ServiceResponse<any>> => {
     try {
-        logger.info(`Attempting to delete media ${media_id} for admin user ${user_id}`);
-
         // Validate inputs
-        if (!media_id || !user_id) {
-            logger.error(`Invalid inputs - media_id: ${media_id}, user_id: ${user_id}`);
+        if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
             return {
                 status: false,
                 code: 400,
-                message: "Invalid media ID or user ID",
+                message: 'Invalid media ID',
                 data: null,
-                error: { message: "Media ID and User ID are required" },
-                other: null,
+                error: { message: 'A valid media ID is required' },
+                other: null
             };
         }
 
-        // Find the media to get its size before deletion
-        logger.info(`Finding media with ID: ${media_id}`);
-        const media = await Media.findById(media_id);
-
+        // Find the media item
+        const media = await Media.findById(mediaId);
         if (!media) {
-            logger.warn(`Media not found: ${media_id}`);
             return {
                 status: false,
                 code: 404,
-                message: "Media not found",
+                message: 'Media not found',
                 data: null,
-                error: { message: "Media item does not exist or was already deleted" },
-                other: null,
+                error: { message: 'Media item does not exist' },
+                other: null
             };
         }
 
-        logger.info(`Media found: ${media._id}`);
-
-        // Get the media size or default to 0 if not recorded
-        const mediaSizeMB = media.size_mb || 0;
-        logger.info(`Media size: ${mediaSizeMB}MB`);
-
-        // Delete from imagekit if needed (this would require parsing the URL to get the file ID)
-        // Example: const fileId = getFileIdFromUrl(media.url);
-        // await imagekit.deleteFile(fileId);
-
         // Delete the media record
-        logger.info(`Deleting media record: ${media_id}`);
-        await Media.findByIdAndDelete(media_id);
-        logger.info(`Media record deleted successfully: ${media_id}`);
+        await Media.findByIdAndDelete(mediaId);
 
-        // Update user usage metrics (if you want to update the original uploader's usage)
-        try {
-            if (mediaSizeMB > 0 && media.uploaded_by) {
-                logger.info(`Updating usage for original uploader ${media.uploaded_by} - Removing ${mediaSizeMB}MB`);
-                await updateUsageForDelete(media.uploaded_by.toString(), mediaSizeMB);
-                logger.info(`Updated usage for user ${media.uploaded_by} - Removed ${mediaSizeMB}MB`);
-            }
-        } catch (usageError: any) {
-            logger.error(`Failed to update usage for user ${media.uploaded_by}:`, usageError);
-            // Don't fail the deletion if usage tracking fails
-        }
-
-        logger.info(`Media deletion completed successfully: ${media_id}`);
-        return {
-            status: true,
-            code: 200,
-            message: "Media deleted successfully",
-            data: { id: media_id },
-            error: null,
-            other: null,
-        };
-    } catch (err: any) {
-        logger.error(`Error in deleteMediaService:`, {
-            error: err.message,
-            stack: err.stack,
-            media_id,
-            user_id
+        logger.info('Media deleted successfully:', {
+            mediaId,
+            deletedBy: userId
         });
 
         return {
+            status: true,
+            code: 200,
+            message: 'Media deleted successfully',
+            data: { id: mediaId },
+            error: null,
+            other: null
+        };
+
+    } catch (error: any) {
+        logger.error('Error in deleteMediaService:', error);
+        return {
             status: false,
             code: 500,
-            message: "Failed to delete media",
+            message: 'Failed to delete media',
             data: null,
-            error: {
-                message: err.message,
-                stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-            },
-            other: null,
+            error: { message: error.message },
+            other: null
         };
     }
 };
 
+/**
+ * Get guest media with enhanced variant support
+ */
 export const getGuestMediaService = async (
     shareToken: string,
     userEmail?: string,
     authToken?: string,
-    options: any = {}
+    options: MediaQueryOptions = {},
+    userAgent?: string
 ): Promise<ServiceResponse<any>> => {
     try {
-        // Validate the share token first
-        const validation = await validateGuestShareToken(shareToken, userEmail, authToken);
-
-        if (!validation.valid) {
+        // Find event by share token
+        const event = await Event.findOne({ share_token: shareToken });
+        if (!event) {
             return {
                 status: false,
-                code: validation.requiresAuth ? 401 : 403,
-                message: validation.reason || "Access denied",
+                code: 404,
+                message: 'Invalid share token',
                 data: null,
-                error: { message: validation.reason },
-                other: {
-                    requires_auth: validation.requiresAuth || false,
-                    visibility: validation.visibility
-                }
+                error: { message: 'Event not found' },
+                other: null
             };
         }
 
-        // Now get media using the validated event_id
-        const mediaOptions = {
+        // Check if event allows viewing
+        if (!event.permissions?.can_view) {
+            return {
+                status: false,
+                code: 403,
+                message: 'Viewing not allowed',
+                data: null,
+                error: { message: 'This event does not allow viewing photos' },
+                other: null
+            };
+        }
+
+        // Get media using the event service with guest-friendly options
+        const guestOptions: MediaQueryOptions = {
             ...options,
-            // For guests, only show approved content
-            status: 'approved',
-            // DON'T set includeProcessing: false - let it default to include all processing states
-            // DON'T set includePending: false - status: 'approved' already handles this
+            // Only show approved content to guests
+            includeProcessing: false,
+            includePending: false,
+            status: 'approved'
         };
 
-        // Use your existing getMediaByEventService
-        const mediaResponse = await getMediaByEventService(validation.event_id!, mediaOptions);
+        const mediaResponse = await getMediaByEventService(
+            event._id.toString(),
+            guestOptions,
+            userAgent
+        );
 
         if (mediaResponse.status) {
-            // Add guest context to the response
+            // Add guest context to response
             mediaResponse.other = {
-                ...mediaResponse.other, // Keep existing pagination/infinite scroll data
+                ...mediaResponse.other,
                 guest_access: true,
                 share_token: shareToken,
-                permissions: validation.permissions,
-                event_data: validation.eventData,
-                visibility: validation.visibility
+                event_info: {
+                    id: event._id,
+                    title: event.title,
+                    permissions: event.permissions
+                }
             };
         }
 
         return mediaResponse;
 
-    } catch (error) {
-        console.error('Error in getGuestMediaService:', error);
+    } catch (error: any) {
+        logger.error('Error in getGuestMediaService:', error);
         return {
             status: false,
             code: 500,
-            message: "Failed to get guest media",
+            message: 'Failed to get guest media',
             data: null,
             error: { message: error.message },
             other: null
