@@ -681,12 +681,14 @@ export const getGuestMediaService = async (
     shareToken: string,
     userEmail?: string,
     authToken?: string,
-    options: MediaQueryOptions = {},
-    userAgent?: string
-): Promise<ServiceResponse<any>> => {
+    options: any = {}
+): Promise<any> => {
     try {
-        // Find event by share token
-        const event = await Event.findOne({ share_token: shareToken });
+        // OPTIMIZED: Cache-friendly event lookup
+        const event = await Event.findOne({ share_token: shareToken })
+            .select('_id title permissions share_token')
+            .lean();
+
         if (!event) {
             return {
                 status: false,
@@ -698,7 +700,7 @@ export const getGuestMediaService = async (
             };
         }
 
-        // Check if event allows viewing
+        // QUICK permission check
         if (!event.permissions?.can_view) {
             return {
                 status: false,
@@ -710,31 +712,30 @@ export const getGuestMediaService = async (
             };
         }
 
-        // Get media using the event service with guest-friendly options
-        const guestOptions: MediaQueryOptions = {
+        // OPTIMIZED: Guest-only options for speed
+        const guestOptions = {
             ...options,
-            // Only show approved content to guests
             includeProcessing: false,
             includePending: false,
-            status: 'approved'
+            status: 'approved', // ONLY approved content
+            quality: 'thumbnail', // ALWAYS thumbnail
+            format: 'jpeg' // FASTER than auto
         };
 
+        // Use optimized service
         const mediaResponse = await getMediaByEventService(
             event._id.toString(),
-            guestOptions,
-            userAgent
+            guestOptions
         );
 
         if (mediaResponse.status) {
-            // Add guest context to response
+            // MINIMAL additional data
             mediaResponse.other = {
                 ...mediaResponse.other,
                 guest_access: true,
-                share_token: shareToken,
                 event_info: {
                     id: event._id,
-                    title: event.title,
-                    permissions: event.permissions
+                    title: event.title
                 }
             };
         }

@@ -179,168 +179,194 @@ class GuestMediaUploadService {
     ): Promise<GuestUploadResult> {
         try {
             const fileSizeMB = bytesToMB(file.size);
-
-            // Create media record first (with processing status)
-            const media = new Media({
-                url: '', // Will be updated after processing
-                type: 'image',
-                album_id: new mongoose.Types.ObjectId(albumId),
-                event_id: new mongoose.Types.ObjectId(eventId),
-                uploaded_by: authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : null,
-                guest_uploader: !authenticatedUserId ? guestUploaderInfo : null,
-                uploader_type: authenticatedUserId ? 'registered_user' : 'guest',
-                original_filename: file.originalname,
-                size_mb: fileSizeMB,
-                format: file.mimetype.split('/')[1],
-                processing: {
-                    status: 'processing',
-                    started_at: new Date(),
-                    completed_at: null,
-                    processing_time_ms: 0,
-                    variants_generated: false,
-                    variants_count: 0,
-                    total_variants_size_mb: 0,
-                    error_message: '',
-                    retry_count: 0
-                },
-                approval: {
-                    status: approvalConfig.status,
-                    auto_approval_reason: approvalConfig.autoApprovalReason,
-                    approved_at: approvalConfig.approvedAt,
-                    approved_by: approvalConfig.approvedBy,
-                    rejection_reason: ''
-                },
-                upload_context: {
-                    method: 'guest_upload',
-                    ip_address: guestUploaderInfo.session_id.split('_')[0] || '',
-                    user_agent: guestUploaderInfo.device_fingerprint || '',
-                    upload_session_id: guestUploaderInfo.session_id || '',
-                    referrer_url: guestUploaderInfo.platform_info?.referrer || '',
-                    platform: 'web'
-                }
-            });
-
-            await media.save();
-            const mediaId = media._id.toString();
+            let media: any;
 
             try {
-                // Process image and generate variants
-                const processingResult = await imageProcessingService.processImage(file, eventId, mediaId);
-
-                // Update media with processing results matching your model structure
-                media.url = processingResult.original.url;
-                media.image_variants = {
-                    original: processingResult.original,
-                    small: processingResult.variants.small,
-                    medium: processingResult.variants.medium,
-                    large: processingResult.variants.large
-                };
-
-                // Update metadata
-                media.metadata = {
-                    width: processingResult.original.width || 0,
-                    height: processingResult.original.height || 0,
-                    duration: 0,
-                    aspect_ratio: processingResult.original.height && processingResult.original.width ?
-                        processingResult.original.height / processingResult.original.width : 1,
-                    color_profile: '',
-                    has_transparency: false,
-                    timestamp: new Date(),
-                    device_info: {
-                        brand: '',
-                        model: '',
-                        os: ''
-                    },
-                    location: {
-                        latitude: null,
-                        longitude: null,
-                        address: ''
-                    },
-                    camera_settings: {
-                        iso: null,
-                        aperture: '',
-                        shutter_speed: '',
-                        focal_length: ''
-                    }
-                };
-
-                // Update processing status
-                const processingStartTime = media.processing.started_at?.getTime() || Date.now();
-                media.processing = {
-                    status: 'completed',
-                    started_at: media.processing.started_at,
-                    completed_at: new Date(),
-                    processing_time_ms: Date.now() - processingStartTime,
-                    variants_generated: true,
-                    variants_count: 6, // 3 sizes × 2 formats
-                    total_variants_size_mb: this.calculateTotalVariantsSize(processingResult.variants),
-                    error_message: '',
-                    retry_count: 0
-                };
-
-                await media.save();
-
-                logger.info(`✅ Guest image upload completed`, {
-                    mediaId,
-                    fileName: file.originalname,
-                    processingTime: media.processing.processing_time_ms + 'ms',
-                    approvalStatus: media.approval.status
+                // OPTION 1: Upload to ImageKit first to get a valid URL
+                logger.info('📤 Uploading file to ImageKit...');
+                const fileBuffer = await fs.readFile(file.path);
+                const tempUploadResult = await imagekit.upload({
+                    file: fileBuffer,
+                    fileName: `temp_${Date.now()}_${file.originalname}`,
+                    folder: `/events/${eventId}/images/temp`,
                 });
 
-                return {
-                    success: true,
-                    media_id: mediaId,
-                    url: media.url,
-                    approval_status: media.approval.status,
-                    message: 'Image uploaded and processed successfully'
-                };
+                logger.info('✅ File uploaded to ImageKit:', {
+                    url: tempUploadResult.url,
+                    fileId: tempUploadResult.fileId
+                });
 
-            } catch (processingError: any) {
-                logger.error(`❌ Guest image processing failed:`, processingError);
+                // Now create media record with the valid URL
+                media = new Media({
+                    url: tempUploadResult.url, // ← NOW WE HAVE A VALID URL
+                    type: 'image',
+                    album_id: new mongoose.Types.ObjectId(albumId),
+                    event_id: new mongoose.Types.ObjectId(eventId),
+                    uploaded_by: authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : null,
+                    guest_uploader: !authenticatedUserId ? guestUploaderInfo : null,
+                    uploader_type: authenticatedUserId ? 'registered_user' : 'guest',
+                    original_filename: file.originalname,
+                    size_mb: fileSizeMB,
+                    format: file.mimetype.split('/')[1],
+                    processing: {
+                        status: 'processing',
+                        started_at: new Date(),
+                        completed_at: null,
+                        processing_time_ms: 0,
+                        variants_generated: false,
+                        variants_count: 0,
+                        total_variants_size_mb: 0,
+                        error_message: '',
+                        retry_count: 0
+                    },
+                    approval: {
+                        status: approvalConfig.status,
+                        auto_approval_reason: approvalConfig.autoApprovalReason,
+                        approved_at: approvalConfig.approvedAt,
+                        approved_by: approvalConfig.approvedBy,
+                        rejection_reason: ''
+                    },
+                    upload_context: {
+                        method: 'guest_upload',
+                        ip_address: guestUploaderInfo.session_id.split('_')[0] || '',
+                        user_agent: guestUploaderInfo.device_fingerprint || '',
+                        upload_session_id: guestUploaderInfo.session_id || '',
+                        referrer_url: guestUploaderInfo.platform_info?.referrer || '',
+                        platform: 'web'
+                    }
+                });
 
-                // Update processing status with error
-                const processingStartTime = media.processing.started_at?.getTime() || Date.now();
-                media.processing = {
-                    status: 'failed',
-                    started_at: media.processing.started_at,
-                    completed_at: new Date(),
-                    processing_time_ms: Date.now() - processingStartTime,
-                    variants_generated: false,
-                    variants_count: 0,
-                    total_variants_size_mb: 0,
-                    error_message: processingError.message,
-                    retry_count: 0
-                };
+                await media.save();
+                const mediaId = media._id.toString();
 
-                // Try to upload original to ImageKit as fallback
+                logger.info('✅ Media record created successfully:', {
+                    mediaId,
+                    url: media.url
+                });
+
                 try {
-                    const fileBuffer = await fs.readFile(file.path);
-                    const uploadResult = await imagekit.upload({
-                        file: fileBuffer,
-                        fileName: `${mediaId}_original_${file.originalname}`,
-                        folder: `/events/${eventId}/images`,
-                    });
-                    media.url = uploadResult.url;
+                    // Process image and generate variants
+                    logger.info('🔄 Starting image processing...');
+                    const processingResult = await imageProcessingService.processImage(file, eventId, mediaId);
+
+                    // Update media with processing results
+                    media.url = processingResult.original.url; // Replace temp URL with processed URL
+                    media.image_variants = {
+                        original: processingResult.original,
+                        small: processingResult.variants.small,
+                        medium: processingResult.variants.medium,
+                        large: processingResult.variants.large
+                    };
+
+                    // Update metadata
+                    media.metadata = {
+                        width: processingResult.original.width || 0,
+                        height: processingResult.original.height || 0,
+                        duration: 0,
+                        aspect_ratio: processingResult.original.height && processingResult.original.width ?
+                            processingResult.original.height / processingResult.original.width : 1,
+                        color_profile: '',
+                        has_transparency: false,
+                        timestamp: new Date(),
+                        device_info: {
+                            brand: '',
+                            model: '',
+                            os: ''
+                        },
+                        location: {
+                            latitude: null,
+                            longitude: null,
+                            address: ''
+                        },
+                        camera_settings: {
+                            iso: null,
+                            aperture: '',
+                            shutter_speed: '',
+                            focal_length: ''
+                        }
+                    };
+
+                    // Update processing status
+                    const processingStartTime = media.processing.started_at?.getTime() || Date.now();
+                    media.processing = {
+                        status: 'completed',
+                        started_at: media.processing.started_at,
+                        completed_at: new Date(),
+                        processing_time_ms: Date.now() - processingStartTime,
+                        variants_generated: true,
+                        variants_count: 6,
+                        total_variants_size_mb: this.calculateTotalVariantsSize(processingResult.variants),
+                        error_message: '',
+                        retry_count: 0
+                    };
+
                     await media.save();
+
+                    // Clean up temp file from ImageKit if different from final URL
+                    if (tempUploadResult.url !== processingResult.original.url) {
+                        try {
+                            await imagekit.deleteFile(tempUploadResult.fileId);
+                            logger.info('🗑️ Cleaned up temporary file from ImageKit');
+                        } catch (deleteError) {
+                            logger.warn('Failed to delete temp file:', deleteError);
+                        }
+                    }
+
+                    logger.info(`✅ Guest image upload completed`, {
+                        mediaId,
+                        fileName: file.originalname,
+                        processingTime: media.processing.processing_time_ms + 'ms',
+                        approvalStatus: media.approval.status,
+                        finalUrl: media.url
+                    });
 
                     return {
                         success: true,
                         media_id: mediaId,
                         url: media.url,
                         approval_status: media.approval.status,
+                        message: 'Image uploaded and processed successfully'
+                    };
+
+                } catch (processingError: any) {
+                    logger.error(`❌ Guest image processing failed:`, processingError);
+
+                    // Update processing status with error but keep the temp URL
+                    const processingStartTime = media.processing.started_at?.getTime() || Date.now();
+                    media.processing = {
+                        status: 'failed',
+                        started_at: media.processing.started_at,
+                        completed_at: new Date(),
+                        processing_time_ms: Date.now() - processingStartTime,
+                        variants_generated: false,
+                        variants_count: 0,
+                        total_variants_size_mb: 0,
+                        error_message: processingError.message,
+                        retry_count: 0
+                    };
+
+                    await media.save();
+
+                    // Return success with the temp URL (better than complete failure)
+                    return {
+                        success: true,
+                        media_id: media._id.toString(),
+                        url: media.url, // This is still the temp URL but valid
+                        approval_status: media.approval.status,
                         message: 'Image uploaded but processing failed - original image saved'
                     };
-                } catch (uploadError) {
-                    logger.error('Failed to upload original image after processing failure:', uploadError);
-                    return {
-                        success: false,
-                        error: 'Image processing and upload failed'
-                    };
                 }
+
+            } catch (uploadError: any) {
+                logger.error('❌ Failed to upload to ImageKit:', uploadError);
+                return {
+                    success: false,
+                    error: 'Failed to upload image to storage'
+                };
             }
 
         } catch (error: any) {
-            logger.error('Guest image upload error:', error);
+            logger.error('❌ Guest image upload error:', error);
             return {
                 success: false,
                 error: 'Failed to upload image'
@@ -349,7 +375,6 @@ class GuestMediaUploadService {
             await cleanupFile(file);
         }
     }
-
     /**
      * Process guest video upload (simplified)
      */

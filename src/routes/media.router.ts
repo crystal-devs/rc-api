@@ -15,7 +15,7 @@ import {
     getMediaVariantsController,
     getBatchOptimizedUrlsController
 } from "@controllers/media.controller";
-import { uploadMediaController } from "@controllers/upload.controller";
+import { uploadMediaController, uploadMultipleMediaController } from "@controllers/upload.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import {
     checkStorageLimitMiddleware,
@@ -53,6 +53,16 @@ mediaRouter.post(
     checkStorageLimitMiddleware as RequestHandler,
     checkEventPhotoLimitMiddleware as RequestHandler,
     uploadMediaController
+);
+
+mediaRouter.post(
+    "/upload/multiple",
+    authMiddleware,
+    upload.array('images', 10), // Allow up to 10 files with field name 'images'
+    checkFileSizeLimitMiddleware as RequestHandler,
+    checkStorageLimitMiddleware as RequestHandler,
+    checkEventPhotoLimitMiddleware as RequestHandler,
+    uploadMultipleMediaController // New controller
 );
 
 // Cover image upload (always requires auth)

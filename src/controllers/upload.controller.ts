@@ -204,10 +204,201 @@ export const uploadMediaController: RequestHandler = async (
     }
 };
 
+export const uploadMultipleMediaController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const files = (req.files as Express.Multer.File[]) || [];
+        let { album_id, event_id } = req.body;
+        const user_id = req.user._id;
+
+        logger.info('📤 Multiple media upload request received', {
+            fileCount: files.length,
+            files: files.map(f => `${f.originalname} (${f.size} bytes)`),
+            album_id,
+            event_id,
+            user_id: user_id?.toString()
+        });
+
+        // Validation
+        if (!files || files.length === 0) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: "No files provided",
+                data: null,
+                error: { message: "At least one file is required" },
+                other: null
+            });
+            return;
+        }
+
+        if (!event_id) {
+            // Cleanup all files
+            await Promise.all(files.map(file => cleanupFile(file)));
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: "Missing event_id",
+                data: null,
+                error: { message: "event_id is required" },
+                other: null
+            });
+            return;
+        }
+
+        // Validate event_id format
+        if (!mongoose.Types.ObjectId.isValid(event_id)) {
+            await Promise.all(files.map(file => cleanupFile(file)));
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: "Invalid event_id format",
+                data: null,
+                error: { message: "event_id must be a valid ObjectId" },
+                other: null
+            });
+            return;
+        }
+
+        // Handle default album
+        if (!album_id) {
+            const defaultAlbumResponse = await getOrCreateDefaultAlbum(event_id, user_id.toString());
+            if (!defaultAlbumResponse.status || !defaultAlbumResponse.data) {
+                await Promise.all(files.map(file => cleanupFile(file)));
+                res.status(500).json({
+                    status: false,
+                    code: 500,
+                    message: "Failed to get or create default album",
+                    data: null,
+                    error: { message: "Could not create or find default album" },
+                    other: null
+                });
+                return;
+            }
+            album_id = defaultAlbumResponse.data._id.toString();
+        }
+
+        // Process all files
+        const results = [];
+        const errors = [];
+
+        for (const file of files) {
+            try {
+                // Validate file type
+                const fileType = getFileType(file);
+                if (!fileType) {
+                    await cleanupFile(file);
+                    errors.push({
+                        filename: file.originalname,
+                        error: "Unsupported file type"
+                    });
+                    continue;
+                }
+
+                // For images, validate format support
+                if (fileType === 'image' && !isValidImageFormat(file)) {
+                    await cleanupFile(file);
+                    errors.push({
+                        filename: file.originalname,
+                        error: "Unsupported image format"
+                    });
+                    continue;
+                }
+
+                // Process upload based on file type
+                let response: ServiceResponse<MediaCreationType>;
+                if (fileType === 'image') {
+                    response = await uploadImageWithProcessing(file, user_id.toString(), album_id, event_id, req);
+                } else {
+                    response = await uploadVideoService(file, user_id.toString(), album_id, event_id, req);
+                }
+
+                if (response.status) {
+                    results.push({
+                        filename: file.originalname,
+                        success: true,
+                        data: response.data
+                    });
+                } else {
+                    errors.push({
+                        filename: file.originalname,
+                        error: response.message || 'Upload failed'
+                    });
+                }
+
+            } catch (fileError: any) {
+                logger.error(`Error uploading ${file.originalname}:`, fileError);
+                await cleanupFile(file);
+                errors.push({
+                    filename: file.originalname,
+                    error: fileError.message || 'Upload failed'
+                });
+            }
+        }
+
+        // Calculate summary
+        const successCount = results.length;
+        const failCount = errors.length;
+
+        logger.info('📊 Multiple upload summary:', {
+            total: files.length,
+            success: successCount,
+            failed: failCount
+        });
+
+        // Send response
+        const response = {
+            status: successCount > 0,
+            code: successCount > 0 ? 200 : 400,
+            message: failCount === 0 ?
+                `All ${successCount} file(s) uploaded successfully!` :
+                successCount > 0 ?
+                    `${successCount} file(s) uploaded, ${failCount} failed` :
+                    'All uploads failed',
+            data: {
+                results,
+                errors: errors.length > 0 ? errors : undefined,
+                summary: {
+                    total: files.length,
+                    success: successCount,
+                    failed: failCount
+                }
+            },
+            error: errors.length > 0 ? { message: 'Some uploads failed', details: errors } : null,
+            other: {
+                event_id,
+                album_id
+            }
+        };
+
+        res.status(response.code).json(response);
+
+    } catch (error: any) {
+        logger.error('Multiple upload controller error:', error);
+
+        // Cleanup all files on error
+        if (req.files) {
+            const files = req.files as Express.Multer.File[];
+            await Promise.all(files.map(file => cleanupFile(file).catch(() => { })));
+        }
+
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Multiple upload failed',
+            data: null,
+            error: { message: 'Internal server error occurred' },
+            other: null
+        });
+    }
+};
+
 /**
  * Upload and process image with all variants
  */
-
 export const uploadImageWithProcessing = async (
     file: Express.Multer.File,
     user_id: string,

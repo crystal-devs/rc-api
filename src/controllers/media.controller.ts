@@ -758,7 +758,7 @@ export const getGuestMediaController: RequestHandler = async (
             context
         } = req.query;
 
-        // Validate shareToken
+        // QUICK validation
         if (!shareToken) {
             res.status(400).json({
                 status: false,
@@ -771,42 +771,46 @@ export const getGuestMediaController: RequestHandler = async (
             return;
         }
 
-        // Parse and validate options with smart defaults for guests
+        // OPTIMIZED: Guest-friendly defaults for speed
         const options = {
-            page: page ? parseInt(page as string) : undefined,
-            limit: limit ? parseInt(limit as string) : undefined,
+            page: parseInt(page as string) || 1,
+            limit: Math.min(parseInt(limit as string) || 20, 30), // SMALLER limit for guests
             since: since as string,
             cursor: cursor as string,
-            scrollType: scrollType as 'pagination' | 'infinite',
-            quality: quality as 'small' | 'medium' | 'large' | 'original' | 'thumbnail' | 'display' | 'full' || 'medium',
-            format: format as 'webp' | 'jpeg' | 'auto' || 'auto',
-            context: context as 'mobile' | 'desktop' | 'lightbox' || detectContextFromUserAgent(req.get('User-Agent'))
+            scrollType: (scrollType as string) || 'pagination',
+            quality: (quality as string) || 'thumbnail', // ALWAYS thumbnail for guests
+            format: (format as string) || 'jpeg', // JPEG is faster than auto-detection
+            context: (context as string) || 'mobile'
         };
 
-        logger.info(`🔗 Guest accessing media via share token`, {
-            shareToken: shareToken.substring(0, 8) + '...', // Log partial token for security
-            userEmail: userEmail ? 'provided' : 'not provided',
-            hasAuthToken: !!authToken,
-            options: {
-                ...options,
-                user_agent: req.get('User-Agent')?.substring(0, 100)
-            }
+        logger.info(`🔗 Guest accessing media`, {
+            shareToken: shareToken.substring(0, 8) + '...',
+            limit: options.limit,
+            quality: options.quality
         });
 
-        const userAgent = req.get('User-Agent');
+        // OPTIMIZED: Skip user agent processing
         const response = await getGuestMediaService(
             shareToken,
             userEmail as string,
             authToken as string,
-            options,
-            userAgent
+            options
         );
 
         res.status(response.code).json(response);
 
     } catch (error: any) {
         logger.error('Error in getGuestMediaController:', error);
-        next(error);
+        
+        // FAST error response
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Failed to get guest media',
+            data: null,
+            error: { message: error.message },
+            other: null
+        });
     }
 };
 
