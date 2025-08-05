@@ -18,6 +18,8 @@ import { Event } from "@models/event.model";
 import { Media } from "@models/media.model";
 import guestMediaUploadService from "@services/guest.service";
 import { getOptimizedImageUrlForItem } from "@utils/file.util";
+import { getWebSocketService } from "@services/websocket.service";
+import { MediaStatusUpdatePayload } from "types/websocket.types";
 
 // Enhanced interface for authenticated requests
 interface AuthenticatedRequest extends Request {
@@ -291,6 +293,70 @@ export const updateMediaStatusController: RequestHandler = async (
             reason,
             hideReason: hide_reason
         });
+
+        if (response.status && response.data) {
+            try {
+                const webSocketService = getWebSocketService();
+                const eventRoom = `event_${response.data.event_id.toString()}`;
+
+                // Get the number of clients in the event room for debugging
+                const roomClients = await webSocketService.io.in(eventRoom).allSockets();
+                const clientCount = roomClients.size;
+
+                // Create guest visibility info
+                const guestVisibility = {
+                    wasVisible: ['approved', 'auto_approved'].includes(response.other?.previousStatus || ''),
+                    isVisible: ['approved', 'auto_approved'].includes(status),
+                    changed: true
+                };
+
+                // Create WebSocket payload
+                const statusUpdatePayload: MediaStatusUpdatePayload & {
+                    guestVisibility?: {
+                        wasVisible: boolean;
+                        isVisible: boolean;
+                        changed: boolean;
+                    };
+                } = {
+                    mediaId: media_id,
+                    eventId: response.data.event_id.toString(),
+                    previousStatus: response.other?.previousStatus || 'unknown',
+                    newStatus: status,
+                    updatedBy: {
+                        id: userId,
+                        name: 'Admin',
+                        type: 'admin'
+                    },
+                    updatedAt: new Date(),
+                    media: {
+                        url: response.data.url || response.data.image_variants?.medium?.jpeg?.url || '',
+                        thumbnailUrl: response.data.image_variants?.small?.jpeg?.url,
+                        filename: response.data.original_filename || 'Unknown',
+                        type: response.data.type
+                    },
+                    guestVisibility
+                };
+
+                // Emit to all users in the event
+                webSocketService.emitMediaStatusUpdate(statusUpdatePayload);
+
+                logger.info('✅ WebSocket event emitted for media status update:', {
+                    mediaId: media_id,
+                    eventId: response.data.event_id,
+                    newStatus: status,
+                    guestVisibilityChanged: guestVisibility.changed,
+                    clientsInRoom: clientCount
+                });
+
+            } catch (wsError: any) {
+                logger.error('❌ Failed to emit WebSocket event:', {
+                    error: wsError.message,
+                    stack: wsError.stack,
+                    mediaId: media_id,
+                    eventId: response.data.event_id
+                });
+            }
+        }
 
         logger.info('Media status updated:', {
             success: response.status,
@@ -758,7 +824,7 @@ export const getGuestMediaController: RequestHandler = async (
             context
         } = req.query;
 
-        // QUICK validation
+        // Validation
         if (!shareToken) {
             res.status(400).json({
                 status: false,
@@ -771,25 +837,27 @@ export const getGuestMediaController: RequestHandler = async (
             return;
         }
 
-        // OPTIMIZED: Guest-friendly defaults for speed
+        // Guest-friendly options
         const options = {
             page: parseInt(page as string) || 1,
-            limit: Math.min(parseInt(limit as string) || 20, 30), // SMALLER limit for guests
+            limit: Math.min(parseInt(limit as string) || 20, 30),
             since: since as string,
             cursor: cursor as string,
             scrollType: (scrollType as string) || 'pagination',
-            quality: (quality as string) || 'thumbnail', // ALWAYS thumbnail for guests
-            format: (format as string) || 'jpeg', // JPEG is faster than auto-detection
+            quality: (quality as string) || 'thumbnail',
+            format: (format as string) || 'jpeg',
             context: (context as string) || 'mobile'
         };
 
-        logger.info(`🔗 Guest accessing media`, {
+        logger.info(`🔗 Guest accessing media:`, {
             shareToken: shareToken.substring(0, 8) + '...',
             limit: options.limit,
-            quality: options.quality
+            quality: options.quality,
+            page: options.page,
+            userAgent: req.get('User-Agent')?.substring(0, 50)
         });
 
-        // OPTIMIZED: Skip user agent processing
+        // Get media
         const response = await getGuestMediaService(
             shareToken,
             userEmail as string,
@@ -797,12 +865,49 @@ export const getGuestMediaController: RequestHandler = async (
             options
         );
 
+        // 🆕 WebSocket Integration - Track guest activity
+        if (response.status && response.data?.length > 0) {
+            try {
+                const webSocketService = getWebSocketService();
+
+                // Track guest viewing activity
+                webSocketService.emitGuestActivity({
+                    shareToken,
+                    eventId: response.other?.eventId,
+                    activity: 'view_photos',
+                    photoCount: response.data.length,
+                    page: options.page,
+                    guestInfo: {
+                        userAgent: req.get('User-Agent'),
+                        ip: req.ip,
+                        timestamp: new Date()
+                    }
+                });
+
+                logger.debug('📊 Guest activity tracked via WebSocket');
+            } catch (wsError) {
+                // Don't fail the request if WebSocket fails
+                logger.warn('⚠️ WebSocket tracking failed (non-critical):', wsError.message);
+            }
+        }
+
+        // Add debug info in development
+        if (process.env.NODE_ENV === 'development' && response.status) {
+            response.other = {
+                ...response.other,
+                debug: {
+                    query_executed: true,
+                    filters_applied: ['approved_only', 'images_only'],
+                    optimization: 'guest_optimized'
+                }
+            };
+        }
+
         res.status(response.code).json(response);
 
     } catch (error: any) {
-        logger.error('Error in getGuestMediaController:', error);
-        
-        // FAST error response
+        logger.error('❌ Error in getGuestMediaController:', error);
+
         res.status(500).json({
             status: false,
             code: 500,
@@ -813,6 +918,7 @@ export const getGuestMediaController: RequestHandler = async (
         });
     }
 };
+
 
 /**
  * Get media variants information

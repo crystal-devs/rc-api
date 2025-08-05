@@ -439,8 +439,11 @@ export const updateMediaStatusService = async (
             };
         }
 
-        // Find the media item
-        const media = await Media.findById(mediaId);
+        // Find the media item with event_id populated for WebSocket
+        const media = await Media.findById(mediaId).select(
+            'approval event_id url image_variants original_filename type'
+        );
+
         if (!media) {
             return {
                 status: false,
@@ -509,7 +512,6 @@ export const updateMediaStatusService = async (
         };
     }
 };
-
 /**
  * Bulk update media status
  */
@@ -684,12 +686,19 @@ export const getGuestMediaService = async (
     options: any = {}
 ): Promise<any> => {
     try {
-        // OPTIMIZED: Cache-friendly event lookup
-        const event = await Event.findOne({ share_token: shareToken })
-            .select('_id title permissions share_token')
-            .lean();
+        logger.info(`🔍 Guest media request for token: ${shareToken.substring(0, 8)}...`, {
+            page: options.page,
+            limit: options.limit,
+            quality: options.quality
+        });
+
+        // Find event by share token
+        const event = await Event.findOne({ 
+            share_token: shareToken 
+        }).select('_id title permissions share_settings').lean();
 
         if (!event) {
+            logger.warn(`❌ Event not found for share token: ${shareToken}`);
             return {
                 status: false,
                 code: 404,
@@ -700,7 +709,12 @@ export const getGuestMediaService = async (
             };
         }
 
-        // QUICK permission check
+        logger.info(`✅ Event found: ${event._id}`, {
+            title: event.title,
+            canView: event.permissions?.can_view
+        });
+
+        // Check if viewing is allowed
         if (!event.permissions?.can_view) {
             return {
                 status: false,
@@ -712,38 +726,126 @@ export const getGuestMediaService = async (
             };
         }
 
-        // OPTIMIZED: Guest-only options for speed
-        const guestOptions = {
-            ...options,
-            includeProcessing: false,
-            includePending: false,
-            status: 'approved', // ONLY approved content
-            quality: 'thumbnail', // ALWAYS thumbnail
-            format: 'jpeg' // FASTER than auto
-        };
-
-        // Use optimized service
-        const mediaResponse = await getMediaByEventService(
-            event._id.toString(),
-            guestOptions
-        );
-
-        if (mediaResponse.status) {
-            // MINIMAL additional data
-            mediaResponse.other = {
-                ...mediaResponse.other,
-                guest_access: true,
-                event_info: {
-                    id: event._id,
-                    title: event.title
-                }
+        // Check if sharing is active
+        if (!event.share_settings?.is_active) {
+            return {
+                status: false,
+                code: 403,
+                message: 'Sharing disabled',
+                data: null,
+                error: { message: 'Photo sharing is currently disabled for this event' },
+                other: null
             };
         }
 
-        return mediaResponse;
+        // 🔥 DIRECT DATABASE QUERY - Only approved photos for guests
+        const query = {
+            event_id: event._id,
+            'approval.status': { $in: ['approved', 'auto_approved'] }, // STRICT filtering
+            type: 'image' // Only images for now
+        };
+
+        logger.debug('📋 Database query for guest media:', query);
+
+        // Get total count
+        const totalCount = await Media.countDocuments(query);
+        
+        // Calculate pagination
+        const page = parseInt(options.page) || 1;
+        const limit = Math.min(parseInt(options.limit) || 20, 30);
+        const skip = (page - 1) * limit;
+
+        // Get media with projection for performance
+        const mediaItems = await Media.find(query)
+            .select({
+                _id: 1,
+                url: 1,
+                type: 1,
+                original_filename: 1,
+                size_mb: 1,
+                format: 1,
+                'metadata.width': 1,
+                'metadata.height': 1,
+                'metadata.aspect_ratio': 1,
+                'approval.status': 1,
+                'approval.approved_at': 1,
+                'image_variants': 1, // Include variants for optimization
+                created_at: 1,
+                updated_at: 1
+            })
+            .sort({ created_at: -1 }) // Newest first
+            .skip(skip)
+            .limit(limit)
+            .lean();
+
+        logger.info(`✅ Guest media query results:`, {
+            eventId: event._id,
+            totalCount,
+            returnedCount: mediaItems.length,
+            page,
+            limit,
+            approvedOnly: true
+        });
+
+        // Transform for guest consumption
+        const transformedMedia = mediaItems.map(item => {
+            // Get optimized URL based on quality
+            const optimizedUrl = getOptimizedUrlForGuest(item, options.quality);
+            
+            return {
+                _id: item._id,
+                url: optimizedUrl, // Use optimized URL
+                original_url: item.url, // Keep original for download
+                type: item.type,
+                original_filename: item.original_filename,
+                metadata: {
+                    width: item.metadata?.width,
+                    height: item.metadata?.height,
+                    aspect_ratio: item.metadata?.aspect_ratio
+                },
+                approval: {
+                    status: item.approval?.status,
+                    approved_at: item.approval?.approved_at
+                },
+                created_at: item.created_at,
+                updated_at: item.updated_at
+            };
+        });
+
+        // Pagination info
+        const hasNext = (page * limit) < totalCount;
+        const pagination = {
+            page,
+            limit,
+            total: totalCount,
+            totalPages: Math.ceil(totalCount / limit),
+            hasNext,
+            hasPrev: page > 1,
+            totalCount // Add for frontend
+        };
+
+        logger.info(`📊 Pagination info:`, pagination);
+
+        return {
+            status: true,
+            code: 200,
+            message: 'Guest media retrieved successfully',
+            data: transformedMedia,
+            error: null,
+            other: {
+                eventId: event._id,
+                eventTitle: event.title,
+                pagination,
+                guest_access: true,
+                share_settings: {
+                    can_view: true,
+                    can_download: event.permissions?.can_download || false
+                }
+            }
+        };
 
     } catch (error: any) {
-        logger.error('Error in getGuestMediaService:', error);
+        logger.error('❌ Error in getGuestMediaService:', error);
         return {
             status: false,
             code: 500,
@@ -752,5 +854,39 @@ export const getGuestMediaService = async (
             error: { message: error.message },
             other: null
         };
+    }
+};
+
+// Helper function to get optimized URL for guests
+const getOptimizedUrlForGuest = (media: any, quality: string = 'thumbnail'): string => {
+    // If no variants, return original
+    if (!media.image_variants) {
+        return media.url;
+    }
+
+    const variants = media.image_variants;
+    
+    try {
+        switch (quality) {
+            case 'thumbnail':
+                return variants.small?.jpeg?.url || 
+                       variants.small?.webp?.url || 
+                       variants.medium?.jpeg?.url || 
+                       media.url;
+            case 'display':
+                return variants.medium?.jpeg?.url || 
+                       variants.medium?.webp?.url || 
+                       variants.large?.jpeg?.url || 
+                       media.url;
+            case 'full':
+                return variants.large?.jpeg?.url || 
+                       variants.large?.webp?.url || 
+                       media.url;
+            default:
+                return variants.small?.jpeg?.url || media.url;
+        }
+    } catch (error) {
+        console.warn('Error getting optimized URL, falling back to original:', error);
+        return media.url;
     }
 };
