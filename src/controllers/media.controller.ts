@@ -12,7 +12,8 @@ import {
     deleteMediaService,
     updateMediaStatusService,
     bulkUpdateMediaStatusService,
-    getGuestMediaService
+    getGuestMediaService,
+    MediaQueryOptions
 } from "@services/media.service";
 import { Event } from "@models/event.model";
 import { Media } from "@models/media.model";
@@ -91,68 +92,51 @@ export const getMediaByEventController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { eventId } = req.params;
-        const {
-            // Existing pagination options
-            includeProcessing,
-            includePending,
-            page,
-            limit,
-            since,
-            status,
-            cursor,
-            scrollType,
-            // New variant options
-            quality,
-            format,
-            context
-        } = req.query;
+        const { page, limit, status, quality } = req.query;
 
-        // Validate eventId
         if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
             res.status(400).json({
                 status: false,
                 code: 400,
                 message: 'Invalid event ID',
                 data: null,
-                error: { message: 'A valid event ID is required' },
-                other: null
+                error: { message: 'A valid event ID is required' }
             });
             return;
         }
 
-        // Parse and validate options
-        const options = {
-            includeProcessing: includeProcessing === 'true',
-            includePending: includePending === 'true',
-            page: page ? parseInt(page as string) : undefined,
-            limit: limit ? parseInt(limit as string) : undefined,
-            since: since as string,
-            status: status as any,
-            cursor: cursor as string,
-            scrollType: scrollType as 'pagination' | 'infinite',
-            // New variant options
-            quality: quality as 'small' | 'medium' | 'large' | 'original' | 'thumbnail' | 'display' | 'full',
-            format: format as 'webp' | 'jpeg' | 'auto',
-            context: context as 'mobile' | 'desktop' | 'lightbox'
+        const qualityValue = quality as string;
+        const validQualities: MediaQueryOptions['quality'][] = [
+            'display', 'small', 'medium', 'large', 'original', 'thumbnail', 'full'
+        ];
+        const validatedQuality: MediaQueryOptions['quality'] = validQualities.includes(qualityValue as any)
+            ? qualityValue as MediaQueryOptions['quality']
+            : 'display';
+
+        const options: MediaQueryOptions = {
+            page: parseInt(page as string) || 1,
+            limit: parseInt(limit as string) || 20,
+            status: status as string,
+            quality: validatedQuality
         };
 
-        logger.info(`📱 Getting media for event ${eventId}`, {
-            user_id: req.user?._id?.toString(),
-            options: {
-                ...options,
-                user_agent: req.get('User-Agent')?.substring(0, 100)
-            }
+        logger.info(`📱 Admin getting media for event ${eventId}`, {
+            userId: req.user?._id?.toString(),
+            options
         });
 
-        // Get user agent for WebP detection
-        const userAgent = req.get('User-Agent');
-        const response = await getMediaByEventService(eventId, options, userAgent);
-        console.log(response)
+        const response = await getMediaByEventService(eventId, options);
         res.status(response.code).json(response);
 
     } catch (error: any) {
-        logger.error('Error in getMediaByEventController:', error);
-        next(error);
+        logger.error('❌ Error in getMediaByEventController:', error);
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Failed to get event media',
+            data: null,
+            error: { message: error.message }
+        });
     }
 };
 
@@ -228,149 +212,119 @@ export const getMediaByAlbumController: RequestHandler = async (
  * Update single media status
  */
 export const updateMediaStatusController: RequestHandler = async (
-    req: InjectedRequest,
+    req: AuthenticatedRequest,
     res: Response,
     next: NextFunction
 ): Promise<void> => {
     try {
         const { media_id } = req.params;
-        const userId = req.user._id.toString();
-        const { status, reason, hide_reason } = req.body;
+        const { status, reason } = req.body;
+        const userId = req.user?._id.toString();
+        const userName = 'Admin';
 
-        // Validate media_id
+        // Validate inputs
         if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
             res.status(400).json({
                 status: false,
                 code: 400,
-                message: 'Invalid or missing media ID',
+                message: 'Invalid media ID',
                 data: null,
-                error: { message: 'A valid media ID is required' },
-                other: null
+                error: { message: 'A valid media ID is required' }
             });
             return;
         }
 
-        // Validate required fields
         if (!status) {
             res.status(400).json({
                 status: false,
                 code: 400,
                 message: 'Status is required',
                 data: null,
-                error: { message: 'Status field is required in request body' },
-                other: null
+                error: { message: 'Status field is required' }
             });
             return;
         }
 
-        // Validate status value
+        // Updated valid statuses to match your system
         const validStatuses = ['approved', 'pending', 'rejected', 'hidden', 'auto_approved'];
         if (!validStatuses.includes(status)) {
             res.status(400).json({
                 status: false,
                 code: 400,
-                message: 'Invalid status value',
+                message: 'Invalid status',
                 data: null,
-                error: {
-                    message: 'Status must be one of: approved, pending, rejected, hidden, auto_approved'
-                },
-                other: null
+                error: { message: 'Status must be: approved, pending, rejected, hidden, auto_approved' }
             });
             return;
         }
 
-        logger.info('Updating media status:', {
+        logger.info('🔄 Updating media status:', {
             media_id,
             status,
             reason,
-            hide_reason,
-            userId
+            userId,
+            userName
         });
 
-        // Call service
+        // Update media status in database
         const response = await updateMediaStatusService(media_id, status, {
             adminId: userId,
-            reason,
-            hideReason: hide_reason
+            reason
         });
 
+        // Send HTTP response first
+        res.status(response.code).json(response);
+
+        // Then handle WebSocket updates (non-blocking)
         if (response.status && response.data) {
             try {
                 const webSocketService = getWebSocketService();
-                const eventRoom = `event_${response.data.event_id.toString()}`;
 
-                // Get the number of clients in the event room for debugging
-                const roomClients = await webSocketService.io.in(eventRoom).allSockets();
-                const clientCount = roomClients.size;
-
-                // Create guest visibility info
-                const guestVisibility = {
-                    wasVisible: ['approved', 'auto_approved'].includes(response.other?.previousStatus || ''),
-                    isVisible: ['approved', 'auto_approved'].includes(status),
-                    changed: true
-                };
-
-                // Create WebSocket payload
-                const statusUpdatePayload: MediaStatusUpdatePayload & {
-                    guestVisibility?: {
-                        wasVisible: boolean;
-                        isVisible: boolean;
-                        changed: boolean;
-                    };
-                } = {
+                const statusUpdatePayload = {
                     mediaId: media_id,
                     eventId: response.data.event_id.toString(),
                     previousStatus: response.other?.previousStatus || 'unknown',
                     newStatus: status,
                     updatedBy: {
-                        id: userId,
-                        name: 'Admin',
-                        type: 'admin'
+                        name: userName,
+                        type: 'admin' // You can determine this based on user role
                     },
-                    updatedAt: new Date(),
-                    media: {
-                        url: response.data.url || response.data.image_variants?.medium?.jpeg?.url || '',
-                        thumbnailUrl: response.data.image_variants?.small?.jpeg?.url,
-                        filename: response.data.original_filename || 'Unknown',
-                        type: response.data.type
-                    },
-                    guestVisibility
+                    timestamp: new Date(),
+                    mediaData: {
+                        url: response.data.url,
+                        thumbnail: response.data.thumbnail_url,
+                        filename: response.data.filename
+                    }
                 };
 
-                // Emit to all users in the event
-                webSocketService.emitMediaStatusUpdate(statusUpdatePayload);
+                // Emit status update to appropriate rooms
+                webSocketService.emitStatusUpdate(statusUpdatePayload);
 
-                logger.info('✅ WebSocket event emitted for media status update:', {
+                logger.info('✅ Status update broadcasted via WebSocket:', {
                     mediaId: media_id,
                     eventId: response.data.event_id,
-                    newStatus: status,
-                    guestVisibilityChanged: guestVisibility.changed,
-                    clientsInRoom: clientCount
+                    from: statusUpdatePayload.previousStatus,
+                    to: status,
+                    by: userName
                 });
 
             } catch (wsError: any) {
-                logger.error('❌ Failed to emit WebSocket event:', {
-                    error: wsError.message,
-                    stack: wsError.stack,
-                    mediaId: media_id,
-                    eventId: response.data.event_id
-                });
+                logger.error('❌ WebSocket broadcast failed:', wsError.message);
+                // Don't fail the main operation if WebSocket fails
             }
         }
 
-        logger.info('Media status updated:', {
+        logger.info('✅ Media status updated:', {
+            mediaId: media_id,
             success: response.status,
-            previousStatus: response.other?.previousStatus,
-            newStatus: response.other?.newStatus
+            newStatus: status
         });
 
-        res.status(response.code).json(response);
-
     } catch (error: any) {
-        logger.error('Error in updateMediaStatusController:', {
-            message: error.message,
-            params: req.params,
-            body: req.body
+        logger.error('❌ Error in updateMediaStatusController:', {
+            error: error.message,
+            mediaId: req.params.media_id,
+            userId: req.user?._id?.toString()
         });
 
         res.status(500).json({
@@ -378,11 +332,7 @@ export const updateMediaStatusController: RequestHandler = async (
             code: 500,
             message: 'Internal server error',
             data: null,
-            error: {
-                message: 'An unexpected error occurred',
-                details: process.env.NODE_ENV === 'development' ? error.message : undefined
-            },
-            other: null
+            error: { message: 'Failed to update media status' }
         });
     }
 };
@@ -805,119 +755,51 @@ export const guestUploadMediaController: RequestHandler = async (
  * Get guest media with enhanced variant support
  */
 export const getGuestMediaController: RequestHandler = async (
-    req: AuthenticatedRequest,
+    req: Request,
     res: Response,
     next: NextFunction
 ): Promise<void> => {
     try {
         const { shareToken } = req.params;
-        const {
-            userEmail,
-            authToken,
-            page,
-            limit,
-            since,
-            cursor,
-            scrollType,
-            quality,
-            format,
-            context
-        } = req.query;
+        const { page, limit, quality } = req.query;
 
-        // Validation
         if (!shareToken) {
             res.status(400).json({
                 status: false,
                 code: 400,
                 message: 'Share token is required',
                 data: null,
-                error: { message: 'Share token parameter is required' },
-                other: null
+                error: { message: 'Share token parameter is required' }
             });
             return;
         }
 
-        // Guest-friendly options
         const options = {
             page: parseInt(page as string) || 1,
-            limit: Math.min(parseInt(limit as string) || 20, 30),
-            since: since as string,
-            cursor: cursor as string,
-            scrollType: (scrollType as string) || 'pagination',
-            quality: (quality as string) || 'thumbnail',
-            format: (format as string) || 'jpeg',
-            context: (context as string) || 'mobile'
+            limit: Math.min(parseInt(limit as string) || 20, 50), // Limit guests to 50
+            quality: quality as string || 'medium'
         };
 
         logger.info(`🔗 Guest accessing media:`, {
             shareToken: shareToken.substring(0, 8) + '...',
-            limit: options.limit,
-            quality: options.quality,
-            page: options.page,
-            userAgent: req.get('User-Agent')?.substring(0, 50)
+            options
         });
 
-        // Get media
-        const response = await getGuestMediaService(
-            shareToken,
-            userEmail as string,
-            authToken as string,
-            options
-        );
-
-        // 🆕 WebSocket Integration - Track guest activity
-        if (response.status && response.data?.length > 0) {
-            try {
-                const webSocketService = getWebSocketService();
-
-                // Track guest viewing activity
-                webSocketService.emitGuestActivity({
-                    shareToken,
-                    eventId: response.other?.eventId,
-                    activity: 'view_photos',
-                    photoCount: response.data.length,
-                    page: options.page,
-                    guestInfo: {
-                        userAgent: req.get('User-Agent'),
-                        ip: req.ip,
-                        timestamp: new Date()
-                    }
-                });
-
-                logger.debug('📊 Guest activity tracked via WebSocket');
-            } catch (wsError) {
-                // Don't fail the request if WebSocket fails
-                logger.warn('⚠️ WebSocket tracking failed (non-critical):', wsError.message);
-            }
-        }
-
-        // Add debug info in development
-        if (process.env.NODE_ENV === 'development' && response.status) {
-            response.other = {
-                ...response.other,
-                debug: {
-                    query_executed: true,
-                    filters_applied: ['approved_only', 'images_only'],
-                    optimization: 'guest_optimized'
-                }
-            };
-        }
-
+        const response = await getGuestMediaService(shareToken, '', '', options);
         res.status(response.code).json(response);
 
     } catch (error: any) {
         logger.error('❌ Error in getGuestMediaController:', error);
-
         res.status(500).json({
             status: false,
             code: 500,
             message: 'Failed to get guest media',
             data: null,
-            error: { message: error.message },
-            other: null
+            error: { message: error.message }
         });
     }
 };
+
 
 
 /**

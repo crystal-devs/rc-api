@@ -26,7 +26,7 @@ interface ServiceResponse<T> {
 }
 
 // Query options interface
-interface MediaQueryOptions {
+export interface MediaQueryOptions {
     includeProcessing?: boolean;
     includePending?: boolean;
     page?: number;
@@ -693,8 +693,8 @@ export const getGuestMediaService = async (
         });
 
         // Find event by share token
-        const event = await Event.findOne({ 
-            share_token: shareToken 
+        const event = await Event.findOne({
+            share_token: shareToken
         }).select('_id title permissions share_settings').lean();
 
         if (!event) {
@@ -749,7 +749,7 @@ export const getGuestMediaService = async (
 
         // Get total count
         const totalCount = await Media.countDocuments(query);
-        
+
         // Calculate pagination
         const page = parseInt(options.page) || 1;
         const limit = Math.min(parseInt(options.limit) || 20, 30);
@@ -791,7 +791,7 @@ export const getGuestMediaService = async (
         const transformedMedia = mediaItems.map(item => {
             // Get optimized URL based on quality
             const optimizedUrl = getOptimizedUrlForGuest(item, options.quality);
-            
+
             return {
                 _id: item._id,
                 url: optimizedUrl, // Use optimized URL
@@ -865,23 +865,23 @@ const getOptimizedUrlForGuest = (media: any, quality: string = 'thumbnail'): str
     }
 
     const variants = media.image_variants;
-    
+
     try {
         switch (quality) {
             case 'thumbnail':
-                return variants.small?.jpeg?.url || 
-                       variants.small?.webp?.url || 
-                       variants.medium?.jpeg?.url || 
-                       media.url;
+                return variants.small?.jpeg?.url ||
+                    variants.small?.webp?.url ||
+                    variants.medium?.jpeg?.url ||
+                    media.url;
             case 'display':
-                return variants.medium?.jpeg?.url || 
-                       variants.medium?.webp?.url || 
-                       variants.large?.jpeg?.url || 
-                       media.url;
+                return variants.medium?.jpeg?.url ||
+                    variants.medium?.webp?.url ||
+                    variants.large?.jpeg?.url ||
+                    media.url;
             case 'full':
-                return variants.large?.jpeg?.url || 
-                       variants.large?.webp?.url || 
-                       media.url;
+                return variants.large?.jpeg?.url ||
+                    variants.large?.webp?.url ||
+                    media.url;
             default:
                 return variants.small?.jpeg?.url || media.url;
         }

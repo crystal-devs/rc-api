@@ -5,7 +5,7 @@ import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
 import { Event } from '@models/event.model';
 import { User } from '@models/user.model';
-import { AuthenticatedSocket, WebSocketUser, WEBSOCKET_EVENTS } from 'types/websocket.types';
+import { AuthenticatedSocket} from 'types/websocket.types';
 
 /**
  * WebSocket authentication middleware - validates JWT or share tokens
@@ -19,7 +19,7 @@ export const websocketAuthMiddleware = () => {
 
       // Skip auth for initial connection - will be handled in authenticate event
       // This allows clients to connect first, then authenticate
-      logger.info(`🔍 WebSocket middleware check for ${socket.id}:`, {
+      console.log(`🔍 WebSocket middleware check for ${socket.id}:`, {
         hasToken: !!token,
         hasShareToken: !!shareToken,
         eventId
@@ -74,63 +74,6 @@ export const validateJWTToken = async (token: string): Promise<{
     } else {
       throw new Error(`Token validation failed: ${error.message}`);
     }
-  }
-};
-
-/**
- * Validate share token against event
- */
-export const validateShareToken = async (shareToken: string, eventId: string): Promise<{
-  eventId: string;
-  eventTitle: string;
-  permissions: any;
-  shareSettings: any;
-}> => {
-  try {
-    const event = await Event.findById(eventId).select(
-      'title share_token share_settings permissions visibility'
-    );
-
-    if (!event) {
-      throw new Error('Event not found');
-    }
-
-    // Check if event allows share token access
-    if (event.visibility === 'private') {
-      throw new Error('This event is private and requires authentication');
-    }
-
-    // Verify share token matches
-    if (event.share_token !== shareToken) {
-      throw new Error('Invalid share token');
-    }
-
-    // Check if sharing is active
-    if (!event.share_settings?.is_active) {
-      throw new Error('Event sharing is currently disabled');
-    }
-
-    // Check if share link has expired
-    if (event.share_settings?.expires_at && new Date() > new Date(event.share_settings.expires_at)) {
-      throw new Error('Share link has expired');
-    }
-
-    // Check password if required
-    if (event.share_settings?.password) {
-      // Note: Password validation should be handled at the application level
-      // This is just a placeholder for the structure
-      logger.warn('Password-protected share token - validation needed at app level');
-    }
-
-    return {
-      eventId: event._id.toString(),
-      eventTitle: event.title,
-      permissions: event.permissions,
-      shareSettings: event.share_settings
-    };
-
-  } catch (error: any) {
-    throw new Error(`Share token validation failed: ${error.message}`);
   }
 };
 

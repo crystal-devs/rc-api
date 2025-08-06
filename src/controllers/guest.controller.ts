@@ -1,5 +1,4 @@
 import { Response, NextFunction } from "express";
-import { getInvitedGuestsService } from "@services/guest.service";
 import { sendResponse } from "@utils/express.util";
 import { injectedRequest } from "types/injected-types";
 
@@ -12,10 +11,11 @@ export const getInvitedGuestsController = async (req: injectedRequest, res: Resp
         const userId = req.user._id.toString();
         
         // Get the guest list
-        const response = await getInvitedGuestsService(token_id, userId);
+        // const response = await getInvitedGuestsService(token_id, userId);
         
         // Send response
-        return sendResponse(res, response);
+        // return sendResponse(res, response);
+        return 
     } catch (error: any) {
         return sendResponse(res, {
             status: false,

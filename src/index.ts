@@ -8,8 +8,7 @@ import { logger, morganMiddleware } from "@utils/logger";
 import { createDefaultPlans } from "@models/subscription-plan.model";
 
 // WebSocket imports
-import { initializeWebSocketService, getWebSocketService } from "@services/websocket.service";
-import { websocketAuthMiddleware, websocketRateLimit, websocketLogger } from "@middlewares/websocket-auth.middleware";
+import { initializeWebSocketService } from "@services/websocket.service";
 
 // Route imports
 import authRouter from "@routes/auth-router";
@@ -46,6 +45,17 @@ app.use(morganMiddleware);
 // Create HTTP server
 const server = http.createServer(app);
 
+// Initialize WebSocket service IMMEDIATELY after server creation
+// This ensures the middleware is properly applied during initialization
+let webSocketService: any = null;
+try {
+  webSocketService = initializeWebSocketService(server);
+  logger.info("🔌 WebSocket service initialized successfully");
+} catch (wsError) {
+  logger.error("❌ WebSocket initialization failed:", wsError);
+  logger.warn("⚠️ Continuing without WebSocket real-time features");
+}
+
 // Express routes
 app.use("/system", systemRouter);
 app.use(`/api/${VERSION}/auth`, authRouter);
@@ -55,55 +65,17 @@ app.use(`/api/${VERSION}/media`, mediaRouter);
 app.use(`/api/${VERSION}/user`, userRouter);
 app.use(`/api/${VERSION}/token`, shareTokenRouter);
 
-// Health check endpoint for load balancer
-app.get('/health', async (req, res) => {
-  try {
-    const webSocketService = getWebSocketService();
-    
-    res.json({
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      serverId: process.env.SERVER_ID || 'server-1',
-      websocket: {
-        localConnections: webSocketService.getTotalConnections(),
-      },
-      uptime: process.uptime()
-    });
-  } catch (error: any) {
-    res.status(503).json({
-      status: 'unhealthy',
-      error: error.message
-    });
-  }
-});
-
 connectToMongoDB().then(async () => {
   await createDefaultPlans();
   
-  // Initialize WebSocket service
-  try {
-    const webSocketService = initializeWebSocketService(server);
-    logger.info("🔌 WebSocket service initialized successfully");
-    
-    // Add WebSocket middleware
-    webSocketService.io.use(websocketLogger());
-    webSocketService.io.use(websocketRateLimit());
-    webSocketService.io.use(websocketAuthMiddleware());
-    
-    // Log initial connection stats
-    setTimeout(() => {
-      try {
-        logger.info('📊 Initial WebSocket Stats:', {
-          connections: webSocketService.getTotalConnections()
-        });
-      } catch (statsError) {
-        logger.error('❌ Error getting initial WebSocket stats:', statsError);
-      }
-    }, 5000);
-    
-  } catch (wsError) {
-    logger.error("❌ WebSocket initialization failed:", wsError);
-    logger.warn("⚠️ Continuing without WebSocket real-time features");
+  // WebSocket is already initialized above, just log the status
+  if (webSocketService) {
+    // Test WebSocket service is working
+    const stats = webSocketService.getConnectionStats();
+    logger.info('📊 WebSocket service ready:', {
+      totalConnections: stats.totalConnections,
+      serverId: process.env.SERVER_ID || 'server-1'
+    });
   }
   
   startServer();
@@ -135,24 +107,10 @@ const handleGracefulShutdown = async () => {
   
   try {
     // Get WebSocket service and cleanup
-    const webSocketService = getWebSocketService();
-    
-    logger.info('🔌 Disconnecting all WebSocket clients...');
-    
-    // Notify all clients about shutdown
-    webSocketService.io.emit('server_shutdown', {
-      message: 'Server is shutting down for maintenance',
-      serverId: process.env.SERVER_ID || 'server-1',
-      timestamp: new Date()
-    });
-    
-    // Give clients time to receive the message
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Disconnect all sockets
-    webSocketService.io.disconnectSockets();
-    
-    logger.info('✅ WebSocket cleanup completed');
+    if (webSocketService) {
+      await webSocketService.cleanup();
+      logger.info('✅ WebSocket cleanup completed');
+    }
     
   } catch (error) {
     logger.error('❌ Error during WebSocket cleanup:', error);
@@ -209,17 +167,13 @@ process.on("unhandledRejection", (reason, promise) => {
 if (process.env.NODE_ENV === 'production') {
   setInterval(async () => {
     try {
-      const webSocketService = getWebSocketService();
-      
-      logger.info('📊 WebSocket Stats:', {
-        serverId: process.env.SERVER_ID || 'server-1',
-        localConnections: webSocketService.getTotalConnections(),
-        timestamp: new Date().toISOString()
-      });
-      
-      // Alert if connections are getting high
-      if (webSocketService.getTotalConnections() > 500) {
-        logger.warn(`⚠️ High connection count: ${webSocketService.getTotalConnections()}`);
+      if (webSocketService) {
+        const stats = webSocketService.getConnectionStats();
+        logger.info('📊 WebSocket Stats:', {
+          ...stats,
+          serverId: process.env.SERVER_ID || 'server-1',
+          timestamp: new Date().toISOString()
+        });
       }
       
     } catch (error) {
