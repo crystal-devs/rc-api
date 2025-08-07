@@ -1,4 +1,4 @@
-// services/websocket.service.ts - Fixed version with proper middleware
+// services/websocket.service.ts - Enhanced with connection state management
 import { Server as HttpServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
@@ -41,18 +41,39 @@ interface StatusUpdatePayload {
 }
 
 interface ConnectionStats {
-  totalConnections: number;
-  byType: {
-    admin: number;
-    co_host: number;
-    guest: number;
-  };
-  byEvent: Record<string, number>;
+    totalConnections: number;
+    byType: {
+        admin: number;
+        co_host: number;
+        guest: number;
+    };
+    byEvent: Record<string, number>;
+}
+
+interface ClientConnectionState {
+    user: WebSocketUser;
+    rooms: string[];
+    connectedAt: Date;
+    lastHeartbeat: Date;
+    isHealthy: boolean;
+    reconnectCount: number;
+}
+
+interface ConnectionHealth {
+    socketId: string;
+    isConnected: boolean;
+    isHealthy: boolean;
+    lastHeartbeat: Date;
+    latency: number;
+    reconnectCount: number;
 }
 
 class SimpleWebSocketService {
     public io: Server;
-    private connectedClients: Map<string, { user: WebSocketUser; rooms: string[] }> = new Map();
+    private connectedClients: Map<string, ClientConnectionState> = new Map();
+    private heartbeatIntervals: Map<string, NodeJS.Timeout> = new Map();
+    private readonly HEARTBEAT_INTERVAL = 30000; // 30 seconds
+    private readonly HEARTBEAT_TIMEOUT = 60000;  // 60 seconds timeout
 
     constructor(httpServer: HttpServer) {
         this.io = new Server(httpServer, {
@@ -62,18 +83,31 @@ class SimpleWebSocketService {
                 credentials: true
             },
             transports: ['websocket', 'polling'],
-            pingTimeout: 60000,
-            pingInterval: 25000
+            pingTimeout: this.HEARTBEAT_TIMEOUT,
+            pingInterval: this.HEARTBEAT_INTERVAL,
+            // Enhanced connection settings
+            connectTimeout: 45000,
+            allowEIO3: true,
+            // Reconnection settings
+            maxHttpBufferSize: 1e6,
+            httpCompression: true,
+            perMessageDeflate: {
+                threshold: 1024,
+                zlibDeflateOptions: {
+                    chunkSize: 1024,
+                    windowBits: 13,
+                    concurrencyLimit: 10,
+                },
+            }
         });
 
-        // Apply middleware here during initialization
         this.setupMiddleware();
         this.initializeEventHandlers();
-        logger.info('🔌 Simple WebSocket service initialized with middleware');
+        this.startHealthCheck();
+        logger.info('🔌 Enhanced WebSocket service initialized with connection management');
     }
 
     private setupMiddleware(): void {
-        // Apply middleware in the correct order
         this.io.use(websocketLogger());
         this.io.use(websocketRateLimit());
         this.io.use(websocketAuthMiddleware());
@@ -82,98 +116,222 @@ class SimpleWebSocketService {
 
     private initializeEventHandlers(): void {
         this.io.on('connection', (socket: Socket) => {
-            logger.info(`🔗 New connection: ${socket.id} from ${socket.handshake.address}`);
+            logger.info(`🔗 New connection: ${socket.id}`);
 
-            // Set authentication timeout
+            // Initialize connection state
+            this.initializeConnection(socket);
+
             const authTimeout = setTimeout(() => {
                 if (!socket.data?.authenticated) {
                     logger.warn(`⏰ Auth timeout: ${socket.id}`);
                     socket.emit('auth_error', { message: 'Authentication timeout' });
+                    this.cleanupConnection(socket.id);
                     socket.disconnect();
                 }
             }, 30000);
 
-            // Handle authentication
             socket.on('authenticate', async (authData: AuthData) => {
                 clearTimeout(authTimeout);
                 await this.handleAuthentication(socket, authData);
             });
 
-            // Handle joining event room
             socket.on('join_event', async (eventId: string) => {
                 if (socket.data?.authenticated && socket.data?.user?.eventId === eventId) {
-                    const adminRoom = `admin_${eventId}`;  // For admin/co-host
-                    const guestRoom = `guest_${eventId}`;  // For guests
-                    
+                    const adminRoom = `admin_${eventId}`;
+                    const guestRoom = `guest_${eventId}`;
                     const user = socket.data.user;
                     const targetRoom = (user.type === 'admin' || user.type === 'co_host') ? adminRoom : guestRoom;
-                    
-                    await socket.join(targetRoom);
 
-                    const client = this.connectedClients.get(socket.id);
-                    if (client && !client.rooms.includes(targetRoom)) {
-                        client.rooms.push(targetRoom);
+                    try {
+                        const client = this.connectedClients.get(socket.id);
+                        const alreadyInRoom = client?.rooms.includes(targetRoom);
+
+                        if (!alreadyInRoom && client) {
+                            await socket.join(targetRoom);
+                            client.rooms.push(targetRoom);
+                            logger.info(`👥 ${socket.id} (${user.type}) joined room: ${targetRoom}`);
+                        }
+
+                        setTimeout(() => this.brodCastRoomCounts(eventId), 100);
+
+                        socket.emit('joined_event', {
+                            eventId,
+                            room: targetRoom,
+                            userType: user.type
+                        });
+
+                    } catch (error) {
+                        logger.error(`❌ Error joining room ${targetRoom}:`, error);
+                        socket.emit('join_error', { message: 'Failed to join room' });
                     }
-
-                    logger.info(`👥 ${socket.id} (${user.type}) joined room: ${targetRoom}`);
-                    
-                    socket.emit('joined_event', { 
-                        eventId, 
-                        room: targetRoom,
-                        userType: user.type 
-                    });
                 }
             });
 
-            // Handle leaving event room
             socket.on('leave_event', async (eventId: string) => {
                 const adminRoom = `admin_${eventId}`;
                 const guestRoom = `guest_${eventId}`;
-                
-                await socket.leave(adminRoom);
-                await socket.leave(guestRoom);
-                
-                const client = this.connectedClients.get(socket.id);
-                if (client) {
-                    client.rooms = client.rooms.filter(room => 
-                        room !== adminRoom && room !== guestRoom
-                    );
+
+                try {
+                    await socket.leave(adminRoom);
+                    await socket.leave(guestRoom);
+
+                    const client = this.connectedClients.get(socket.id);
+                    if (client) {
+                        client.rooms = client.rooms.filter(room =>
+                            room !== adminRoom && room !== guestRoom
+                        );
+                    }
+
+                    setTimeout(() => this.brodCastRoomCounts(eventId), 100);
+                    logger.info(`👋 ${socket.id} left event rooms for ${eventId}`);
+                } catch (error) {
+                    logger.error(`❌ Error leaving rooms for ${eventId}:`, error);
                 }
-                
-                logger.info(`👋 ${socket.id} left event rooms for ${eventId}`);
             });
 
-            // Handle disconnection
+            // Enhanced heartbeat handling
+            socket.on('heartbeat', (data: { timestamp: number }) => {
+                this.handleHeartbeat(socket.id, data.timestamp);
+                socket.emit('heartbeat_ack', {
+                    timestamp: Date.now(),
+                    latency: Date.now() - data.timestamp
+                });
+            });
+
+            // Legacy ping support
+            socket.on('ping', () => {
+                socket.emit('pong', { timestamp: Date.now() });
+                this.updateHeartbeat(socket.id);
+            });
+
+            // Connection quality check
+            socket.on('connection_check', () => {
+                const client = this.connectedClients.get(socket.id);
+                socket.emit('connection_status', {
+                    isHealthy: client?.isHealthy ?? false,
+                    lastHeartbeat: client?.lastHeartbeat ?? new Date(),
+                    connectedAt: client?.connectedAt ?? new Date(),
+                    reconnectCount: client?.reconnectCount ?? 0
+                });
+            });
+
             socket.on('disconnect', (reason) => {
                 clearTimeout(authTimeout);
-                const client = this.connectedClients.get(socket.id);
-                if (client) {
-                    logger.info(`🔌 Disconnected: ${socket.id} (${client.user.type} - ${client.user.name}) - Reason: ${reason}`);
-                }
-                this.connectedClients.delete(socket.id);
+                this.handleDisconnection(socket, reason);
             });
 
             socket.on('error', (error) => {
                 logger.error(`❌ Socket error ${socket.id}:`, error);
-            });
-
-            // Heartbeat for connection monitoring
-            socket.on('ping', () => {
-                socket.emit('pong', { timestamp: Date.now() });
+                this.markUnhealthy(socket.id);
             });
         });
     }
 
+    private initializeConnection(socket: Socket): void {
+        // Will be properly set after authentication
+        // For now, create a placeholder entry
+        socket.data = {
+            connectionInitializedAt: new Date()
+        };
+    }
+
+    private handleHeartbeat(socketId: string, clientTimestamp: number): void {
+        const client = this.connectedClients.get(socketId);
+        if (client) {
+            client.lastHeartbeat = new Date();
+            client.isHealthy = true;
+        }
+    }
+
+    private updateHeartbeat(socketId: string): void {
+        const client = this.connectedClients.get(socketId);
+        if (client) {
+            client.lastHeartbeat = new Date();
+            client.isHealthy = true;
+        }
+    }
+
+    private markUnhealthy(socketId: string): void {
+        const client = this.connectedClients.get(socketId);
+        if (client) {
+            client.isHealthy = false;
+        }
+    }
+
+    private handleDisconnection(socket: Socket, reason: string): void {
+        const client = this.connectedClients.get(socket.id);
+
+        if (client) {
+            const userEventId = client.user.eventId;
+            logger.info(`🔌 Disconnected: ${socket.id} (${client.user.type} - ${client.user.name}) - ${reason}`);
+
+            // Increment reconnect count for tracking
+            if (reason !== 'client namespace disconnect' && reason !== 'server namespace disconnect') {
+                client.reconnectCount++;
+            }
+
+            this.cleanupConnection(socket.id);
+
+            if (userEventId) {
+                setTimeout(() => this.brodCastRoomCounts(userEventId), 100);
+            }
+        } else {
+            logger.info(`🔌 Disconnected: ${socket.id} (unknown client)`);
+        }
+    }
+
+    private cleanupConnection(socketId: string): void {
+        // Clear heartbeat interval
+        const heartbeatInterval = this.heartbeatIntervals.get(socketId);
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            this.heartbeatIntervals.delete(socketId);
+        }
+
+        // Remove client
+        this.connectedClients.delete(socketId);
+    }
+
+    private startHealthCheck(): void {
+        // Run health check every 2 minutes
+        setInterval(() => {
+            this.performHealthCheck();
+        }, 120000);
+
+        logger.info('🏥 Health check service started');
+    }
+
+    private performHealthCheck(): void {
+        const now = new Date();
+        const unhealthyClients: string[] = [];
+
+        this.connectedClients.forEach((client, socketId) => {
+            const timeSinceLastHeartbeat = now.getTime() - client.lastHeartbeat.getTime();
+
+            // Mark as unhealthy if no heartbeat for more than timeout period
+            if (timeSinceLastHeartbeat > this.HEARTBEAT_TIMEOUT) {
+                client.isHealthy = false;
+                unhealthyClients.push(socketId);
+            }
+        });
+
+        if (unhealthyClients.length > 0) {
+            logger.warn(`🏥 Found ${unhealthyClients.length} unhealthy connections`);
+
+            // Optionally disconnect unhealthy clients
+            unhealthyClients.forEach(socketId => {
+                const socket = this.io.sockets.sockets.get(socketId);
+                if (socket) {
+                    socket.emit('connection_unhealthy', {
+                        message: 'Connection marked as unhealthy due to missed heartbeats'
+                    });
+                }
+            });
+        }
+    }
+
     private async handleAuthentication(socket: Socket, authData: AuthData): Promise<void> {
         try {
-            logger.info(`🔐 Authenticating: ${socket.id}`, {
-                hasToken: !!authData.token,
-                hasShareToken: !!authData.shareToken,
-                userType: authData.userType,
-                eventId: authData.eventId?.substring(0, 10) + '...'
-            });
-
-            // Find event
             let event;
             let actualEventId: string;
 
@@ -194,7 +352,6 @@ class SimpleWebSocketService {
 
             let user: WebSocketUser;
 
-            // Admin/Co-host authentication
             if (authData.token && !authData.shareToken) {
                 const decoded = jwt.verify(authData.token, keys.jwtSecret as string) as any;
 
@@ -206,7 +363,6 @@ class SimpleWebSocketService {
                         eventId: actualEventId
                     };
                 } else {
-                    // Check co-host (you can add more validation here)
                     user = {
                         id: decoded.userId,
                         name: decoded.name || 'Co-host',
@@ -214,12 +370,9 @@ class SimpleWebSocketService {
                         eventId: actualEventId
                     };
                 }
-            }
-            // Guest authentication
-            else if (authData.shareToken || authData.userType === 'guest') {
+            } else if (authData.shareToken || authData.userType === 'guest') {
                 const shareToken = authData.shareToken || authData.eventId;
 
-                // Basic share token validation
                 if (event.share_token !== shareToken && shareToken !== actualEventId) {
                     socket.emit('auth_error', { message: 'Invalid share token' });
                     return;
@@ -237,19 +390,22 @@ class SimpleWebSocketService {
                 return;
             }
 
-            // Set socket data
             socket.data = {
                 authenticated: true,
                 user: user
             };
 
-            // Store client
+            // Enhanced client state
+            const now = new Date();
             this.connectedClients.set(socket.id, {
                 user: user,
-                rooms: []
+                rooms: [],
+                connectedAt: now,
+                lastHeartbeat: now,
+                isHealthy: true,
+                reconnectCount: 0
             });
 
-            // Send success response
             socket.emit('auth_success', {
                 success: true,
                 user: {
@@ -257,7 +413,11 @@ class SimpleWebSocketService {
                     name: user.name,
                     type: user.type
                 },
-                eventId: actualEventId
+                eventId: actualEventId,
+                connectionSettings: {
+                    heartbeatInterval: this.HEARTBEAT_INTERVAL,
+                    heartbeatTimeout: this.HEARTBEAT_TIMEOUT
+                }
             });
 
             logger.info(`✅ Authenticated: ${socket.id} as ${user.type} - ${user.name}`);
@@ -268,36 +428,23 @@ class SimpleWebSocketService {
         }
     }
 
-    // PUBLIC METHOD: Emit status update to appropriate rooms
     public emitStatusUpdate(payload: StatusUpdatePayload): void {
         const adminRoom = `admin_${payload.eventId}`;
         const guestRoom = `guest_${payload.eventId}`;
 
-        logger.info(`📤 Emitting status update to both rooms:`, {
-            mediaId: payload.mediaId.substring(0, 8) + '...',
-            from: payload.previousStatus,
-            to: payload.newStatus,
-            by: payload.updatedBy.name,
-            event: payload.eventId.substring(0, 8) + '...',
-            adminRoom,
-            guestRoom
-        });
+        logger.info(`📤 Emitting status update: ${payload.mediaId.substring(0, 8)}... (${payload.previousStatus} → ${payload.newStatus})`);
 
-        // Always emit to admin/co-host room (they see all status changes)
         this.io.to(adminRoom).emit('media_status_updated', payload);
-        
-        // Handle guest room logic based on status changes
+
         if (payload.newStatus === 'approved' || payload.newStatus === 'auto_approved') {
-            // If media becomes approved, show it to guests
             this.io.to(guestRoom).emit('media_approved', {
                 mediaId: payload.mediaId,
                 eventId: payload.eventId,
                 mediaData: payload.mediaData,
                 timestamp: payload.timestamp
             });
-        } else if (['approved', 'auto_approved'].includes(payload.previousStatus) && 
-                   !['approved', 'auto_approved'].includes(payload.newStatus)) {
-            // If media was approved but now changed to something else, remove from guests
+        } else if (['approved', 'auto_approved'].includes(payload.previousStatus) &&
+            !['approved', 'auto_approved'].includes(payload.newStatus)) {
             this.io.to(guestRoom).emit('media_removed', {
                 mediaId: payload.mediaId,
                 eventId: payload.eventId,
@@ -305,12 +452,51 @@ class SimpleWebSocketService {
                 timestamp: payload.timestamp
             });
         }
-        
-        // ALSO emit the full status update to guests for consistency
+
         this.io.to(guestRoom).emit('media_status_updated', payload);
     }
 
-    // Get connection stats
+    public getRoomUserCounts(): Record<string, number> {
+        const counts: Record<string, number> = {};
+
+        this.connectedClients.forEach((client) => {
+            client.rooms.forEach(room => {
+                if (room.startsWith('admin_') || room.startsWith('guest_')) {
+                    counts[room] = (counts[room] || 0) + 1;
+                }
+            });
+        });
+
+        return counts;
+    }
+
+    public brodCastRoomCounts(eventId: string): void {
+        const adminRoom = `admin_${eventId}`;
+        const guestRoom = `guest_${eventId}`;
+        const roomCounts = this.getRoomUserCounts();
+
+        const adminCount = roomCounts[adminRoom] || 0;
+        const guestCount = roomCounts[guestRoom] || 0;
+        const total = adminCount + guestCount;
+
+        // Send to admin room (they see both counts)
+        this.io.to(adminRoom).emit('room_user_counts', {
+            eventId,
+            adminCount,
+            guestCount,
+            total
+        });
+
+        // Send to guest room (they see guest count)
+        this.io.to(guestRoom).emit('room_user_counts', {
+            eventId,
+            guestCount,
+            total: guestCount
+        });
+
+        logger.info(`📊 Room counts for ${eventId}: Admin(${adminCount}) Guest(${guestCount}) Total(${total})`);
+    }
+
     public getConnectionStats(): ConnectionStats {
         const stats: ConnectionStats = {
             totalConnections: this.connectedClients.size,
@@ -320,7 +506,6 @@ class SimpleWebSocketService {
 
         this.connectedClients.forEach((client) => {
             stats.byType[client.user.type as keyof typeof stats.byType]++;
-            
             const eventId = client.user.eventId;
             stats.byEvent[eventId] = (stats.byEvent[eventId] || 0) + 1;
         });
@@ -328,39 +513,68 @@ class SimpleWebSocketService {
         return stats;
     }
 
-    // Get clients in specific event
-    public getEventConnections(eventId: string): Array<{ socketId: string; user: WebSocketUser }> {
-        const connections: Array<{ socketId: string; user: WebSocketUser }> = [];
-        
+    public getConnectionHealth(): ConnectionHealth[] {
+        const healthStats: ConnectionHealth[] = [];
+
+        this.connectedClients.forEach((client, socketId) => {
+            const socket = this.io.sockets.sockets.get(socketId);
+            const now = new Date();
+            const latency = socket ? now.getTime() - client.lastHeartbeat.getTime() : -1;
+
+            healthStats.push({
+                socketId,
+                isConnected: !!socket?.connected,
+                isHealthy: client.isHealthy,
+                lastHeartbeat: client.lastHeartbeat,
+                latency,
+                reconnectCount: client.reconnectCount
+            });
+        });
+
+        return healthStats;
+    }
+
+    public getEventConnections(eventId: string): Array<{ socketId: string; user: WebSocketUser; health: any }> {
+        const connections: Array<{ socketId: string; user: WebSocketUser; health: any }> = [];
+
         this.connectedClients.forEach((client, socketId) => {
             if (client.user.eventId === eventId) {
-                connections.push({ socketId, user: client.user });
+                connections.push({
+                    socketId,
+                    user: client.user,
+                    health: {
+                        isHealthy: client.isHealthy,
+                        lastHeartbeat: client.lastHeartbeat,
+                        connectedAt: client.connectedAt,
+                        reconnectCount: client.reconnectCount
+                    }
+                });
             }
         });
-        
+
         return connections;
     }
 
-    // Cleanup
     public async cleanup(): Promise<void> {
         logger.info('🧹 Cleaning up WebSocket service...');
-        
-        // Notify all clients about shutdown
+
+        // Clear all heartbeat intervals
+        this.heartbeatIntervals.forEach(interval => clearInterval(interval));
+        this.heartbeatIntervals.clear();
+
         this.io.emit('server_shutdown', {
             message: 'Server is shutting down for maintenance',
             timestamp: new Date()
         });
-        
-        // Give clients time to receive the message
+
         await new Promise(resolve => setTimeout(resolve, 2000));
-        
+
         this.io.disconnectSockets();
         this.connectedClients.clear();
         logger.info('✅ WebSocket service cleaned up');
     }
 }
 
-// Singleton
 let webSocketService: SimpleWebSocketService | null = null;
 
 export const initializeWebSocketService = (httpServer: HttpServer): SimpleWebSocketService => {
