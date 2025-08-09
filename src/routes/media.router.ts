@@ -15,7 +15,7 @@ import {
     getMediaVariantsController,
     getBatchOptimizedUrlsController
 } from "@controllers/media.controller";
-import { uploadMediaController, uploadMultipleMediaController } from "@controllers/upload.controller";
+import { getBatchUploadStatusController, getUploadStatusController, uploadMediaController, } from "@controllers/upload.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import {
     checkStorageLimitMiddleware,
@@ -46,24 +46,28 @@ const upload = multer({
 
 // === AUTHENTICATED UPLOADS ===
 mediaRouter.post(
-    "/upload",
-    authMiddleware,
-    upload.single('image'),
-    checkFileSizeLimitMiddleware as RequestHandler,
-    checkStorageLimitMiddleware as RequestHandler,
-    checkEventPhotoLimitMiddleware as RequestHandler,
-    uploadMediaController
+  "/upload",
+  authMiddleware,
+  upload.array('images', 10), // Accepts 1-10 files
+  checkFileSizeLimitMiddleware as RequestHandler,
+  checkStorageLimitMiddleware as RequestHandler,
+  checkEventPhotoLimitMiddleware as RequestHandler,
+  uploadMediaController as RequestHandler // Single controller handles all cases
 );
 
-mediaRouter.post(
-    "/upload/multiple",
-    authMiddleware,
-    upload.array('images', 10), // Allow up to 10 files with field name 'images'
-    checkFileSizeLimitMiddleware as RequestHandler,
-    checkStorageLimitMiddleware as RequestHandler,
-    checkEventPhotoLimitMiddleware as RequestHandler,
-    uploadMultipleMediaController // New controller
-);
+// Status endpoints (unchanged)
+mediaRouter.get("/status/:mediaId", getUploadStatusController as RequestHandler);
+mediaRouter.post("/status/batch", getBatchUploadStatusController as RequestHandler);
+
+// mediaRouter.post(
+//     "/upload/multiple",
+//     authMiddleware,
+//     upload.array('images', 10), // Allow up to 10 files with field name 'images'
+//     checkFileSizeLimitMiddleware as RequestHandler,
+//     checkStorageLimitMiddleware as RequestHandler,
+//     checkEventPhotoLimitMiddleware as RequestHandler,
+//     uploadMultipleMediaController // New controller
+// );
 
 // Cover image upload (always requires auth)
 mediaRouter.post(

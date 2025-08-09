@@ -244,118 +244,118 @@ class GuestMediaUploadService {
                     url: media.url
                 });
 
-                try {
-                    // Process image and generate variants
-                    logger.info('🔄 Starting image processing...');
-                    const processingResult = await imageProcessingService.processImage(file, eventId, mediaId);
+                // try {
+                //     // Process image and generate variants
+                //     logger.info('🔄 Starting image processing...');
+                //     const processingResult = await imageProcessingService.processImage(file, eventId, mediaId);
 
-                    // Update media with processing results
-                    media.url = processingResult.original.url; // Replace temp URL with processed URL
-                    media.image_variants = {
-                        original: processingResult.original,
-                        small: processingResult.variants.small,
-                        medium: processingResult.variants.medium,
-                        large: processingResult.variants.large
-                    };
+                //     // Update media with processing results
+                //     media.url = processingResult.original.url; // Replace temp URL with processed URL
+                //     media.image_variants = {
+                //         original: processingResult.original,
+                //         small: processingResult.variants.small,
+                //         medium: processingResult.variants.medium,
+                //         large: processingResult.variants.large
+                //     };
 
-                    // Update metadata
-                    media.metadata = {
-                        width: processingResult.original.width || 0,
-                        height: processingResult.original.height || 0,
-                        duration: 0,
-                        aspect_ratio: processingResult.original.height && processingResult.original.width ?
-                            processingResult.original.height / processingResult.original.width : 1,
-                        color_profile: '',
-                        has_transparency: false,
-                        timestamp: new Date(),
-                        device_info: {
-                            brand: '',
-                            model: '',
-                            os: ''
-                        },
-                        location: {
-                            latitude: null,
-                            longitude: null,
-                            address: ''
-                        },
-                        camera_settings: {
-                            iso: null,
-                            aperture: '',
-                            shutter_speed: '',
-                            focal_length: ''
-                        }
-                    };
+                //     // Update metadata
+                //     media.metadata = {
+                //         width: processingResult.original.width || 0,
+                //         height: processingResult.original.height || 0,
+                //         duration: 0,
+                //         aspect_ratio: processingResult.original.height && processingResult.original.width ?
+                //             processingResult.original.height / processingResult.original.width : 1,
+                //         color_profile: '',
+                //         has_transparency: false,
+                //         timestamp: new Date(),
+                //         device_info: {
+                //             brand: '',
+                //             model: '',
+                //             os: ''
+                //         },
+                //         location: {
+                //             latitude: null,
+                //             longitude: null,
+                //             address: ''
+                //         },
+                //         camera_settings: {
+                //             iso: null,
+                //             aperture: '',
+                //             shutter_speed: '',
+                //             focal_length: ''
+                //         }
+                //     };
 
-                    // Update processing status
-                    const processingStartTime = media.processing.started_at?.getTime() || Date.now();
-                    media.processing = {
-                        status: 'completed',
-                        started_at: media.processing.started_at,
-                        completed_at: new Date(),
-                        processing_time_ms: Date.now() - processingStartTime,
-                        variants_generated: true,
-                        variants_count: 6,
-                        total_variants_size_mb: this.calculateTotalVariantsSize(processingResult.variants),
-                        error_message: '',
-                        retry_count: 0
-                    };
+                //     // Update processing status
+                //     const processingStartTime = media.processing.started_at?.getTime() || Date.now();
+                //     media.processing = {
+                //         status: 'completed',
+                //         started_at: media.processing.started_at,
+                //         completed_at: new Date(),
+                //         processing_time_ms: Date.now() - processingStartTime,
+                //         variants_generated: true,
+                //         variants_count: 6,
+                //         total_variants_size_mb: this.calculateTotalVariantsSize(processingResult.variants),
+                //         error_message: '',
+                //         retry_count: 0
+                //     };
 
-                    await media.save();
+                //     await media.save();
 
-                    // Clean up temp file from ImageKit if different from final URL
-                    if (tempUploadResult.url !== processingResult.original.url) {
-                        try {
-                            await imagekit.deleteFile(tempUploadResult.fileId);
-                            logger.info('🗑️ Cleaned up temporary file from ImageKit');
-                        } catch (deleteError) {
-                            logger.warn('Failed to delete temp file:', deleteError);
-                        }
-                    }
+                //     // Clean up temp file from ImageKit if different from final URL
+                //     if (tempUploadResult.url !== processingResult.original.url) {
+                //         try {
+                //             await imagekit.deleteFile(tempUploadResult.fileId);
+                //             logger.info('🗑️ Cleaned up temporary file from ImageKit');
+                //         } catch (deleteError) {
+                //             logger.warn('Failed to delete temp file:', deleteError);
+                //         }
+                //     }
 
-                    logger.info(`✅ Guest image upload completed`, {
-                        mediaId,
-                        fileName: file.originalname,
-                        processingTime: media.processing.processing_time_ms + 'ms',
-                        approvalStatus: media.approval.status,
-                        finalUrl: media.url
-                    });
+                //     logger.info(`✅ Guest image upload completed`, {
+                //         mediaId,
+                //         fileName: file.originalname,
+                //         processingTime: media.processing.processing_time_ms + 'ms',
+                //         approvalStatus: media.approval.status,
+                //         finalUrl: media.url
+                //     });
 
-                    return {
-                        success: true,
-                        media_id: mediaId,
-                        url: media.url,
-                        approval_status: media.approval.status,
-                        message: 'Image uploaded and processed successfully'
-                    };
+                //     return {
+                //         success: true,
+                //         media_id: mediaId,
+                //         url: media.url,
+                //         approval_status: media.approval.status,
+                //         message: 'Image uploaded and processed successfully'
+                //     };
 
-                } catch (processingError: any) {
-                    logger.error(`❌ Guest image processing failed:`, processingError);
+                // } catch (processingError: any) {
+                //     logger.error(`❌ Guest image processing failed:`, processingError);
 
-                    // Update processing status with error but keep the temp URL
-                    const processingStartTime = media.processing.started_at?.getTime() || Date.now();
-                    media.processing = {
-                        status: 'failed',
-                        started_at: media.processing.started_at,
-                        completed_at: new Date(),
-                        processing_time_ms: Date.now() - processingStartTime,
-                        variants_generated: false,
-                        variants_count: 0,
-                        total_variants_size_mb: 0,
-                        error_message: processingError.message,
-                        retry_count: 0
-                    };
+                //     // Update processing status with error but keep the temp URL
+                //     const processingStartTime = media.processing.started_at?.getTime() || Date.now();
+                //     media.processing = {
+                //         status: 'failed',
+                //         started_at: media.processing.started_at,
+                //         completed_at: new Date(),
+                //         processing_time_ms: Date.now() - processingStartTime,
+                //         variants_generated: false,
+                //         variants_count: 0,
+                //         total_variants_size_mb: 0,
+                //         error_message: processingError.message,
+                //         retry_count: 0
+                //     };
 
-                    await media.save();
+                //     await media.save();
 
-                    // Return success with the temp URL (better than complete failure)
-                    return {
-                        success: true,
-                        media_id: media._id.toString(),
-                        url: media.url, // This is still the temp URL but valid
-                        approval_status: media.approval.status,
-                        message: 'Image uploaded but processing failed - original image saved'
-                    };
-                }
+                //     // Return success with the temp URL (better than complete failure)
+                //     return {
+                //         success: true,
+                //         media_id: media._id.toString(),
+                //         url: media.url, // This is still the temp URL but valid
+                //         approval_status: media.approval.status,
+                //         message: 'Image uploaded but processing failed - original image saved'
+                //     };
+                // }
 
             } catch (uploadError: any) {
                 logger.error('❌ Failed to upload to ImageKit:', uploadError);

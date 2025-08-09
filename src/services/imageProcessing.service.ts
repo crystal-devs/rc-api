@@ -1,412 +1,304 @@
-// services/imageProcessingService.ts - Fixed ImageKit Import and Types
+// services/imageProcessing.service.ts - Compatible with your existing schema
+
 import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs/promises';
 import ImageKit from 'imagekit';
-import { logger } from '../utils/logger';
+import { ImageProcessingJobData, ImageProcessingResult, ProcessedImageVariant } from 'types/queue';
+import { logger } from '@utils/logger';
 
-// ImageKit configuration - adjust based on your config
+// 🚀 IMAGEKIT: Reuse connection
 const imagekit = new ImageKit({
-    publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
-    privateKey: process.env.IMAGE_KIT_PRIVATE_KEY!,
-    urlEndpoint: "https://ik.imagekit.io/roseclick",
+  publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
+  privateKey: process.env.IMAGE_KIT_PRIVATE_KEY!,
+  urlEndpoint: "https://ik.imagekit.io/roseclick",
 });
 
-interface ImageVariant {
-  name: string;
+// 🚀 OPTIMIZED VARIANTS: Map to your schema's small/medium/large structure
+interface VariantConfig {
+  name: 'small' | 'medium' | 'large'; // Match your schema
   width: number;
   quality: number;
   format: 'webp' | 'jpeg';
 }
 
-interface ProcessedVariant {
-  name: string;
-  url: string;
-  width: number;
-  height: number;
-  size_mb: number;
-  format: 'webp' | 'jpeg';
-}
+class OptimizedImageProcessingService {
+  // 🔧 COMPATIBLE: Match your schema structure (small/medium/large)
+  private readonly variants: VariantConfig[] = [
+    // Small variants (thumbnails)
+    { name: 'small', width: 400, quality: 70, format: 'webp' },
+    { name: 'small', width: 400, quality: 75, format: 'jpeg' },
 
-interface ImageProcessingResult {
-  original: {
-    url: string;
-    width: number;
-    height: number;
-    size_mb: number;
-    format: string;
-  };
-  variants: {
-    small: {
-      webp: ProcessedVariant;
-      jpeg: ProcessedVariant;
-    };
-    medium: {
-      webp: ProcessedVariant;
-      jpeg: ProcessedVariant;
-    };
-    large: {
-      webp: ProcessedVariant;
-      jpeg: ProcessedVariant;
-    };
-  };
-}
-
-class ImageProcessingService {
-  // Optimized variant configuration for better performance and quality
-  private readonly variants: ImageVariant[] = [
-    // Small variant - for thumbnails, mobile (reduced quality for smaller files)
-    { name: 'small', width: 400, quality: 75, format: 'webp' },
-    { name: 'small', width: 400, quality: 80, format: 'jpeg' },
-    
-    // Medium variant - for desktop feed, cards (balanced quality/size)
+    // Medium variants (display)
     { name: 'medium', width: 800, quality: 80, format: 'webp' },
     { name: 'medium', width: 800, quality: 85, format: 'jpeg' },
-    
-    // Large variant - for lightbox, full view (high quality)
-    { name: 'large', width: 1400, quality: 85, format: 'webp' },
-    { name: 'large', width: 1400, quality: 90, format: 'jpeg' },
+
+    // Large variants (full size)
+    { name: 'large', width: 1600, quality: 85, format: 'webp' },
+    { name: 'large', width: 1600, quality: 90, format: 'jpeg' },
   ];
 
   /**
-   * Process uploaded image and generate all variants
+   * 🚀 MAIN PROCESSING METHOD: Compatible with your existing system
    */
-  async processImage(
-    file: Express.Multer.File,
-    event_id: string,
-    media_id: string
-  ): Promise<ImageProcessingResult> {
+  async processImage(jobData: ImageProcessingJobData): Promise<ImageProcessingResult> {
+    const { mediaId, eventId, filePath, originalFilename } = jobData;
+    const startTime = Date.now();
+
     try {
-      logger.info(`🖼️ Starting image processing for ${file.originalname}`);
-      
-      const fileBuffer = await fs.readFile(file.path);
-      
-      // Get original image metadata
-      const originalMetadata = await sharp(fileBuffer).metadata();
-      
-      if (!originalMetadata.width || !originalMetadata.height) {
-        throw new Error('Could not read image dimensions');
+      logger.info(`🔄 Processing: ${originalFilename}`);
+
+      // 🚀 STEP 1: Read and validate file
+      const fileBuffer = await fs.readFile(filePath);
+      const metadata = await sharp(fileBuffer).metadata();
+
+      if (!metadata.width || !metadata.height) {
+        throw new Error('Invalid image: Could not read dimensions');
       }
 
-      // Validate image size (prevent processing extremely large images)
-      if (originalMetadata.width > 5000 || originalMetadata.height > 5000) {
-        logger.warn(`Large image detected: ${originalMetadata.width}x${originalMetadata.height}`);
-      }
+      logger.debug(`📐 Image dimensions: ${metadata.width}x${metadata.height}`);
 
-      // Upload original to ImageKit
-      const originalResult = await this.uploadOriginal(
-        fileBuffer,
-        file.originalname,
-        event_id,
-        media_id
-      );
+      // 🚀 STEP 2: Upload original and process variants in parallel
+      const [originalResult, processedVariants] = await Promise.all([
+        this.uploadOriginal(fileBuffer, jobData),
+        this.processAllVariants(fileBuffer, eventId, mediaId, metadata)
+      ]);
 
-      // Process all variants in parallel for better performance
-      const variantPromises = this.variants.map(variant =>
-        this.processVariant(fileBuffer, variant, event_id, media_id, originalMetadata)
-      );
+      // 🚀 STEP 3: Organize results to match your schema
+      const organizedVariants = this.organizeVariantsForYourSchema(processedVariants);
 
-      const processedVariants = await Promise.all(variantPromises);
+      const processingTime = Date.now() - startTime;
+      logger.info(`✅ Processing completed: ${originalFilename} in ${processingTime}ms`);
 
-      // Organize variants by size and format
-      const organizedVariants = this.organizeVariants(processedVariants);
-
-      const result: ImageProcessingResult = {
+      return {
+        mediaId,
         original: {
           url: originalResult.url,
-          width: originalMetadata.width,
-          height: originalMetadata.height,
+          width: metadata.width,
+          height: metadata.height,
           size_mb: this.bytesToMB(originalResult.size),
-          format: originalMetadata.format || 'jpeg'
+          format: metadata.format || 'jpeg'
         },
         variants: organizedVariants
       };
 
-      logger.info(`✅ Image processing completed for ${file.originalname}`, {
-        original_size: `${result.original.width}x${result.original.height}`,
-        variants_count: this.variants.length,
-        total_size_mb: this.calculateTotalSize(result),
-        compression_ratio: `${Math.round((1 - this.calculateTotalVariantsSize(result) / result.original.size_mb) * 100)}%`
-      });
-
-      return result;
-
-    } catch (error: any) {
-      logger.error(`❌ Image processing failed for ${file.originalname}:`, error);
-      throw new Error(`Image processing failed: ${error.message}`);
+    } finally {
+      // 🧹 CLEANUP: Remove temp file
+      try {
+        await fs.unlink(filePath);
+        logger.debug(`🗑️ Cleaned up temp file: ${filePath}`);
+      } catch (error) {
+        logger.warn(`Failed to cleanup file ${filePath}:`, error);
+      }
     }
   }
 
   /**
-   * Upload original image to ImageKit with optimization
+   * 🚀 PARALLEL PROCESSING: Process all variants simultaneously
    */
-  private async uploadOriginal(
-    buffer: Buffer,
-    originalFilename: string,
-    event_id: string,
-    media_id: string
-  ): Promise<{ url: string; size: number }> {
-    const fileName = `${media_id}_original${path.extname(originalFilename)}`;
-    
-    const uploadResult = await imagekit.upload({
-      file: buffer,
-      fileName,
-      folder: `/events/${event_id}/original`,
-      useUniqueFileName: false,
-      tags: ['original', event_id, media_id],
-      // Add some basic optimization for original
-      transformation: {
-        pre: 'q_auto:good,f_auto' // Auto quality and format optimization
-      }
-    });
+  private async processAllVariants(
+    originalBuffer: Buffer,
+    eventId: string,
+    mediaId: string,
+    originalMetadata: sharp.Metadata
+  ): Promise<(ProcessedImageVariant & { name: string })[]> {
 
-    return {
-      url: uploadResult.url,
-      size: buffer.length
-    };
+    // 🚀 PARALLEL: Process all variants at once
+    const variantPromises = this.variants.map(variant =>
+      this.processVariant(originalBuffer, variant, eventId, mediaId, originalMetadata)
+    );
+
+    const results = await Promise.all(variantPromises);
+    logger.debug(`✅ Processed ${results.length} variants in parallel`);
+
+    return results;
   }
 
   /**
-   * Process a single image variant with optimized settings
+   * 🚀 OPTIMIZED: Single variant processing
    */
   private async processVariant(
     originalBuffer: Buffer,
-    variant: ImageVariant,
-    event_id: string,
-    media_id: string,
+    variant: VariantConfig,
+    eventId: string,
+    mediaId: string,
     originalMetadata: sharp.Metadata
-  ): Promise<ProcessedVariant> {
-    try {
-      // Calculate target height maintaining aspect ratio
-      const aspectRatio = originalMetadata.height! / originalMetadata.width!;
-      const targetHeight = Math.round(variant.width * aspectRatio);
+  ): Promise<ProcessedImageVariant & { name: string }> {
 
-      // Process image with Sharp using optimized settings
-      let sharpInstance = sharp(originalBuffer)
-        .resize(variant.width, targetHeight, {
-          fit: 'inside', // Maintain aspect ratio
-          withoutEnlargement: true, // Don't upscale smaller images
-          kernel: sharp.kernel.lanczos3 // Better quality resizing
-        });
+    const aspectRatio = originalMetadata.height! / originalMetadata.width!;
+    const targetHeight = Math.round(variant.width * aspectRatio);
 
-      // Apply format-specific optimizations
-      if (variant.format === 'webp') {
-        sharpInstance = sharpInstance.webp({
-          quality: variant.quality,
-          effort: 4, // Better compression (0-6, higher is slower but better)
-          nearLossless: false, // Use lossy compression for smaller files
-          smartSubsample: true // Better quality at low resolutions
-        });
-      } else if (variant.format === 'jpeg') {
-        sharpInstance = sharpInstance.jpeg({
-          quality: variant.quality,
-          progressive: true, // Progressive JPEG for better perceived loading
-          mozjpeg: true, // Better compression algorithm
-          optimiseScans: true, // Optimize progressive scans
-          trellisQuantisation: true // Better quality at same file size
-        });
-      }
-
-      const processedBuffer = await sharpInstance.toBuffer();
-      const processedMetadata = await sharp(processedBuffer).metadata();
-
-      // Upload to ImageKit
-      const fileName = `${media_id}_${variant.name}.${variant.format}`;
-      const uploadResult = await imagekit.upload({
-        file: processedBuffer,
-        fileName,
-        folder: `/events/${event_id}/variants/${variant.name}`,
-        useUniqueFileName: false,
-        tags: [variant.name, variant.format, event_id, media_id, 'variant']
+    // 🚀 SHARP PIPELINE: Optimized settings
+    let sharpInstance = sharp(originalBuffer, {
+      sequentialRead: true,
+      limitInputPixels: false
+    })
+      .resize(variant.width, targetHeight, {
+        fit: 'inside',
+        withoutEnlargement: true,
+        kernel: sharp.kernel.lanczos3
       });
 
-      return {
-        name: variant.name,
-        url: uploadResult.url,
-        width: processedMetadata.width!,
-        height: processedMetadata.height!,
-        size_mb: this.bytesToMB(processedBuffer.length),
-        format: variant.format
-      };
-
-    } catch (error: any) {
-      logger.error(`Failed to process variant ${variant.name} (${variant.format}):`, error);
-      throw error;
+    // 🔧 FORMAT-SPECIFIC OPTIMIZATIONS
+    if (variant.format === 'webp') {
+      sharpInstance = sharpInstance.webp({
+        quality: variant.quality,
+        effort: 4,
+        smartSubsample: true,
+        nearLossless: false
+      });
+    } else {
+      sharpInstance = sharpInstance.jpeg({
+        quality: variant.quality,
+        progressive: true,
+        mozjpeg: true,
+        optimizeScans: true
+      });
     }
+
+    // 🚀 PROCESS: Convert to buffer
+    const processedBuffer = await sharpInstance.toBuffer();
+    const processedMetadata = await sharp(processedBuffer).metadata();
+
+    // 🚀 UPLOAD: To ImageKit
+    const fileName = `${mediaId}_${variant.name}.${variant.format}`;
+    const uploadResult = await imagekit.upload({
+      file: processedBuffer,
+      fileName,
+      folder: `/events/${eventId}/variants`,
+      useUniqueFileName: false,
+      tags: [variant.name, variant.format, eventId],
+      transformation: {
+        pre: 'q_auto,f_auto'
+      }
+    });
+
+    logger.debug(`✅ Uploaded variant: ${fileName} (${this.bytesToMB(processedBuffer.length)}MB)`);
+
+    return {
+      name: variant.name,
+      url: uploadResult.url,
+      width: processedMetadata.width!,
+      height: processedMetadata.height!,
+      size_mb: this.bytesToMB(processedBuffer.length),
+      format: variant.format
+    };
   }
 
   /**
-   * Organize processed variants by size and format
+   * 🚀 UPLOAD ORIGINAL: Optimized original upload
    */
-  private organizeVariants(variants: ProcessedVariant[]) {
+  private async uploadOriginal(
+    buffer: Buffer,
+    jobData: ImageProcessingJobData
+  ): Promise<{ url: string; size: number }> {
+
+    const fileName = `${jobData.mediaId}_original${path.extname(jobData.originalFilename)}`;
+
+    const result = await imagekit.upload({
+      file: buffer,
+      fileName,
+      folder: `/events/${jobData.eventId}/originals`,
+      useUniqueFileName: false,
+      tags: ['original', jobData.eventId],
+      transformation: {
+        pre: 'q_90,f_auto'
+      }
+    });
+
+    logger.debug(`✅ Uploaded original: ${fileName} (${this.bytesToMB(buffer.length)}MB)`);
+
+    return { url: result.url, size: buffer.length };
+  }
+
+  /**
+   * 🚀 ORGANIZE: Convert to your schema structure (small/medium/large)
+   */
+  private organizeVariantsForYourSchema(variants: (ProcessedImageVariant & { name: string })[]) {
     const organized = {
-      small: { webp: null as ProcessedVariant | null, jpeg: null as ProcessedVariant | null },
-      medium: { webp: null as ProcessedVariant | null, jpeg: null as ProcessedVariant | null },
-      large: { webp: null as ProcessedVariant | null, jpeg: null as ProcessedVariant | null }
+      small: { webp: null as ProcessedImageVariant | null, jpeg: null as ProcessedImageVariant | null },
+      medium: { webp: null as ProcessedImageVariant | null, jpeg: null as ProcessedImageVariant | null },
+      large: { webp: null as ProcessedImageVariant | null, jpeg: null as ProcessedImageVariant | null }
     };
 
     variants.forEach(variant => {
-      if (variant.name === 'small') {
-        organized.small[variant.format] = variant;
-      } else if (variant.name === 'medium') {
-        organized.medium[variant.format] = variant;
-      } else if (variant.name === 'large') {
-        organized.large[variant.format] = variant;
+      const { name, ...variantData } = variant;
+
+      if ((name === 'small' || name === 'medium' || name === 'large') &&
+        (variantData.format === 'webp' || variantData.format === 'jpeg')) {
+        organized[name][variantData.format] = variantData;
       }
     });
 
-    // Ensure all variants are populated
-    if (!organized.small.webp || !organized.small.jpeg ||
-        !organized.medium.webp || !organized.medium.jpeg ||
-        !organized.large.webp || !organized.large.jpeg) {
-      throw new Error('Failed to generate all required variants');
+    // 🔧 VALIDATION: Ensure all variants exist
+    const sizeNames: Array<keyof typeof organized> = ['small', 'medium', 'large'];
+    for (const sizeName of sizeNames) {
+      const formats = organized[sizeName];
+      if (!formats.webp || !formats.jpeg) {
+        logger.warn(`⚠️ Missing variant: ${sizeName} - some formats may be incomplete`);
+      }
     }
 
-    return organized as {
-      small: { webp: ProcessedVariant; jpeg: ProcessedVariant };
-      medium: { webp: ProcessedVariant; jpeg: ProcessedVariant };
-      large: { webp: ProcessedVariant; jpeg: ProcessedVariant };
-    };
+    return organized;
   }
 
   /**
-   * Calculate total size of all variants
-   */
-  private calculateTotalSize(result: ImageProcessingResult): number {
-    let total = result.original.size_mb;
-    total += this.calculateTotalVariantsSize(result);
-    return Math.round(total * 100) / 100;
-  }
-
-  /**
-   * Calculate total size of variants only (excluding original)
-   */
-  private calculateTotalVariantsSize(result: ImageProcessingResult): number {
-    let total = 0;
-    Object.values(result.variants).forEach(sizeVariants => {
-      Object.values(sizeVariants).forEach(formatVariant => {
-        total += formatVariant.size_mb;
-      });
-    });
-    return total;
-  }
-
-  /**
-   * Convert bytes to MB with precision
+   * 🛠️ UTILITIES
    */
   private bytesToMB(bytes: number): number {
     return Math.round((bytes / (1024 * 1024)) * 100) / 100;
   }
 
   /**
-   * Validate if file is a supported image format
+   * 🔧 VALIDATION: Check if file is processable
    */
   isValidImageFormat(file: Express.Multer.File): boolean {
     const supportedMimeTypes = [
-      'image/jpeg',
-      'image/jpg', 
-      'image/png',
-      'image/webp',
-      'image/heic', // iOS photos
-      'image/heif', // iOS photos
-      'image/tiff',
-      'image/tif'
+      'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
+      'image/heic', 'image/heif', 'image/tiff', 'image/tif'
     ];
-
     return supportedMimeTypes.includes(file.mimetype.toLowerCase());
   }
 
   /**
-   * Get estimated processing time based on file size
+   * 🔧 ESTIMATION: Processing time estimate
    */
   getEstimatedProcessingTime(fileSizeBytes: number): number {
-    // Rough estimate: 1MB = ~2 seconds processing time
     const sizeMB = this.bytesToMB(fileSizeBytes);
-    return Math.max(5, Math.min(sizeMB * 2, 30)); // Between 5-30 seconds
-  }
-
-  /**
-   * Get optimized image URL for specific context
-   */
-  getOptimizedUrl(
-    variants: any, 
-    context: 'mobile' | 'desktop' | 'lightbox', 
-    supportsWebP: boolean = true
-  ): string {
-    try {
-      let targetVariant;
-      
-      switch (context) {
-        case 'mobile':
-          targetVariant = variants.small;
-          break;
-        case 'desktop':
-          targetVariant = variants.medium;
-          break;
-        case 'lightbox':
-          targetVariant = variants.large;
-          break;
-        default:
-          targetVariant = variants.medium;
-      }
-
-      // Return WebP if supported and available, otherwise JPEG
-      if (supportsWebP && targetVariant?.webp?.url) {
-        return targetVariant.webp.url;
-      } else if (targetVariant?.jpeg?.url) {
-        return targetVariant.jpeg.url;
-      }
-
-      // Fallback to any available variant
-      return variants.medium?.jpeg?.url || 
-             variants.small?.jpeg?.url || 
-             variants.large?.jpeg?.url || '';
-      
-    } catch (error) {
-      logger.error('Failed to get optimized URL:', error);
-      return '';
-    }
-  }
-
-  /**
-   * Cleanup processing resources
-   */
-  async cleanup(): Promise<void> {
-    // Any cleanup logic if needed
-    logger.debug('Image processing service cleanup completed');
+    return Math.max(3, Math.min(sizeMB * 1.2, 20)); // 3-20 seconds
   }
 }
 
-export const imageProcessingService = new ImageProcessingService();
+// 🚀 SINGLETON: Export single instance
+export const imageProcessingService = new OptimizedImageProcessingService();
 
-// Helper function to get the best image URL for frontend
-export const getBestImageUrl = (
-  variants: any, 
-  context: 'mobile' | 'desktop' | 'lightbox' = 'desktop',
-  userAgent?: string
-): string => {
-  // Detect WebP support from user agent (server-side detection)
-  const supportsWebP = userAgent ? 
-    /Chrome|Firefox|Edge|Opera|Android/.test(userAgent) && !/Safari|iPhone|iPad/.test(userAgent) : 
-    true; // Default to true for modern browsers
+/**
+ * 🚀 HELPER FUNCTIONS: Compatible with your schema
+ */
+export const calculateVariantsCount = (variants: any): number => {
+  if (!variants || typeof variants !== 'object') return 0;
 
-  return imageProcessingService.getOptimizedUrl(variants, context, supportsWebP);
+  let count = 0;
+  // Count small/medium/large variants
+  for (const size of ['small', 'medium', 'large']) {
+    if (variants[size]) {
+      if (variants[size].webp) count++;
+      if (variants[size].jpeg) count++;
+    }
+  }
+  return count;
 };
 
-// Helper function to get responsive image srcset
-export const getResponsiveSrcSet = (variants: any, supportsWebP: boolean = true): string => {
-  const format = supportsWebP ? 'webp' : 'jpeg';
-  const srcset = [];
-  
-  if (variants.small?.[format]?.url) {
-    srcset.push(`${variants.small[format].url} ${variants.small[format].width}w`);
+export const calculateTotalVariantsSize = (variants: any): number => {
+  if (!variants || typeof variants !== 'object') return 0;
+
+  let total = 0;
+  // Calculate size for small/medium/large variants
+  for (const size of ['small', 'medium', 'large']) {
+    if (variants[size]) {
+      if (variants[size].webp?.size_mb) total += variants[size].webp.size_mb;
+      if (variants[size].jpeg?.size_mb) total += variants[size].jpeg.size_mb;
+    }
   }
-  if (variants.medium?.[format]?.url) {
-    srcset.push(`${variants.medium[format].url} ${variants.medium[format].width}w`);
-  }
-  if (variants.large?.[format]?.url) {
-    srcset.push(`${variants.large[format].url} ${variants.large[format].width}w`);
-  }
-  
-  return srcset.join(', ');
+  return Math.round(total * 100) / 100;
 };

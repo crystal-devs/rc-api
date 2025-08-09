@@ -215,15 +215,16 @@ class SimpleWebSocketService {
                 });
             });
 
-            socket.on('disconnect', (reason) => {
+            socket.on('disconnect', (reason: string) => {
                 clearTimeout(authTimeout);
                 this.handleDisconnection(socket, reason);
             });
 
-            socket.on('error', (error) => {
+            socket.on('error', (error: Error) => {
                 logger.error(`❌ Socket error ${socket.id}:`, error);
                 this.markUnhealthy(socket.id);
             });
+
         });
     }
 

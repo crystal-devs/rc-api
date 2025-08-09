@@ -1,40 +1,13 @@
-// controllers/upload.controller.ts - Improved and cleaned up
+// controllers/upload.controller.ts - Optimized for smooth upload experience
 
-import { Request, Response, NextFunction, RequestHandler } from 'express';
+import { Request, Response, NextFunction } from 'express';
 import fs from 'fs/promises';
 import mongoose from 'mongoose';
-import ImageKit from 'imagekit';
 import { logger } from '@utils/logger';
-import { getOrCreateDefaultAlbum } from '@services/album.service';
-import { imageProcessingService } from '@services/imageProcessing.service';
 import { checkUserLimitsService } from '@services/user.service';
-import { determineApprovalStatus } from '@utils/user.utils';
 import { Media } from '@models/media.model';
-import { updateUsageForUpload } from '@models/user-usage.model';
+import { getImageQueue } from 'queues/imageQueue';
 
-// Enhanced service response interface
-interface ServiceResponse<T> {
-    status: boolean;
-    code: number;
-    message: string;
-    data: T | null;
-    error: any;
-    other?: any;
-}
-
-// Helper function to send consistent responses
-function sendResponse<T>(res: Response, response: ServiceResponse<T>) {
-    res.status(response.code).json(response);
-}
-
-// ImageKit configuration with error handling
-const imagekit = new ImageKit({
-    publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
-    privateKey: process.env.IMAGE_KIT_PRIVATE_KEY!,
-    urlEndpoint: "https://ik.imagekit.io/roseclick",
-});
-
-// Enhanced request interfaces
 interface AuthenticatedRequest extends Request {
     user: {
         _id: mongoose.Types.ObjectId | string;
@@ -45,764 +18,368 @@ interface AuthenticatedRequest extends Request {
     sessionID?: string;
 }
 
-interface MediaCreationType {
-    _id?: mongoose.Types.ObjectId;
-    url: string;
-    type: 'image' | 'video';
-    album_id: mongoose.Types.ObjectId;
-    event_id: mongoose.Types.ObjectId;
-    uploaded_by?: mongoose.Types.ObjectId;
-    guest_uploader?: any;
-    uploader_type: 'registered_user' | 'guest';
-    original_filename: string;
-    size_mb: number;
-    format: string;
-    image_variants?: any;
-    metadata?: any;
-    processing?: any;
-    approval?: any;
-    upload_context?: any;
-    toObject?: () => any;
-}
-
 /**
- * Main upload controller for authenticated users
+ * 🚀 OPTIMIZED: Ultra-fast upload controller
+ * Goal: Return response to frontend immediately, process in background
  */
-export const uploadMediaController: RequestHandler = async (
+export const uploadMediaController = async (
     req: AuthenticatedRequest,
     res: Response,
     next: NextFunction
-): Promise<void> => {
+): Promise<Response | void> => {
+    const startTime = Date.now();
+    
     try {
-        const file = req.file;
-        let { album_id, event_id } = req.body;
-        const user_id = req.user._id;
+        const files = req.files as Express.Multer.File[] || (req.file ? [req.file] : []);
+        const { album_id, event_id } = req.body;
+        const user_id = req.user._id.toString();
 
-        logger.info('📤 Media upload request received', {
-            file: file ? `${file.originalname} (${file.size} bytes)` : 'No file',
+        logger.info('📤 Upload request:', { 
+            fileCount: files.length, 
+            event_id, 
             album_id,
-            event_id,
-            user_id: user_id?.toString(),
-            mimetype: file?.mimetype
+            userId: user_id
         });
 
-        // Validation
-        if (!file) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "Missing file",
-                data: null,
-                error: { message: "File is required" },
-                other: null
-            });
-            return;
-        }
-
-        if (!event_id) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "Missing event_id",
-                data: null,
-                error: { message: "event_id is required" },
-                other: null
-            });
-            return;
-        }
-
-        // Validate event_id format
-        if (!mongoose.Types.ObjectId.isValid(event_id)) {
-            await cleanupFile(file);
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "Invalid event_id format",
-                data: null,
-                error: { message: "event_id must be a valid ObjectId" },
-                other: null
-            });
-            return;
-        }
-
-        // Validate file type
-        const fileType = getFileType(file);
-        if (!fileType) {
-            await cleanupFile(file);
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "Unsupported file type",
-                data: null,
-                error: { message: "Only image and video files are supported" },
-                other: null
-            });
-            return;
-        }
-
-        // For images, validate format support
-        if (fileType === 'image' && !isValidImageFormat(file)) {
-            await cleanupFile(file);
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "Unsupported image format",
-                data: null,
-                error: { message: "Supported formats: JPEG, PNG, WebP, HEIC, TIFF" },
-                other: null
-            });
-            return;
-        }
-
-        // Handle default album
-        if (!album_id) {
-            const defaultAlbumResponse = await getOrCreateDefaultAlbum(event_id, user_id.toString());
-            if (!defaultAlbumResponse.status || !defaultAlbumResponse.data) {
-                await cleanupFile(file);
-                res.status(500).json({
-                    status: false,
-                    code: 500,
-                    message: "Failed to get or create default album",
-                    data: null,
-                    error: { message: "Could not create or find default album" },
-                    other: null
-                });
-                return;
-            }
-            album_id = defaultAlbumResponse.data._id.toString();
-        }
-
-        // Validate album_id format if provided
-        if (album_id && !mongoose.Types.ObjectId.isValid(album_id)) {
-            await cleanupFile(file);
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "Invalid album_id format",
-                data: null,
-                error: { message: "album_id must be a valid ObjectId" },
-                other: null
-            });
-            return;
-        }
-
-        // Process upload based on file type
-        let response: ServiceResponse<MediaCreationType>;
-        if (fileType === 'image') {
-            response = await uploadImageWithProcessing(file, user_id.toString(), album_id, event_id, req);
-        } else {
-            response = await uploadVideoService(file, user_id.toString(), album_id, event_id, req);
-        }
-
-        sendResponse(res, response);
-    } catch (error: any) {
-        logger.error('Upload controller error:', error);
-        if (req.file?.path) {
-            await cleanupFile(req.file).catch(() => { });
-        }
-        next(error);
-    }
-};
-
-export const uploadMultipleMediaController: RequestHandler = async (
-    req: AuthenticatedRequest,
-    res: Response,
-    next: NextFunction
-): Promise<void> => {
-    try {
-        const files = (req.files as Express.Multer.File[]) || [];
-        let { album_id, event_id } = req.body;
-        const user_id = req.user._id;
-
-        logger.info('📤 Multiple media upload request received', {
-            fileCount: files.length,
-            files: files.map(f => `${f.originalname} (${f.size} bytes)`),
-            album_id,
-            event_id,
-            user_id: user_id?.toString()
-        });
-
-        // Validation
+        // 🔧 FAST VALIDATION: Early validation without complex checks
         if (!files || files.length === 0) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "No files provided",
-                data: null,
-                error: { message: "At least one file is required" },
-                other: null
+            return res.status(400).json({ 
+                status: false, 
+                message: "No files provided" 
             });
-            return;
         }
 
-        if (!event_id) {
-            // Cleanup all files
-            await Promise.all(files.map(file => cleanupFile(file)));
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "Missing event_id",
-                data: null,
-                error: { message: "event_id is required" },
-                other: null
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            await cleanupFiles(files);
+            return res.status(400).json({ 
+                status: false, 
+                message: "Valid event_id is required" 
             });
-            return;
         }
 
-        // Validate event_id format
-        if (!mongoose.Types.ObjectId.isValid(event_id)) {
-            await Promise.all(files.map(file => cleanupFile(file)));
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "Invalid event_id format",
-                data: null,
-                error: { message: "event_id must be a valid ObjectId" },
-                other: null
-            });
-            return;
-        }
+        // 🚀 PARALLEL PROCESSING: Process all files concurrently
+        const uploadPromises = files.map(file => processFileUpload(file, {
+            userId: user_id,
+            eventId: event_id,
+            albumId: album_id || new mongoose.Types.ObjectId().toString()
+        }));
 
-        // Handle default album
-        if (!album_id) {
-            const defaultAlbumResponse = await getOrCreateDefaultAlbum(event_id, user_id.toString());
-            if (!defaultAlbumResponse.status || !defaultAlbumResponse.data) {
-                await Promise.all(files.map(file => cleanupFile(file)));
-                res.status(500).json({
-                    status: false,
-                    code: 500,
-                    message: "Failed to get or create default album",
-                    data: null,
-                    error: { message: "Could not create or find default album" },
-                    other: null
-                });
-                return;
-            }
-            album_id = defaultAlbumResponse.data._id.toString();
-        }
+        const results = await Promise.allSettled(uploadPromises);
 
-        // Process all files
-        const results = [];
-        const errors = [];
+        // 🔧 SEPARATE SUCCESS/FAILURES
+        const successful = results
+            .filter((result): result is PromiseFulfilledResult<any> => result.status === 'fulfilled')
+            .map(result => result.value);
 
-        for (const file of files) {
-            try {
-                // Validate file type
-                const fileType = getFileType(file);
-                if (!fileType) {
-                    await cleanupFile(file);
-                    errors.push({
-                        filename: file.originalname,
-                        error: "Unsupported file type"
-                    });
-                    continue;
-                }
+        const failed = results
+            .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+            .map((result, index) => ({
+                filename: files[index]?.originalname || 'unknown',
+                error: result.reason?.message || 'Upload failed'
+            }));
 
-                // For images, validate format support
-                if (fileType === 'image' && !isValidImageFormat(file)) {
-                    await cleanupFile(file);
-                    errors.push({
-                        filename: file.originalname,
-                        error: "Unsupported image format"
-                    });
-                    continue;
-                }
-
-                // Process upload based on file type
-                let response: ServiceResponse<MediaCreationType>;
-                if (fileType === 'image') {
-                    response = await uploadImageWithProcessing(file, user_id.toString(), album_id, event_id, req);
-                } else {
-                    response = await uploadVideoService(file, user_id.toString(), album_id, event_id, req);
-                }
-
-                if (response.status) {
-                    results.push({
-                        filename: file.originalname,
-                        success: true,
-                        data: response.data
-                    });
-                } else {
-                    errors.push({
-                        filename: file.originalname,
-                        error: response.message || 'Upload failed'
-                    });
-                }
-
-            } catch (fileError: any) {
-                logger.error(`Error uploading ${file.originalname}:`, fileError);
-                await cleanupFile(file);
-                errors.push({
-                    filename: file.originalname,
-                    error: fileError.message || 'Upload failed'
-                });
-            }
-        }
-
-        // Calculate summary
-        const successCount = results.length;
-        const failCount = errors.length;
-
-        logger.info('📊 Multiple upload summary:', {
-            total: files.length,
-            success: successCount,
-            failed: failCount
+        const processingTime = Date.now() - startTime;
+        logger.info(`📊 Upload completed in ${processingTime}ms:`, {
+            successful: successful.length,
+            failed: failed.length,
+            total: files.length
         });
 
-        // Send response
-        const response = {
-            status: successCount > 0,
-            code: successCount > 0 ? 200 : 400,
-            message: failCount === 0 ?
-                `All ${successCount} file(s) uploaded successfully!` :
-                successCount > 0 ?
-                    `${successCount} file(s) uploaded, ${failCount} failed` :
-                    'All uploads failed',
+        // 🚨 CRITICAL: Send response immediately to frontend
+        return res.status(200).json({
+            status: successful.length > 0,
+            message: generateSuccessMessage(successful.length, failed.length, files.length),
             data: {
-                results,
-                errors: errors.length > 0 ? errors : undefined,
+                uploads: successful,
+                errors: failed.length > 0 ? failed : undefined,
                 summary: {
                     total: files.length,
-                    success: successCount,
-                    failed: failCount
-                }
-            },
-            error: errors.length > 0 ? { message: 'Some uploads failed', details: errors } : null,
-            other: {
-                event_id,
-                album_id
+                    successful: successful.length,
+                    failed: failed.length,
+                    processingTime: `${processingTime}ms`
+                },
+                note: "Files uploaded successfully! Processing in background..."
             }
-        };
-
-        res.status(response.code).json(response);
+        });
 
     } catch (error: any) {
-        logger.error('Multiple upload controller error:', error);
+        logger.error('❌ Upload controller error:', error);
 
-        // Cleanup all files on error
-        if (req.files) {
-            const files = req.files as Express.Multer.File[];
-            await Promise.all(files.map(file => cleanupFile(file).catch(() => { })));
+        // Cleanup files on error
+        if (req.files || req.file) {
+            const files = Array.isArray(req.files) ? req.files : [req.file].filter(Boolean);
+            await cleanupFiles(files as Express.Multer.File[]);
         }
 
-        res.status(500).json({
+        return res.status(500).json({
             status: false,
-            code: 500,
-            message: 'Multiple upload failed',
-            data: null,
-            error: { message: 'Internal server error occurred' },
-            other: null
+            message: "Upload failed due to server error",
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
 
 /**
- * Upload and process image with all variants
+ * 🚀 OPTIMIZED: Single file processing with minimal database overhead
  */
-export const uploadImageWithProcessing = async (
+async function processFileUpload(
     file: Express.Multer.File,
-    user_id: string,
-    album_id: string,
-    event_id: string,
-    req: AuthenticatedRequest
-): Promise<ServiceResponse<MediaCreationType>> => {
+    context: { userId: string; eventId: string; albumId: string }
+): Promise<any> {
     try {
-        logger.info(`🖼️ Starting image upload and processing: ${file.originalname}`);
-
-        const fileSizeInMB = file.size / (1024 * 1024);
-
-        // Check storage limits
-        const canUpload = await checkUserLimitsService(user_id, 'storage', fileSizeInMB);
-        if (!canUpload) {
+        // 🔧 FAST VALIDATION: Quick file checks
+        if (!isValidImageFile(file)) {
             await cleanupFile(file);
-            return {
-                status: false,
-                code: 403,
-                message: "Storage limit exceeded",
-                data: null,
-                error: { message: "You have reached your storage limit. Please upgrade your subscription." },
-                other: null
-            };
+            throw new Error(`Unsupported file type: ${file.mimetype}`);
         }
 
-        // Determine approval status
-        const approvalConfig = await determineApprovalStatus(event_id, user_id);
-        logger.info(`📸 Approval config for user ${user_id}:`, approvalConfig);
-
-        // ✅ FIX: Process image FIRST, then create media record
-        let processingResult;
-        let media_id = new mongoose.Types.ObjectId().toString();
-
-        try {
-            // Process image and generate variants FIRST
-            processingResult = await imageProcessingService.processImage(file, event_id, media_id);
-
-            logger.info(`✅ Image processing completed for ${file.originalname}`);
-
-        } catch (processingError: any) {
-            logger.error(`❌ Image processing failed for ${file.originalname}:`, processingError);
-
-            // If processing fails, try to upload original to ImageKit as fallback
-            let fallbackUrl = '';
-            try {
-                const fileBuffer = await fs.readFile(file.path);
-                const uploadResult = await imagekit.upload({
-                    file: fileBuffer,
-                    fileName: `${Date.now()}_${file.originalname}`,
-                    folder: `/events/${event_id}/images`,
-                });
-                fallbackUrl = uploadResult.url;
-                logger.info('✅ Fallback upload successful');
-            } catch (uploadError) {
-                logger.error('❌ Fallback upload also failed:', uploadError);
-                return {
-                    status: false,
-                    code: 500,
-                    message: "Image processing and fallback upload failed",
-                    data: null,
-                    error: { message: processingError.message },
-                    other: null
-                };
-            }
-
-            // Create media record with fallback URL
-            const media = new Media({
-                _id: new mongoose.Types.ObjectId(media_id),
-                url: fallbackUrl, // ✅ URL is available
-                type: 'image',
-                album_id: new mongoose.Types.ObjectId(album_id),
-                event_id: new mongoose.Types.ObjectId(event_id),
-                uploaded_by: new mongoose.Types.ObjectId(user_id),
-                uploader_type: 'registered_user',
-                original_filename: file.originalname,
-                size_mb: fileSizeInMB,
-                format: file.mimetype.split('/')[1],
-                processing: {
-                    status: 'failed',
-                    started_at: new Date(),
-                    completed_at: new Date(),
-                    processing_time_ms: 0,
-                    variants_generated: false,
-                    variants_count: 0,
-                    total_variants_size_mb: 0,
-                    error_message: processingError.message,
-                    retry_count: 0
-                },
-                approval: {
-                    status: approvalConfig.status,
-                    auto_approval_reason: approvalConfig.autoApprovalReason,
-                    approved_at: approvalConfig.approvedAt,
-                    approved_by: approvalConfig.approvedBy,
-                    rejection_reason: ''
-                },
-                upload_context: {
-                    method: 'web',
-                    ip_address: req.ip || '',
-                    user_agent: req.get('User-Agent') || '',
-                    upload_session_id: req.sessionID || '',
-                    referrer_url: req.get('Referer') || '',
-                    platform: 'web'
-                }
-            });
-
-            await media.save();
-            await updateUsageForUpload(user_id, fileSizeInMB, event_id);
-
-            return {
-                status: false,
-                code: 500,
-                message: "Image processing failed but file uploaded",
-                data: media.toObject(),
-                error: { message: processingError.message },
-                other: {
-                    fallback_uploaded: true,
-                    processing_error: processingError.message
-                }
-            };
+        // 🔧 FAST SIZE CHECK: Quick size validation
+        const fileSizeMB = file.size / (1024 * 1024);
+        if (fileSizeMB > 100) { // 100MB limit
+            await cleanupFile(file);
+            throw new Error(`File too large: ${fileSizeMB.toFixed(2)}MB (max 100MB)`);
         }
 
-        // ✅ SUCCESS: Create media record with processing results
+        // 🚀 GENERATE IDS: Pre-generate all IDs
+        const mediaId = new mongoose.Types.ObjectId();
+        const albumObjectId = new mongoose.Types.ObjectId(context.albumId);
+        const eventObjectId = new mongoose.Types.ObjectId(context.eventId);
+        const userObjectId = new mongoose.Types.ObjectId(context.userId);
+
+        // 🚀 CREATE DATABASE RECORD: Minimal required fields only
         const media = new Media({
-            _id: new mongoose.Types.ObjectId(media_id),
-            url: processingResult.original.url, // ✅ URL is available from processing
+            _id: mediaId,
+            url: '', // Will be updated after processing
             type: 'image',
-            album_id: new mongoose.Types.ObjectId(album_id),
-            event_id: new mongoose.Types.ObjectId(event_id),
-            uploaded_by: new mongoose.Types.ObjectId(user_id),
+            album_id: albumObjectId,
+            event_id: eventObjectId,
+            uploaded_by: userObjectId,
             uploader_type: 'registered_user',
             original_filename: file.originalname,
-            size_mb: fileSizeInMB,
-            format: file.mimetype.split('/')[1],
-            image_variants: {
-                original: processingResult.original,
-                small: processingResult.variants.small,
-                medium: processingResult.variants.medium,
-                large: processingResult.variants.large
-            },
-            metadata: {
-                width: processingResult.original.width || 0,
-                height: processingResult.original.height || 0,
-                duration: 0,
-                aspect_ratio: processingResult.original.height && processingResult.original.width ?
-                    processingResult.original.height / processingResult.original.width : 1,
-                color_profile: '',
-                has_transparency: false,
-                timestamp: new Date(),
-                device_info: { brand: '', model: '', os: '' },
-                location: { latitude: null, longitude: null, address: '' },
-                camera_settings: { iso: null, aperture: '', shutter_speed: '', focal_length: '' }
-            },
+            size_mb: fileSizeMB,
+            format: getFileExtension(file),
             processing: {
-                status: 'completed',
+                status: 'pending',
                 started_at: new Date(),
-                completed_at: new Date(),
-                processing_time_ms: 0, // You can calculate this if needed
-                variants_generated: true,
-                variants_count: calculateVariantsCount(processingResult.variants),
-                total_variants_size_mb: calculateTotalVariantsSize(processingResult.variants),
-                error_message: '',
-                retry_count: 0
+                variants_generated: false,
             },
             approval: {
-                status: approvalConfig.status,
-                auto_approval_reason: approvalConfig.autoApprovalReason,
-                approved_at: approvalConfig.approvedAt,
-                approved_by: approvalConfig.approvedBy,
-                rejection_reason: ''
-            },
-            upload_context: {
-                method: 'web',
-                ip_address: req.ip || '',
-                user_agent: req.get('User-Agent') || '',
-                upload_session_id: req.sessionID || '',
-                referrer_url: req.get('Referer') || '',
-                platform: 'web'
+                status: 'approved', // Auto-approve for authenticated users
+                auto_approval_reason: 'authenticated_user',
+                approved_at: new Date(),
             }
         });
 
-        await media.save(); // ✅ This will work because URL is present
-        await updateUsageForUpload(user_id, fileSizeInMB, event_id);
+        // 🚀 SAVE TO DATABASE: Single atomic operation
+        await media.save();
+        
+        logger.info(`✅ Media record created: ${mediaId}`);
 
-        logger.info(`✅ Image upload and processing completed successfully`, {
-            media_id,
-            original_size: `${processingResult.original.width}x${processingResult.original.height}`,
-            variants_count: calculateVariantsCount(processingResult.variants)
-        });
+        // 🚀 QUEUE FOR PROCESSING: Add to background queue
+        const imageQueue = getImageQueue();
+        let jobId = null;
 
-        return {
-            status: true,
-            code: 200,
-            message: "Image upload and processing successful",
-            data: media.toObject(),
-            error: null,
-            other: {
-                processing_info: {
-                    variants_generated: calculateVariantsCount(processingResult.variants),
-                    total_size_mb: calculateTotalVariantsSize(processingResult.variants)
-                }
+        if (imageQueue) {
+            try {
+                const job = await imageQueue.add('process-image', {
+                    mediaId: mediaId.toString(),
+                    userId: context.userId,
+                    eventId: context.eventId,
+                    albumId: context.albumId,
+                    filePath: file.path,
+                    originalFilename: file.originalname,
+                    fileSize: file.size,
+                    mimeType: file.mimetype,
+                }, {
+                    // 🔧 PRIORITY: Smaller files get higher priority
+                    priority: fileSizeMB < 5 ? 10 : 5,
+                    delay: 0, // Process immediately
+                    attempts: 3,
+                    backoff: { type: 'exponential', delay: 2000 }
+                });
+
+                jobId = job.id;
+                logger.info(`✅ Job queued: ${job.id} for media ${mediaId}`);
+
+            } catch (queueError) {
+                logger.error('Queue error (processing will be manual):', queueError);
+                // Don't fail the upload if queue fails
             }
-        };
-
-    } catch (error: any) {
-        logger.error('Image upload service error:', error);
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to upload image",
-            data: null,
-            error: { message: error.message },
-            other: null
-        };
-    } finally {
-        await cleanupFile(file);
-    }
-};
-
-/**
- * Upload video service (simplified - no processing for now)
- */
-export const uploadVideoService = async (
-    file: Express.Multer.File,
-    user_id: string,
-    album_id: string,
-    event_id: string,
-    req: AuthenticatedRequest
-): Promise<ServiceResponse<MediaCreationType>> => {
-    try {
-        logger.info(`🎥 Starting video upload: ${file.originalname}`);
-
-        const fileSizeInMB = file.size / (1024 * 1024);
-
-        // Check storage limits
-        const canUpload = await checkUserLimitsService(user_id, 'storage', fileSizeInMB);
-        if (!canUpload) {
-            await cleanupFile(file);
-            return {
-                status: false,
-                code: 403,
-                message: "Storage limit exceeded",
-                data: null,
-                error: { message: "Storage limit exceeded" },
-                other: null
-            };
         }
 
-        // Upload video to ImageKit
-        const fileBuffer = await fs.readFile(file.path);
-
-        const uploadResult = await imagekit.upload({
-            file: fileBuffer,
-            fileName: `${Date.now()}_${file.originalname}`,
-            folder: `/events/${event_id}/videos`,
-            transformation: {
-                pre: 'q_auto,f_auto' // Auto quality and format optimization
-            }
-        });
-
-        const approvalConfig = await determineApprovalStatus(event_id, user_id);
-
-        const media = await Media.create({
-            url: uploadResult.url,
-            type: 'video',
-            album_id: new mongoose.Types.ObjectId(album_id),
-            event_id: new mongoose.Types.ObjectId(event_id),
-            uploaded_by: new mongoose.Types.ObjectId(user_id),
-            uploader_type: 'registered_user',
-            original_filename: file.originalname,
-            size_mb: fileSizeInMB,
-            format: file.mimetype.split('/')[1],
-            processing: {
-                status: 'completed',
-                started_at: new Date(),
-                completed_at: new Date(),
-                processing_time_ms: 0,
-                variants_generated: false,
-                variants_count: 0,
-                total_variants_size_mb: 0,
-                error_message: '',
-                retry_count: 0
-            },
-            approval: {
-                status: approvalConfig.status,
-                auto_approval_reason: approvalConfig.autoApprovalReason,
-                approved_at: approvalConfig.approvedAt,
-                approved_by: approvalConfig.approvedBy,
-                rejection_reason: ''
-            },
-            upload_context: {
-                method: 'web',
-                ip_address: req.ip || '',
-                user_agent: req.get('User-Agent') || '',
-                upload_session_id: req.sessionID || '',
-                referrer_url: req.get('Referer') || '',
-                platform: 'web'
-            }
-        });
-
-        await updateUsageForUpload(user_id, fileSizeInMB, event_id);
-
-        logger.info(`✅ Video upload completed: ${file.originalname}`, {
-            media_id: media._id.toString(),
-            url: uploadResult.url
-        });
-
+        // 🚀 RETURN SUCCESS: Minimal response data
         return {
-            status: true,
-            code: 200,
-            message: "Video upload successful",
-            data: media.toObject(),
-            error: null,
-            other: {
-                imagekit_file_id: uploadResult.fileId,
-                video_info: {
-                    duration: 0,
-                    size_mb: fileSizeInMB
-                }
-            }
+            id: mediaId.toString(),
+            filename: file.originalname,
+            status: jobId ? 'queued' : 'pending',
+            jobId: jobId,
+            size: `${fileSizeMB.toFixed(2)}MB`,
+            estimatedProcessingTime: getEstimatedProcessingTime(file.size)
         };
 
     } catch (error: any) {
-        logger.error('Video upload error:', error);
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to upload video",
-            data: null,
-            error: { message: error.message },
-            other: null
-        };
-    } finally {
+        logger.error(`File processing error for ${file.originalname}:`, error);
         await cleanupFile(file);
+        throw error;
     }
-};
-
-/**
- * Utility functions
- */
-function getFileType(file: Express.Multer.File): 'image' | 'video' | null {
-    if (file.mimetype.startsWith("image/")) return "image";
-    if (file.mimetype.startsWith("video/")) return "video";
-    return null;
 }
 
-function isValidImageFormat(file: Express.Multer.File): boolean {
-    const validImageTypes = [
-        'image/jpeg',
-        'image/jpg',
-        'image/png',
-        'image/webp',
-        'image/heic',
-        'image/tiff',
-        'image/tif'
+/**
+ * 🚀 OPTIMIZED: Lightweight status endpoint
+ */
+export const getUploadStatusController = async (
+    req: Request,
+    res: Response
+): Promise<Response | void> => {
+    try {
+        const { mediaId } = req.params;
+
+        // 🔧 FAST QUERY: Only get required fields
+        const media = await Media.findById(mediaId)
+            .select('original_filename processing url image_variants')
+            .lean(); // Use lean() for faster queries
+
+        if (!media) {
+            return res.status(404).json({
+                status: false,
+                message: 'Media not found'
+            });
+        }
+
+        const processingStatus = media.processing?.status || 'unknown';
+        const isComplete = processingStatus === 'completed';
+        const isFailed = processingStatus === 'failed';
+        const isProcessing = processingStatus === 'processing';
+
+        // 🚀 FAST RESPONSE: Minimal data
+        return res.json({
+            status: true,
+            data: {
+                id: mediaId,
+                filename: media.original_filename,
+                processingStatus,
+                isComplete,
+                isFailed,
+                isProcessing,
+                url: media.url,
+                hasVariants: !!media.image_variants,
+                message: getStatusMessage(processingStatus)
+            }
+        });
+
+    } catch (error: any) {
+        logger.error('Status check error:', error);
+        return res.status(500).json({
+            status: false,
+            message: 'Failed to get status'
+        });
+    }
+};
+
+/**
+ * 🚀 OPTIMIZED: Batch status for multiple files
+ */
+export const getBatchUploadStatusController = async (
+    req: Request,
+    res: Response
+): Promise<Response | void> => {
+    try {
+        const { mediaIds } = req.body;
+
+        if (!Array.isArray(mediaIds) || mediaIds.length === 0) {
+            return res.status(400).json({
+                status: false,
+                message: 'mediaIds must be a non-empty array'
+            });
+        }
+
+        // 🔧 BATCH QUERY: Get all at once
+        const mediaList = await Media.find({ 
+            _id: { $in: mediaIds } 
+        })
+        .select('original_filename processing url')
+        .lean(); // Faster queries
+
+        const results = mediaList.map(media => ({
+            id: media._id,
+            filename: media.original_filename,
+            status: media.processing?.status || 'unknown',
+            isComplete: media.processing?.status === 'completed',
+            url: media.url
+        }));
+
+        return res.json({
+            status: true,
+            data: results
+        });
+
+    } catch (error: any) {
+        logger.error('Batch status check error:', error);
+        return res.status(500).json({
+            status: false,
+            message: 'Failed to get batch status'
+        });
+    }
+};
+
+/**
+ * 🛠️ UTILITY FUNCTIONS
+ */
+
+function isValidImageFile(file: Express.Multer.File): boolean {
+    const supportedTypes = [
+        'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
+        'image/heic', 'image/heif', 'image/tiff', 'image/tif'
     ];
-    return validImageTypes.includes(file.mimetype.toLowerCase());
+    return supportedTypes.includes(file.mimetype.toLowerCase());
+}
+
+function getFileExtension(file: Express.Multer.File): string {
+    return file.mimetype.split('/')[1] || 'jpg';
+}
+
+function getEstimatedProcessingTime(fileSizeBytes: number): string {
+    const sizeMB = fileSizeBytes / (1024 * 1024);
+    const seconds = Math.max(3, Math.min(sizeMB * 1.5, 15)); // 3-15 seconds
+    return `${Math.round(seconds)}s`;
+}
+
+function getStatusMessage(status: string): string {
+    switch (status) {
+        case 'completed': return 'Processing completed successfully';
+        case 'failed': return 'Processing failed';
+        case 'processing': return 'Image is being processed...';
+        case 'pending': return 'Queued for processing';
+        default: return 'Status unknown';
+    }
+}
+
+function generateSuccessMessage(successful: number, failed: number, total: number): string {
+    if (failed === 0) {
+        return total === 1 
+            ? 'Photo uploaded successfully!' 
+            : `All ${successful} photos uploaded successfully!`;
+    }
+    
+    if (successful === 0) {
+        return total === 1 
+            ? 'Photo upload failed' 
+            : 'All photo uploads failed';
+    }
+    
+    return `${successful} photo${successful > 1 ? 's' : ''} uploaded successfully, ${failed} failed`;
 }
 
 async function cleanupFile(file: Express.Multer.File): Promise<void> {
     try {
-        if (file?.path) {
+        if (file.path) {
             await fs.unlink(file.path);
-            logger.debug(`🗑️ Cleaned up temp file: ${file.path}`);
         }
     } catch (error) {
         logger.warn(`Failed to cleanup file ${file.path}:`, error);
     }
 }
 
-function calculateTotalVariantsSize(variants: any): number {
-    if (!variants) return 0;
-
-    let total = 0;
-    try {
-        Object.values(variants).forEach((sizeVariants: any) => {
-            if (sizeVariants && typeof sizeVariants === 'object') {
-                Object.values(sizeVariants).forEach((formatVariant: any) => {
-                    if (formatVariant && formatVariant.size_mb) {
-                        total += formatVariant.size_mb;
-                    }
-                });
-            }
-        });
-    } catch (error) {
-        logger.warn('Error calculating variants size:', error);
-    }
-    return Math.round(total * 100) / 100;
-}
-
-function calculateVariantsCount(variants: any): number {
-    if (!variants) return 0;
-
-    let count = 0;
-    try {
-        Object.values(variants).forEach((sizeVariants: any) => {
-            if (sizeVariants && typeof sizeVariants === 'object') {
-                Object.keys(sizeVariants).forEach(() => {
-                    count++;
-                });
-            }
-        });
-    } catch (error) {
-        logger.warn('Error calculating variants count:', error);
-    }
-    return count;
+async function cleanupFiles(files: Express.Multer.File[]): Promise<void> {
+    await Promise.all(files.map(file => cleanupFile(file)));
 }
