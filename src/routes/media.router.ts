@@ -20,10 +20,10 @@ import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import {
     checkStorageLimitMiddleware,
     checkEventPhotoLimitMiddleware,
-    checkFileSizeLimitMiddleware
 } from "@middlewares/subscription-limit.middleware";
 import { validateGuestTokenMiddleware } from "@middlewares/validate-share-token.middleware";
 import { optionalAuthMiddleware } from "@middlewares/conditional-auth.middleware";
+import { checkFileSizeLimitMiddleware } from "@middlewares/upload.middleware";
 
 const mediaRouter = express.Router();
 
@@ -45,19 +45,20 @@ const upload = multer({
 });
 
 // === AUTHENTICATED UPLOADS ===
+// routes/media.routes.ts - Updated route
 mediaRouter.post(
-  "/upload",
-  authMiddleware,
-  upload.array('images', 10), // Accepts 1-10 files
-  checkFileSizeLimitMiddleware as RequestHandler,
-  checkStorageLimitMiddleware as RequestHandler,
-  checkEventPhotoLimitMiddleware as RequestHandler,
-  uploadMediaController as RequestHandler // Single controller handles all cases
+    "/upload",
+    authMiddleware,
+    upload.array('images', 10),
+    checkFileSizeLimitMiddleware as RequestHandler,
+    checkStorageLimitMiddleware as RequestHandler,
+    checkEventPhotoLimitMiddleware as RequestHandler,
+    uploadMediaController as RequestHandler // Uses optimized controller
 );
 
-// Status endpoints (unchanged)
+// Add status endpoints
 mediaRouter.get("/status/:mediaId", getUploadStatusController as RequestHandler);
-mediaRouter.post("/status/batch", getBatchUploadStatusController as RequestHandler);
+mediaRouter.post("/status/batch", getBatchUploadStatusController as RequestHandler); // 🆕 Add this
 
 // mediaRouter.post(
 //     "/upload/multiple",

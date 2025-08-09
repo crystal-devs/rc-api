@@ -1,4 +1,4 @@
-// types/queue.ts - Type definitions for image processing queue
+// types/queue.ts - Queue job data types
 
 export interface ImageProcessingJobData {
   mediaId: string;
@@ -9,6 +9,43 @@ export interface ImageProcessingJobData {
   originalFilename: string;
   fileSize: number;
   mimeType: string;
+  hasPreview?: boolean; // Flag to indicate preview exists
+}
+
+export interface ImageProcessingJobOptions {
+  priority?: number;
+  delay?: number;
+  attempts?: number;
+  backoff?: {
+    type: 'exponential' | 'fixed';
+    delay: number;
+  };
+  removeOnComplete?: number;
+  removeOnFail?: number;
+}
+
+export interface ImageVariant {
+  url: string;
+  width: number;
+  height: number;
+  size_mb: number;
+  format: 'webp' | 'jpeg';
+}
+
+export interface ProcessingResult {
+  success: boolean;
+  mediaId: string;
+  processingTime: number;
+  variants: number;
+  originalUrl: string;
+  variantUrls: {
+    small_webp?: string;
+    small_jpeg?: string;
+    medium_webp?: string;
+    medium_jpeg?: string;
+    large_webp?: string;
+    large_jpeg?: string;
+  };
 }
 
 export interface ProcessedImageVariant {

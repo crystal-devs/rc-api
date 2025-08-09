@@ -1,17 +1,18 @@
-// queues/imageWorker.ts - Fixed to work with your existing Media model
+// workers/imageWorker.ts - FIXED with proper imports and no circular dependencies
 
 import { Job, Worker } from 'bullmq';
-import { ImageProcessingJobData } from 'types/queue';
 import { logger } from '@utils/logger';
 import { keys } from '@configs/dotenv.config';
 import { Media } from '@models/media.model';
-import { imageProcessingService } from '@services/imageProcessing.service';
+import sharp from 'sharp';
+import fs from 'fs/promises';
+import { uploadVariantImage, uploadOriginalImage } from '@services/uploadService';
+import { ImageProcessingJobData, ImageVariant, ProcessingResult } from 'types/queue'; // 🔧 IMPORT types
 
 let imageWorkerInstance: Worker | null = null;
 
 export const initializeImageWorker = async (): Promise<Worker> => {
   try {
-    // 🚀 REDIS CONFIG: Same as queue for consistency
     const redisConfig = {
       host: getRedisHost(),
       port: getRedisPort(),
@@ -20,85 +21,96 @@ export const initializeImageWorker = async (): Promise<Worker> => {
       retryDelayOnFailover: 100,
       lazyConnect: true,
       keepAlive: 30000,
-      family: 4,
+      family: 4 as const, // Explicit type
     };
 
     imageWorkerInstance = new Worker(
       'image-processing',
-      async (job: Job<ImageProcessingJobData>) => {
+      async (job: Job<ImageProcessingJobData>): Promise<ProcessingResult> => {
         const startTime = Date.now();
-        const { mediaId, originalFilename } = job.data;
+        const { mediaId, originalFilename, filePath } = job.data;
         
-        logger.info(`🔄 Starting processing: ${originalFilename} (${mediaId})`);
+        logger.info(`🔄 Processing variants: ${originalFilename} (${mediaId})`);
         
         try {
-          // 🚀 STEP 1: Update status to processing (5%)
+          // 🚀 STEP 1: Update status (5%)
           await Media.findByIdAndUpdate(mediaId, {
             'processing.status': 'processing',
             'processing.started_at': new Date(),
           });
           await job.updateProgress(5);
 
-          // 🚀 STEP 2: Process the image (10-90%)
-          const result = await imageProcessingService.processImage(job.data);
+          // 🚀 STEP 2: Generate all variants (10-90%)
+          const variants = await generateImageVariants(filePath, mediaId, job.data.eventId, (progress) => {
+            job.updateProgress(10 + (progress * 0.8)); // 10% to 90%
+          });
+          
           await job.updateProgress(90);
 
-          // 🚀 STEP 3: Update database with results (95%)
+          // 🚀 STEP 3: Get original metadata
+          const originalMetadata = await getOriginalImageMetadata(filePath);
+          
+          // 🚀 STEP 4: Upload original to permanent storage
+          const originalUrl = await uploadOriginal(filePath, mediaId, job.data.eventId);
+
+          // 🚀 STEP 5: Update database with everything (95%)
           const processingTime = Date.now() - startTime;
           
-          // 🔧 COMPATIBLE: Work with your existing schema structure
-          const updateData: any = {
-            url: result.original.url, // Keep legacy URL field
-            'metadata.width': result.original.width,
-            'metadata.height': result.original.height,
-            'metadata.aspect_ratio': result.original.height / result.original.width,
+          const updateData = {
+            url: originalUrl, // Update to permanent URL
+            'metadata.width': originalMetadata.width,
+            'metadata.height': originalMetadata.height,
+            'metadata.aspect_ratio': originalMetadata.aspect_ratio,
+            'metadata.color_profile': originalMetadata.colorProfile,
+            'metadata.has_transparency': originalMetadata.hasTransparency,
             'processing.status': 'completed',
             'processing.completed_at': new Date(),
             'processing.processing_time_ms': processingTime,
             'processing.variants_generated': true,
-            'processing.variants_count': calculateVariantsCount(result.variants),
-            'processing.total_variants_size_mb': calculateTotalVariantsSize(result.variants),
-          };
-
-          // 🔧 HANDLE VARIANTS: Your schema expects small/medium/large structure
-          if (result.variants) {
-            // The service returns small/medium/large, so we can use them directly
-            const mappedVariants = {
+            'processing.variants_count': calculateVariantsCount(variants),
+            'processing.total_variants_size_mb': calculateTotalVariantsSize(variants),
+            image_variants: {
               original: {
-                url: result.original.url,
-                width: result.original.width,
-                height: result.original.height,
-                size_mb: result.original.size_mb,
-                format: result.original.format
+                url: originalUrl,
+                width: originalMetadata.width,
+                height: originalMetadata.height,
+                size_mb: originalMetadata.size_mb,
+                format: originalMetadata.format
               },
-              small: {
-                webp: result.variants.small?.webp || null,
-                jpeg: result.variants.small?.jpeg || null
-              },
-              medium: {
-                webp: result.variants.medium?.webp || null,
-                jpeg: result.variants.medium?.jpeg || null
-              },
-              large: {
-                webp: result.variants.large?.webp || null,
-                jpeg: result.variants.large?.jpeg || null
-              }
-            };
-            
-            updateData.image_variants = mappedVariants;
-          }
+              small: variants.small,
+              medium: variants.medium,
+              large: variants.large
+            }
+          };
           
           await Media.findByIdAndUpdate(mediaId, updateData);
+          
+          // 🧹 CLEANUP: Remove local file
+          try {
+            await fs.unlink(filePath);
+            logger.info(`🧹 Cleaned up local file: ${filePath}`);
+          } catch (cleanupError) {
+            logger.warn('Failed to cleanup local file:', cleanupError);
+          }
+
           await job.updateProgress(100);
 
-          logger.info(`✅ Processing completed: ${originalFilename} in ${processingTime}ms`);
+          logger.info(`✅ Variants completed: ${originalFilename} in ${processingTime}ms`);
           
           return {
             success: true,
             mediaId,
             processingTime,
-            variants: calculateVariantsCount(result.variants),
-            originalUrl: result.original.url
+            variants: calculateVariantsCount(variants),
+            originalUrl,
+            variantUrls: {
+              small_webp: variants.small?.webp?.url,
+              small_jpeg: variants.small?.jpeg?.url,
+              medium_webp: variants.medium?.webp?.url,
+              medium_jpeg: variants.medium?.jpeg?.url,
+              large_webp: variants.large?.webp?.url,
+              large_jpeg: variants.large?.jpeg?.url,
+            }
           };
 
         } catch (error: any) {
@@ -114,29 +126,35 @@ export const initializeImageWorker = async (): Promise<Worker> => {
             'processing.retry_count': job.attemptsMade || 0,
           });
 
+          // 🧹 CLEANUP on failure
+          try {
+            if (filePath) {
+              await fs.unlink(filePath);
+            }
+          } catch (cleanupError) {
+            logger.warn('Failed to cleanup file on error:', cleanupError);
+          }
+
           throw error;
         }
       },
       {
         connection: redisConfig,
-        
-        // 🚀 CONCURRENCY: Process multiple images simultaneously
         concurrency: getConcurrencyLevel(),
       }
     );
 
-    // 🚀 EVENT HANDLERS: Essential monitoring with proper typing
-    imageWorkerInstance.on('completed', (job: Job, result: any) => {
+    // 🚀 EVENT HANDLERS with proper typing
+    imageWorkerInstance.on('completed', (job: Job<ImageProcessingJobData>, result: ProcessingResult) => {
       const processingTime = Date.now() - job.timestamp;
       logger.info(`✅ Worker completed job ${job.id} in ${processingTime}ms`);
       
-      // 🔧 ALERT: Log very slow jobs
       if (processingTime > 60000) { // 1 minute
         logger.warn(`🐌 Very slow job: ${job.id} took ${(processingTime/1000).toFixed(1)}s`);
       }
     });
 
-    imageWorkerInstance.on('failed', (job: Job | undefined, err: Error) => {
+    imageWorkerInstance.on('failed', (job: Job<ImageProcessingJobData> | undefined, err: Error) => {
       logger.error(`❌ Worker failed job ${job?.id}:`, {
         error: err.message,
         attempts: job?.attemptsMade,
@@ -144,14 +162,10 @@ export const initializeImageWorker = async (): Promise<Worker> => {
       });
     });
 
-    imageWorkerInstance.on('progress', (job: Job, progress: number | object) => {
-      if (typeof progress === 'number' && progress % 25 === 0) { // Log every 25%
+    imageWorkerInstance.on('progress', (job: Job<ImageProcessingJobData>, progress: number | object) => {
+      if (typeof progress === 'number' && progress % 20 === 0) { // Log every 20%
         logger.debug(`📊 Job ${job.id} progress: ${progress}%`);
       }
-    });
-
-    imageWorkerInstance.on('stalled', (jobId: string) => {
-      logger.warn(`⚠️ Job ${jobId} stalled - will be retried`);
     });
 
     logger.info(`✅ Image worker initialized with concurrency: ${getConcurrencyLevel()}`);
@@ -163,24 +177,209 @@ export const initializeImageWorker = async (): Promise<Worker> => {
   }
 };
 
-export const getImageWorker = (): Worker | null => {
-  return imageWorkerInstance;
-};
+/**
+ * 🚀 CORE FUNCTION: Generate all image variants efficiently
+ */
+async function generateImageVariants(
+  filePath: string, 
+  mediaId: string,
+  eventId: string,
+  progressCallback: (progress: number) => void
+): Promise<{
+  small?: { webp?: ImageVariant; jpeg?: ImageVariant };
+  medium?: { webp?: ImageVariant; jpeg?: ImageVariant };
+  large?: { webp?: ImageVariant; jpeg?: ImageVariant };
+}> {
+  const variants: any = {};
+  
+  try {
+    // 🔧 DEFINE SIZES: Optimized for different use cases
+    const sizes = {
+      small: { width: 400, height: 400, quality: 80 },   // Thumbnails, mobile
+      medium: { width: 800, height: 800, quality: 85 },  // Desktop feeds
+      large: { width: 1200, height: 1200, quality: 90 }  // Lightbox, zoom
+    } as const;
+
+    const sizeNames = Object.keys(sizes) as Array<keyof typeof sizes>;
+    let completed = 0;
+    const total = sizeNames.length * 2; // 2 formats per size
+
+    // 🚀 PARALLEL PROCESSING: Generate all variants concurrently
+    for (const sizeName of sizeNames) {
+      const config = sizes[sizeName];
+      
+      // Generate both WebP and JPEG in parallel
+      const [webpVariant, jpegVariant] = await Promise.all([
+        generateSingleVariant(filePath, mediaId, eventId, sizeName, 'webp', config),
+        generateSingleVariant(filePath, mediaId, eventId, sizeName, 'jpeg', config)
+      ]);
+
+      variants[sizeName] = {
+        webp: webpVariant,
+        jpeg: jpegVariant
+      };
+
+      completed += 2;
+      progressCallback((completed / total) * 100);
+    }
+
+    return variants;
+
+  } catch (error) {
+    logger.error('Failed to generate variants:', error);
+    throw error;
+  }
+}
 
 /**
- * 🚀 PERFORMANCE: Dynamic concurrency based on system resources
+ * 🚀 OPTIMIZED: Generate single variant efficiently
+ */
+async function generateSingleVariant(
+  filePath: string,
+  mediaId: string,
+  eventId: string,
+  sizeName: string,
+  format: 'webp' | 'jpeg',
+  config: { width: number; height: number; quality: number }
+): Promise<ImageVariant> {
+  try {
+    // 🔧 SHARP OPTIMIZATION: Progressive, optimized settings
+    let sharpInstance = sharp(filePath)
+      .resize(config.width, config.height, {
+        fit: 'inside',
+        withoutEnlargement: true
+      });
+
+    let buffer: Buffer;
+    if (format === 'webp') {
+      buffer = await sharpInstance
+        .webp({
+          quality: config.quality,
+          effort: 4, // Good balance of quality/speed
+          nearLossless: false
+        })
+        .toBuffer();
+    } else {
+      buffer = await sharpInstance
+        .jpeg({
+          quality: config.quality,
+          progressive: true,
+          mozjpeg: true // Better compression
+        })
+        .toBuffer();
+    }
+
+    // 🚀 GET VARIANT METADATA
+    const metadata = await sharp(buffer).metadata();
+    const sizeBytes = buffer.length;
+    const sizeMB = Math.round((sizeBytes / (1024 * 1024)) * 100) / 100;
+
+    // 🚀 UPLOAD TO IMAGEKIT with proper folder structure
+    const url = await uploadVariantImage(
+      buffer,
+      mediaId,
+      eventId,
+      sizeName as 'small' | 'medium' | 'large',
+      format,
+      config.quality
+    );
+
+    logger.info(`✅ Generated ${sizeName} ${format}: ${url} (${sizeMB}MB)`);
+
+    return {
+      url,
+      width: metadata.width || 0,
+      height: metadata.height || 0,
+      size_mb: sizeMB,
+      format
+    };
+
+  } catch (error) {
+    logger.error(`Failed to generate ${sizeName} ${format} variant:`, error);
+    throw error;
+  }
+}
+
+/**
+ * 🚀 GET ORIGINAL METADATA: Comprehensive info with proper typing
+ */
+async function getOriginalImageMetadata(filePath: string) {
+  try {
+    const metadata = await sharp(filePath).metadata();
+    const stats = await fs.stat(filePath);
+    const sizeMB = Math.round((stats.size / (1024 * 1024)) * 100) / 100;
+
+    // 🔧 FIX: Proper ICC profile handling
+    let colorProfile = '';
+    if (metadata.icc) {
+      try {
+        // ICC profile is a Buffer, extract description properly
+        const iccBuffer = metadata.icc;
+        if (Buffer.isBuffer(iccBuffer) && iccBuffer.length > 80) {
+          // Look for description in ICC profile
+          const descriptionMatch = iccBuffer.toString('ascii', 80, 200).match(/[A-Za-z0-9\s]{4,}/);
+          colorProfile = descriptionMatch ? descriptionMatch[0].trim() : 'Unknown';
+        }
+      } catch (iccError) {
+        logger.warn('Failed to parse ICC profile:', iccError);
+        colorProfile = 'Unknown';
+      }
+    }
+
+    return {
+      width: metadata.width || 0,
+      height: metadata.height || 0,
+      aspect_ratio: metadata.height && metadata.width ? metadata.height / metadata.width : 1,
+      format: metadata.format || 'jpeg',
+      colorProfile,
+      hasTransparency: metadata.hasAlpha || false,
+      size_mb: sizeMB
+    };
+  } catch (error) {
+    logger.warn('Failed to get original metadata:', error);
+    return {
+      width: 0,
+      height: 0,
+      aspect_ratio: 1,
+      format: 'jpeg',
+      colorProfile: '',
+      hasTransparency: false,
+      size_mb: 0
+    };
+  }
+}
+
+/**
+ * 🚀 UPLOAD ORIGINAL: Move to permanent storage
+ */
+async function uploadOriginal(filePath: string, mediaId: string, eventId: string): Promise<string> {
+  try {
+    const buffer = await fs.readFile(filePath);
+    
+    const url = await uploadOriginalImage(buffer, mediaId, eventId);
+
+    logger.info(`✅ Uploaded original: ${url}`);
+    return url;
+    
+  } catch (error) {
+    logger.error('Failed to upload original:', error);
+    throw error;
+  }
+}
+
+/**
+ * 🛠️ UTILITY FUNCTIONS
  */
 function getConcurrencyLevel(): number {
   try {
-    // Base concurrency on available CPU cores and memory
     const cpuCores = require('os').cpus().length;
     const totalMemoryGB = require('os').totalmem() / (1024 * 1024 * 1024);
     
-    // Conservative approach: 1-2 jobs per CPU core, limited by memory
+    // Conservative: 1-2 jobs per CPU core, limited by memory
     let concurrency = Math.max(1, Math.floor(cpuCores * 1.5));
     
-    // Limit based on available memory (assume 512MB per job)
-    const memoryBasedLimit = Math.floor(totalMemoryGB * 2);
+    // Memory limit (assume 1GB per job for large images)
+    const memoryBasedLimit = Math.floor(totalMemoryGB);
     concurrency = Math.min(concurrency, memoryBasedLimit);
     
     // Environment override
@@ -188,46 +387,31 @@ function getConcurrencyLevel(): number {
       concurrency = parseInt(process.env.IMAGE_WORKER_CONCURRENCY);
     }
     
-    // Sensible limits
-    return Math.max(1, Math.min(concurrency, 8)); // 1-8 concurrent jobs
+    // Limits: 1-6 for most servers
+    return Math.max(1, Math.min(concurrency, 6));
   } catch (error) {
-    logger.warn('Could not determine optimal concurrency, using default of 3');
-    return 3;
+    logger.warn('Could not determine optimal concurrency, using default of 2');
+    return 2;
   }
 }
 
-/**
- * 🚀 UTILITY: Calculate variants count efficiently (compatible with your schema)
- */
 function calculateVariantsCount(variants: any): number {
   if (!variants || typeof variants !== 'object') return 0;
   
   let count = 0;
-  // Count based on small/medium/large structure (matching service output)
-  if (variants.small) {
-    if (variants.small.webp) count++;
-    if (variants.small.jpeg) count++;
-  }
-  if (variants.medium) {
-    if (variants.medium.webp) count++;
-    if (variants.medium.jpeg) count++;
-  }
-  if (variants.large) {
-    if (variants.large.webp) count++;
-    if (variants.large.jpeg) count++;
-  }
+  ['small', 'medium', 'large'].forEach(size => {
+    if (variants[size]) {
+      if (variants[size].webp) count++;
+      if (variants[size].jpeg) count++;
+    }
+  });
   return count;
 }
 
-/**
- * 🚀 UTILITY: Calculate total variants size efficiently
- */
 function calculateTotalVariantsSize(variants: any): number {
   if (!variants || typeof variants !== 'object') return 0;
 
   let total = 0;
-  
-  // Calculate based on small/medium/large structure (matching service output)
   ['small', 'medium', 'large'].forEach(size => {
     if (variants[size]) {
       if (variants[size].webp?.size_mb) total += variants[size].webp.size_mb;
@@ -238,9 +422,6 @@ function calculateTotalVariantsSize(variants: any): number {
   return Math.round(total * 100) / 100;
 }
 
-/**
- * 🛠️ HELPER FUNCTIONS: Same as queue
- */
 function getRedisHost(): string {
   const redisUrl = keys.redisUrl as string;
   if (redisUrl?.startsWith('redis://')) {
@@ -279,3 +460,7 @@ function getRedisPassword(): string | undefined {
   }
   return process.env.REDIS_PASSWORD || undefined;
 }
+
+export const getImageWorker = (): Worker | null => {
+  return imageWorkerInstance;
+};
