@@ -1,45 +1,56 @@
-// middleware/upload.middleware.ts - OPTIMIZED for large files
+// middleware/upload.middleware.ts - FIXED Multer config
 
 import multer from 'multer';
 import path from 'path';
+import fs from 'fs';
 import { Request } from 'express';
 import { logger } from '@utils/logger';
 
-// 🚀 OPTIMIZED MULTER CONFIG: Handle large files efficiently
+// 🔧 PROPER TEMP DIRECTORY: Separate from main uploads
+const tempUploadDir = process.env.TEMP_UPLOAD_DIR || './uploads/temp';
+
+// 🚀 ENSURE TEMP DIRECTORY EXISTS
+if (!fs.existsSync(tempUploadDir)) {
+  fs.mkdirSync(tempUploadDir, { recursive: true });
+  logger.info(`📁 Created temp upload directory: ${tempUploadDir}`);
+}
+
+// 🚀 OPTIMIZED MULTER CONFIG: Use proper temp directory
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    // Create uploads directory if it doesn't exist
-    const uploadDir = process.env.UPLOAD_DIR || './uploads/temp';
-    cb(null, uploadDir);
+    // 🔧 IMPORTANT: Use temp directory, not main uploads folder
+    cb(null, tempUploadDir);
   },
   filename: (req, file, cb) => {
-    // 🔧 UNIQUE FILENAME: Prevent conflicts
+    // 🔧 UNIQUE FILENAME: Add timestamp + random for uniqueness
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `img_${uniqueSuffix}${ext}`);
+    const filename = `temp_${uniqueSuffix}${ext}`;
+    
+    logger.debug(`📎 Temp file created: ${filename}`);
+    cb(null, filename);
   }
 });
 
-// 🔧 FILE FILTER: Only allow images
-const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  const allowedMimes = [
-    'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
-    'image/heic', 'image/heif', 'image/tiff', 'image/tif'
-  ];
-  
-  logger.debug(`Processing file: ${file.originalname} (${file.mimetype})`);
-  
-  if (allowedMimes.includes(file.mimetype.toLowerCase())) {
-    cb(null, true);
-  } else {
-    cb(new Error(`Unsupported file type: ${file.mimetype}`));
-  }
-};
-
-// 🚀 OPTIMIZED UPLOAD: Handle large files with progress
+// 🚀 OPTIMIZED UPLOAD: Handle large files efficiently
 export const upload = multer({
   storage,
-  fileFilter,
+  fileFilter: (req, file, cb) => {
+    // 🔧 COMBINED: Validation + logging in one place
+    logger.debug(`Processing file: ${file.originalname} (${file.mimetype})`);
+    
+    const allowedMimes = [
+      'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
+      'image/heic', 'image/heif', 'image/tiff', 'image/tif'
+    ];
+    
+    if (allowedMimes.includes(file.mimetype.toLowerCase())) {
+      cb(null, true);
+    } else {
+      logger.warn(`❌ Rejected file type: ${file.mimetype} for file: ${file.originalname}`);
+      cb(new Error(`Unsupported file type: ${file.mimetype}`));
+    }
+  },
   limits: {
     fileSize: 100 * 1024 * 1024, // 100MB per file
     files: 10, // Max 10 files per request
@@ -66,6 +77,9 @@ export const checkFileSizeLimitMiddleware = (req: any, res: any, next: any) => {
     const limit = limits[userRole as keyof typeof limits] || limits.free;
     
     if (totalSizeMB > limit) {
+      // 🧹 CLEANUP: Remove temp files if limit exceeded
+      cleanupTempFiles(files);
+      
       return res.status(413).json({
         status: false,
         message: `Total upload size (${totalSizeMB.toFixed(1)}MB) exceeds limit (${limit}MB) for ${userRole} users`,
@@ -85,6 +99,20 @@ export const checkFileSizeLimitMiddleware = (req: any, res: any, next: any) => {
   }
 };
 
+// 🧹 CLEANUP HELPER: Remove temp files immediately
+async function cleanupTempFiles(files: Express.Multer.File[]): Promise<void> {
+  for (const file of files) {
+    try {
+      if (file.path && fs.existsSync(file.path)) {
+        await fs.promises.unlink(file.path);
+        logger.debug(`🗑️ Cleaned up temp file: ${file.path}`);
+      }
+    } catch (error) {
+      logger.warn(`Failed to cleanup temp file ${file.path}:`, error);
+    }
+  }
+}
+
 // 🚀 MIDDLEWARE: Check storage quota
 export const checkStorageLimitMiddleware = async (req: any, res: any, next: any) => {
   try {
@@ -93,11 +121,13 @@ export const checkStorageLimitMiddleware = async (req: any, res: any, next: any)
     const totalSize = files.reduce((sum, file) => sum + file.size, 0);
     
     // 🔧 QUICK QUERY: Check user's current storage usage
-    // You should implement this based on your storage tracking
     const currentUsage = await getUserStorageUsage(userId);
     const userLimits = getUserStorageLimits(req.user.role);
     
     if (currentUsage + totalSize > userLimits.totalStorage) {
+      // 🧹 CLEANUP: Remove temp files if quota exceeded
+      await cleanupTempFiles(files);
+      
       const availableSpace = userLimits.totalStorage - currentUsage;
       return res.status(507).json({
         status: false,
@@ -135,6 +165,9 @@ export const checkEventPhotoLimitMiddleware = async (req: any, res: any, next: a
     const eventLimits = getEventPhotoLimits();
     
     if (currentPhotoCount + files.length > eventLimits.maxPhotos) {
+      // 🧹 CLEANUP: Remove temp files if limit exceeded
+      await cleanupTempFiles(files);
+      
       return res.status(429).json({
         status: false,
         message: `Event photo limit exceeded. Current: ${currentPhotoCount}, Adding: ${files.length}, Limit: ${eventLimits.maxPhotos}`,
@@ -162,14 +195,6 @@ export const checkEventPhotoLimitMiddleware = async (req: any, res: any, next: a
 async function getUserStorageUsage(userId: string): Promise<number> {
   try {
     // TODO: Implement efficient query to get user's total storage usage
-    // Example with MongoDB aggregation:
-    /*
-    const result = await Media.aggregate([
-      { $match: { uploaded_by: new mongoose.Types.ObjectId(userId) } },
-      { $group: { _id: null, totalSize: { $sum: "$size_mb" } } }
-    ]);
-    return (result[0]?.totalSize || 0) * 1024 * 1024; // Convert MB to bytes
-    */
     return 0; // Placeholder
   } catch (error) {
     logger.error('Error getting user storage usage:', error);
@@ -202,14 +227,6 @@ function getUserStorageLimits(userRole: string = 'free') {
 async function getEventPhotoCount(eventId: string): Promise<number> {
   try {
     // TODO: Implement efficient count query
-    // Example:
-    /*
-    const count = await Media.countDocuments({
-      event_id: new mongoose.Types.ObjectId(eventId),
-      type: 'image'
-    });
-    return count;
-    */
     return 0; // Placeholder
   } catch (error) {
     logger.error('Error getting event photo count:', error);
