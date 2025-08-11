@@ -20,7 +20,7 @@ import { Media } from "@models/media.model";
 import guestMediaUploadService from "@services/guest.service";
 import { bytesToMB, cleanupFile, getOptimizedImageUrlForItem } from "@utils/file.util";
 import { getWebSocketService } from "@services/websocket.service";
-import { MediaStatusUpdatePayload } from "types/websocket.types";
+import mediaWebSocketService from "@services/mediaWebSocket.service";
 
 // Enhanced interface for authenticated requests
 interface AuthenticatedRequest extends Request {
@@ -693,29 +693,114 @@ export const guestUploadMediaController: RequestHandler = async (
 
         const processingTime = Date.now() - startTime;
 
-        // 🚀 Optional: Update media statistics for guests (placeholder for WebSocket)
-        if (successful.length > 0) {
-            // TODO: Add WebSocket broadcast here when needed
-            // mediaWebSocketService.broadcastGuestMediaStats(event._id.toString());
-            logger.info('📡 WebSocket broadcast placeholder - guest uploads completed');
-        }
-
-        // Calculate summary
+        // 🔧 Calculate summary FIRST (before any usage)
         const successCount = successful.length;
         const failCount = failed.length;
+
+        // 🚀 CORRECTED: Only notify ADMINS about guest uploads (not other guests)
+        if (successCount > 0) {
+            logger.info(`📡 Notifying admins about ${successCount} new guest uploads...`);
+
+            // Create uploader info for admin notifications
+            const uploaderInfo = {
+                id: req.user?._id?.toString() || 'guest_' + Date.now(),
+                name: guest_name || 'Anonymous Guest',
+                type: req.user ? 'authenticated_guest' : 'guest',
+                email: guest_email || '',
+                uploadTime: new Date()
+            };
+
+            // Notify admins about each successful upload for review/approval
+            try {
+                if (successCount === 1) {
+                    // Single upload notification
+                    const uploadResult = successful[0];
+                    const originalFile = files[0];
+
+                    mediaWebSocketService.notifyAdminsAboutGuestUpload({
+                        eventId: event._id.toString(),
+                        uploadedBy: uploaderInfo,
+                        mediaData: {
+                            mediaId: uploadResult.mediaId || uploadResult._id?.toString(),
+                            url: uploadResult.url || uploadResult.preview_url,
+                            filename: uploadResult.filename || originalFile?.originalname,
+                            type: uploadResult.type || 'image',
+                            size: uploadResult.size || originalFile?.size || 0,
+                            approvalStatus: uploadResult.approval_status || 'pending'
+                        },
+                        requiresApproval: event.permissions?.require_approval || false
+                    });
+                } else {
+                    // Bulk upload notification
+                    const mediaItems = successful.map((uploadResult, index) => ({
+                        mediaId: uploadResult.mediaId || uploadResult._id?.toString(),
+                        url: uploadResult.url || uploadResult.preview_url,
+                        filename: uploadResult.filename || files[index]?.originalname,
+                        type: uploadResult.type || 'image',
+                        size: uploadResult.size || files[index]?.size || 0,
+                        approvalStatus: uploadResult.approval_status || 'pending'
+                    }));
+
+                    mediaWebSocketService.notifyAdminsAboutBulkGuestUpload({
+                        eventId: event._id.toString(),
+                        uploadedBy: uploaderInfo,
+                        mediaItems,
+                        totalCount: successCount,
+                        requiresApproval: event.permissions?.require_approval || false
+                    });
+                }
+
+                logger.info('📤 Admin notifications sent successfully', {
+                    uploadCount: successCount,
+                    uploaderName: uploaderInfo.name,
+                    eventId: event._id.toString(),
+                    requiresApproval: event.permissions?.require_approval
+                });
+
+            } catch (broadcastError) {
+                logger.error('❌ Failed to notify admins about guest uploads:', {
+                    error: broadcastError.message,
+                    uploadCount: successCount,
+                    eventId: event._id.toString()
+                });
+                // Don't fail the entire request for notification errors
+            }
+
+            // Update admin dashboard statistics (optional)
+            try {
+                // Simple room count update - no complex stats needed
+                const wsService = getWebSocketService();
+                const adminRoom = `admin_${event._id.toString()}`;
+                const adminCount = wsService.getRoomUserCounts()[adminRoom] || 0;
+
+                if (adminCount > 0) {
+                    wsService.io.to(adminRoom).emit('guest_upload_summary', {
+                        eventId: event._id.toString(),
+                        newUploadsCount: successCount,
+                        uploaderName: uploaderInfo.name,
+                        timestamp: new Date()
+                    });
+                }
+
+                logger.info('📊 Admin summary notification sent');
+            } catch (statsError) {
+                logger.error('❌ Failed to send admin summary:', statsError);
+            }
+        }
 
         logger.info(`📊 Guest upload completed in ${processingTime}ms:`, {
             total: files.length,
             success: successCount,
             failed: failCount,
-            broadcastReady: successCount > 0
+            adminNotificationsSent: successCount > 0,
+            requiresApproval: event.permissions?.require_approval
         });
 
         // 🚨 CRITICAL: Send response immediately (similar to admin pattern)
         const response = {
             status: successCount > 0,
             code: successCount > 0 ? 200 : 400,
-            message: generateGuestSuccessMessage(successCount, failCount, files.length),
+            message: generateGuestSuccessMessage(successCount, failCount, files.length, event.permissions?.require_approval),
             data: {
                 results: successful,
                 errors: failed.length > 0 ? failed : undefined,
@@ -725,15 +810,19 @@ export const guestUploadMediaController: RequestHandler = async (
                     failed: failCount,
                     processingTime: `${processingTime}ms`,
                     pending_approval: successful.filter(r => r.approval_status === 'pending').length,
-                    broadcastReady: successCount > 0 // Indicates ready for WebSocket when implemented
+                    admin_notifications_sent: successCount, // Track admin notifications
+                    requires_approval: event.permissions?.require_approval || false
                 },
-                note: "Images uploaded! High-quality versions processing in background..."
+                note: event.permissions?.require_approval
+                    ? "Images uploaded successfully! They will appear after admin approval."
+                    : "Images uploaded successfully! High-quality versions processing in background..."
             },
             error: failed.length > 0 ? { message: 'Some uploads failed', details: failed } : null,
             other: {
                 event_id: event._id.toString(),
                 requires_approval: event.permissions?.require_approval,
-                uploader_type: req.user ? 'registered_user' : 'guest'
+                uploader_type: req.user ? 'registered_user' : 'guest',
+                admin_review_required: event.permissions?.require_approval || false
             }
         };
 
@@ -762,6 +851,25 @@ export const guestUploadMediaController: RequestHandler = async (
     }
 };
 
+// 🚀 UPDATED: Guest-friendly success messages considering approval workflow
+function generateGuestSuccessMessage(
+    successCount: number,
+    failCount: number,
+    totalCount: number,
+    requiresApproval: boolean = false
+): string {
+    const approvalText = requiresApproval
+        ? " They will appear in the gallery after admin approval."
+        : " They are now visible to everyone!";
+
+    if (failCount === 0) {
+        return `All ${successCount} photo${successCount > 1 ? 's' : ''} uploaded successfully!${approvalText}`;
+    } else if (successCount > 0) {
+        return `${successCount} photo${successCount > 1 ? 's' : ''} uploaded successfully, ${failCount} failed.${approvalText}`;
+    } else {
+        return `All ${totalCount} upload${totalCount > 1 ? 's' : ''} failed. Please try again.`;
+    }
+}
 /**
  * 🚀 NEW: Process individual guest file upload with optional broadcast support
  * Similar to admin's processFileUploadWithBroadcast but for guests
@@ -808,19 +916,6 @@ const processGuestFileUploadWithOptionalBroadcast = async (
         await cleanupFile(file);
 
         throw new Error(`Failed to process ${file.originalname}: ${error.message}`);
-    }
-};
-
-/**
- * 🚀 NEW: Generate success message for guest uploads (similar to admin)
- */
-const generateGuestSuccessMessage = (successful: number, failed: number, total: number): string => {
-    if (failed === 0) {
-        return `All ${successful} file(s) uploaded successfully by guest!`;
-    } else if (successful > 0) {
-        return `${successful} file(s) uploaded successfully, ${failed} failed`;
-    } else {
-        return 'All guest uploads failed';
     }
 };
 

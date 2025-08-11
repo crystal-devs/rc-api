@@ -7,6 +7,130 @@ import { WEBSOCKET_EVENTS } from '../types/websocket.types';
 import { Media } from '@models/media.model';
 
 class MediaWebSocketService {
+    /**
+ * 🚀 SIMPLE: Notify ONLY admins about guest uploads
+ */
+    public notifyAdminsAboutGuestUpload(params: {
+        eventId: string;
+        uploadedBy: {
+            id: string;
+            name: string;
+            type: string;
+            email?: string;
+        };
+        mediaData: {
+            mediaId: string;
+            url: string;
+            filename: string;
+            type: string;
+            size: number;
+            approvalStatus: string;
+        };
+        requiresApproval: boolean;
+    }): void {
+        try {
+            const { eventId, uploadedBy, mediaData, requiresApproval } = params;
+            const adminRoom = `admin_${eventId}`;
+
+            logger.info(`📤 Notifying admins about guest upload: ${mediaData.filename}`, {
+                adminRoom,
+                uploader: uploadedBy.name,
+                requiresApproval,
+                mediaId: mediaData.mediaId.substring(0, 8) + '...'
+            });
+
+            const wsService = getWebSocketService();
+
+            const payload = {
+                eventId,
+                uploadedBy,
+                media: {
+                    id: mediaData.mediaId,
+                    url: mediaData.url,
+                    filename: mediaData.filename,
+                    type: mediaData.type as 'image' | 'video',
+                    size: mediaData.size,
+                    approvalStatus: mediaData.approvalStatus
+                },
+                requiresApproval,
+                uploadedAt: new Date(),
+                timestamp: new Date()
+            };
+
+            // 🚀 Send to admin room only using existing event type
+            wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.ADMIN_NEW_UPLOAD_NOTIFICATION, payload);
+
+            logger.info(`✅ Admin notification sent to ${this.getRoomSize(adminRoom)} admin(s)`);
+
+        } catch (error) {
+            logger.error('❌ Failed to notify admins about guest upload:', error);
+        }
+    }
+
+    /**
+     * 🚀 SIMPLE: Notify admins about bulk guest uploads
+     */
+    public notifyAdminsAboutBulkGuestUpload(params: {
+        eventId: string;
+        uploadedBy: {
+            id: string;
+            name: string;
+            type: string;
+            email?: string;
+        };
+        mediaItems: Array<{
+            mediaId: string;
+            url: string;
+            filename: string;
+            type: string;
+            size: number;
+            approvalStatus: string;
+        }>;
+        totalCount: number;
+        requiresApproval: boolean;
+    }): void {
+        try {
+            const { eventId, uploadedBy, mediaItems, totalCount, requiresApproval } = params;
+            const adminRoom = `admin_${eventId}`;
+
+            logger.info(`📤 Notifying admins about bulk guest upload: ${totalCount} items`, {
+                adminRoom,
+                uploader: uploadedBy.name,
+                requiresApproval
+            });
+
+            const wsService = getWebSocketService();
+
+            const payload = {
+                eventId,
+                uploadedBy,
+                mediaItems: mediaItems.map(item => ({
+                    id: item.mediaId,
+                    url: item.url,
+                    filename: item.filename,
+                    type: item.type as 'image' | 'video',
+                    size: item.size,
+                    approvalStatus: item.approvalStatus
+                })),
+                bulkUpload: {
+                    totalCount,
+                    successCount: mediaItems.length,
+                    requiresApproval
+                },
+                uploadedAt: new Date(),
+                timestamp: new Date()
+            };
+
+            // 🚀 Send to admin room only
+            wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.ADMIN_NEW_UPLOAD_NOTIFICATION, payload);
+
+            logger.info(`✅ Bulk admin notification sent to ${this.getRoomSize(adminRoom)} admin(s)`);
+
+        } catch (error) {
+            logger.error('❌ Failed to notify admins about bulk guest upload:', error);
+        }
+    }
+
 
     /**
      * 🚀 Broadcast new media upload to guests immediately
