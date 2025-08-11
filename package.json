@@ -19,7 +19,7 @@
     "dev": "cross-env NODE_ENV=development ts-node-dev --require tsconfig-paths/register src/index.ts",
     "build": "tsc && tsc-alias",
     "generate-test-data": "node scripts/generateTestData.js",
-    "start": "cross-env NODE_ENV=production node dist/index.js",
+    "start": "cross-env NODE_ENV=production node ./dist/index.js",
     "init-db": "node scripts/initializeDb.js"
   },
   "dependencies": {

@@ -22,6 +22,7 @@ import express from "express";
 import http from "http";
 import albumRouter from "@routes/album.router";
 import shareTokenRouter from "@routes/share-token.router";
+import reportRouter from "@routes/report.router";
 
 const app = express();
 const PORT = keys.port;
@@ -53,6 +54,7 @@ app.use(`/api/${VERSION}/media`, mediaRouter)
 app.use(`/api/${VERSION}/user`, userRouter)
 // Handle shared event endpoints separately
 app.use(`/api/${VERSION}/token`, shareTokenRouter)
+app.use(`/api/${VERSION}/report`, reportRouter)
 
 connectToMongoDB().then(async () => {
   await createDefaultPlans(); // Create default subscription plans if they don't exist

@@ -11,6 +11,7 @@ export const MODEL_NAMES = {
     SUBSCRIPTION_PLAN: "subscription-plans",
     EVENT_PARTICIPANT: "event-participants",
     EVENT_SESSION: "event-sessions",
+    BUG_REPORT: "bug-reports",
 } as const;
 
 export const getModelName = (model: keyof typeof MODEL_NAMES) => MODEL_NAMES[model];
