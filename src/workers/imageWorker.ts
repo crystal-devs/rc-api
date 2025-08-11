@@ -1,4 +1,4 @@
-// workers/imageWorker.ts - FIXED with proper imports and no circular dependencies
+// workers/imageWorker.ts - CORRECTED: Fix imports and use only mediaWebSocketService
 
 import { Job, Worker } from 'bullmq';
 import { logger } from '@utils/logger';
@@ -7,7 +7,50 @@ import { Media } from '@models/media.model';
 import sharp from 'sharp';
 import fs from 'fs/promises';
 import { uploadVariantImage, uploadOriginalImage } from '@services/uploadService';
-import { ImageProcessingJobData, ImageVariant, ProcessingResult } from 'types/queue'; // 🔧 IMPORT types
+import { mediaWebSocketService } from '@services/mediaWebSocket.service'; // CORRECTED: Only this import
+
+// Types that should exist in your types/queue.ts - add these if they don't exist
+interface ImageProcessingJobData {
+  mediaId: string;
+  userId: string;
+  userName?: string;
+  eventId: string;
+  albumId: string;
+  filePath: string;
+  originalFilename: string;
+  fileSize: number;
+  mimeType: string;
+  hasPreview: boolean;
+  previewBroadcasted?: boolean;
+  isGuestUpload?: boolean;
+}
+
+interface ProcessingResult {
+  success: boolean;
+  mediaId: string;
+  processingTime: number;
+  variants: number;
+  originalUrl: string;
+  bestGuestUrl?: string;
+  variantUrls: {
+    small_webp?: string;
+    small_jpeg?: string;
+    medium_webp?: string;
+    medium_jpeg?: string;
+    large_webp?: string;
+    large_jpeg?: string;
+  };
+  guestsBroadcasted?: boolean;
+  isGuestUpload?: boolean;
+}
+
+interface ImageVariant {
+  url: string;
+  width: number;
+  height: number;
+  size_mb: number;
+  format: 'webp' | 'jpeg';
+}
 
 let imageWorkerInstance: Worker | null = null;
 
@@ -21,41 +64,42 @@ export const initializeImageWorker = async (): Promise<Worker> => {
       retryDelayOnFailover: 100,
       lazyConnect: true,
       keepAlive: 30000,
-      family: 4 as const, // Explicit type
+      family: 4 as const,
     };
 
     imageWorkerInstance = new Worker(
       'image-processing',
       async (job: Job<ImageProcessingJobData>): Promise<ProcessingResult> => {
         const startTime = Date.now();
-        const { mediaId, originalFilename, filePath } = job.data;
-        
-        logger.info(`🔄 Processing variants: ${originalFilename} (${mediaId})`);
-        
+        const { mediaId, originalFilename, filePath, eventId, userName, isGuestUpload } = job.data;
+
+        logger.info(`🔄 Processing variants: ${originalFilename} (${mediaId}) - ${isGuestUpload ? 'Guest' : 'Admin'} upload`);
+
         try {
-          // 🚀 STEP 1: Update status (5%)
+          // 🚀 STEP 1: Update status to processing
           await Media.findByIdAndUpdate(mediaId, {
             'processing.status': 'processing',
             'processing.started_at': new Date(),
           });
+
           await job.updateProgress(5);
 
           // 🚀 STEP 2: Generate all variants (10-90%)
-          const variants = await generateImageVariants(filePath, mediaId, job.data.eventId, (progress) => {
+          const variants = await generateImageVariants(filePath, mediaId, eventId, (progress) => {
             job.updateProgress(10 + (progress * 0.8)); // 10% to 90%
           });
-          
+
           await job.updateProgress(90);
 
           // 🚀 STEP 3: Get original metadata
           const originalMetadata = await getOriginalImageMetadata(filePath);
-          
+
           // 🚀 STEP 4: Upload original to permanent storage
-          const originalUrl = await uploadOriginal(filePath, mediaId, job.data.eventId);
+          const originalUrl = await uploadOriginal(filePath, mediaId, eventId);
 
           // 🚀 STEP 5: Update database with everything (95%)
           const processingTime = Date.now() - startTime;
-          
+
           const updateData = {
             url: originalUrl, // Update to permanent URL
             'metadata.width': originalMetadata.width,
@@ -82,9 +126,33 @@ export const initializeImageWorker = async (): Promise<Worker> => {
               large: variants.large
             }
           };
-          
+
           await Media.findByIdAndUpdate(mediaId, updateData);
-          
+
+          // 🚀 NEW: Handle WebSocket differently for guest vs admin uploads
+          if (!isGuestUpload) {
+            // Admin uploads: Broadcast to guests (existing functionality)
+            const bestGuestUrl = variants.medium?.webp?.url || variants.medium?.jpeg?.url || originalUrl;
+
+            mediaWebSocketService.broadcastProcessingComplete({
+              mediaId,
+              eventId,
+              newUrl: bestGuestUrl,
+              variants: {
+                thumbnail: variants.small?.jpeg?.url || bestGuestUrl,
+                display: bestGuestUrl,
+                full: variants.large?.jpeg?.url || bestGuestUrl
+              },
+              processingTimeMs: processingTime
+            });
+          } else {
+            // 🚀 NEW: Guest uploads: Only notify admin about new guest content
+            logger.info(`✅ Guest upload processed: ${mediaId} - Admin can review`);
+
+            // TODO: In future, you can add admin notification here
+            // For now, admin will see guest uploads when they refresh their admin panel
+          }
+
           // 🧹 CLEANUP: Remove local file
           try {
             await fs.unlink(filePath);
@@ -95,14 +163,15 @@ export const initializeImageWorker = async (): Promise<Worker> => {
 
           await job.updateProgress(100);
 
-          logger.info(`✅ Variants completed: ${originalFilename} in ${processingTime}ms`);
-          
+          logger.info(`✅ Variants completed: ${originalFilename} in ${processingTime}ms - ${isGuestUpload ? 'Guest' : 'Admin'} upload`);
+
           return {
             success: true,
             mediaId,
             processingTime,
             variants: calculateVariantsCount(variants),
             originalUrl,
+            bestGuestUrl: variants.medium?.webp?.url || variants.medium?.jpeg?.url || originalUrl,
             variantUrls: {
               small_webp: variants.small?.webp?.url,
               small_jpeg: variants.small?.jpeg?.url,
@@ -110,13 +179,15 @@ export const initializeImageWorker = async (): Promise<Worker> => {
               medium_jpeg: variants.medium?.jpeg?.url,
               large_webp: variants.large?.webp?.url,
               large_jpeg: variants.large?.jpeg?.url,
-            }
+            },
+            guestsBroadcasted: !isGuestUpload, // Only admin uploads broadcast to guests
+            isGuestUpload: isGuestUpload || false
           };
 
         } catch (error: any) {
           const processingTime = Date.now() - startTime;
-          logger.error(`❌ Processing failed: ${originalFilename} after ${processingTime}ms:`, error);
-          
+          logger.error(`❌ Processing failed: ${originalFilename} after ${processingTime}ms (${isGuestUpload ? 'Guest' : 'Admin'}):`, error);
+
           // 🔧 UPDATE FAILURE STATUS
           await Media.findByIdAndUpdate(mediaId, {
             'processing.status': 'failed',
@@ -125,6 +196,16 @@ export const initializeImageWorker = async (): Promise<Worker> => {
             'processing.error_message': error.message || 'Unknown processing error',
             'processing.retry_count': job.attemptsMade || 0,
           });
+
+          // 🚀 NEW: Handle failure notifications differently for guest vs admin
+          if (!isGuestUpload) {
+            // Admin uploads: Notify guests of failure
+            mediaWebSocketService.broadcastProcessingFailed({
+              mediaId,
+              eventId,
+              errorMessage: error.message || 'Processing failed'
+            });
+          }
 
           // 🧹 CLEANUP on failure
           try {
@@ -144,22 +225,52 @@ export const initializeImageWorker = async (): Promise<Worker> => {
       }
     );
 
-    // 🚀 EVENT HANDLERS with proper typing
+    // 🚀 EVENT HANDLERS with WebSocket integration
     imageWorkerInstance.on('completed', (job: Job<ImageProcessingJobData>, result: ProcessingResult) => {
       const processingTime = Date.now() - job.timestamp;
-      logger.info(`✅ Worker completed job ${job.id} in ${processingTime}ms`);
-      
+      const uploadType = job.data.isGuestUpload ? 'Guest' : 'Admin';
+
+      logger.info(`✅ Worker completed job ${job.id} in ${processingTime}ms - ${uploadType} upload - Guests notified: ${result.guestsBroadcasted}`);
+
       if (processingTime > 60000) { // 1 minute
-        logger.warn(`🐌 Very slow job: ${job.id} took ${(processingTime/1000).toFixed(1)}s`);
+        logger.warn(`🐌 Very slow job: ${job.id} took ${(processingTime / 1000).toFixed(1)}s`);
+      }
+
+      // 🚀 NEW: Update media statistics (for both admin and guest uploads)
+      if (result.success && job.data.eventId) {
+        if (!job.data.isGuestUpload) {
+          // Only broadcast stats for admin uploads (guests see this)
+          mediaWebSocketService.broadcastMediaStats(job.data.eventId);
+        }
+        // For guest uploads, admin will see updated counts when they refresh
       }
     });
 
     imageWorkerInstance.on('failed', (job: Job<ImageProcessingJobData> | undefined, err: Error) => {
-      logger.error(`❌ Worker failed job ${job?.id}:`, {
+      const uploadType = job?.data.isGuestUpload ? 'Guest' : 'Admin';
+
+      logger.error(`❌ Worker failed job ${job?.id} (${uploadType}):`, {
         error: err.message,
         attempts: job?.attemptsMade,
-        data: job?.data?.originalFilename
+        data: job?.data?.originalFilename,
+        eventId: job?.data?.eventId,
+        isGuestUpload: job?.data.isGuestUpload
       });
+
+      // 🚀 NEW: Handle final failure differently for guest vs admin
+      if (job && job.attemptsMade >= 3 && job.data?.eventId && job.data?.mediaId) {
+        logger.warn(`❌ Final failure for ${job.data.mediaId} (${uploadType}), notifying appropriately`);
+
+        if (!job.data.isGuestUpload) {
+          // Admin upload failure: Notify guests
+          mediaWebSocketService.broadcastProcessingFailed({
+            mediaId: job.data.mediaId,
+            eventId: job.data.eventId,
+            errorMessage: 'Processing failed after multiple attempts'
+          });
+        }
+        // Guest upload failure: Just log (admin will see failed status in their panel)
+      }
     });
 
     imageWorkerInstance.on('progress', (job: Job<ImageProcessingJobData>, progress: number | object) => {
@@ -168,7 +279,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
       }
     });
 
-    logger.info(`✅ Image worker initialized with concurrency: ${getConcurrencyLevel()}`);
+    logger.info(`✅ Enhanced image worker initialized with concurrency: ${getConcurrencyLevel()}`);
     return imageWorkerInstance;
 
   } catch (error) {
@@ -181,7 +292,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
  * 🚀 CORE FUNCTION: Generate all image variants efficiently
  */
 async function generateImageVariants(
-  filePath: string, 
+  filePath: string,
   mediaId: string,
   eventId: string,
   progressCallback: (progress: number) => void
@@ -191,12 +302,12 @@ async function generateImageVariants(
   large?: { webp?: ImageVariant; jpeg?: ImageVariant };
 }> {
   const variants: any = {};
-  
+
   try {
     // 🔧 DEFINE SIZES: Optimized for different use cases
     const sizes = {
       small: { width: 400, height: 400, quality: 80 },   // Thumbnails, mobile
-      medium: { width: 800, height: 800, quality: 85 },  // Desktop feeds
+      medium: { width: 800, height: 800, quality: 85 },  // Desktop feeds  
       large: { width: 1200, height: 1200, quality: 90 }  // Lightbox, zoom
     } as const;
 
@@ -207,7 +318,7 @@ async function generateImageVariants(
     // 🚀 PARALLEL PROCESSING: Generate all variants concurrently
     for (const sizeName of sizeNames) {
       const config = sizes[sizeName];
-      
+
       // Generate both WebP and JPEG in parallel
       const [webpVariant, jpegVariant] = await Promise.all([
         generateSingleVariant(filePath, mediaId, eventId, sizeName, 'webp', config),
@@ -355,12 +466,12 @@ async function getOriginalImageMetadata(filePath: string) {
 async function uploadOriginal(filePath: string, mediaId: string, eventId: string): Promise<string> {
   try {
     const buffer = await fs.readFile(filePath);
-    
+
     const url = await uploadOriginalImage(buffer, mediaId, eventId);
 
     logger.info(`✅ Uploaded original: ${url}`);
     return url;
-    
+
   } catch (error) {
     logger.error('Failed to upload original:', error);
     throw error;
@@ -374,19 +485,19 @@ function getConcurrencyLevel(): number {
   try {
     const cpuCores = require('os').cpus().length;
     const totalMemoryGB = require('os').totalmem() / (1024 * 1024 * 1024);
-    
+
     // Conservative: 1-2 jobs per CPU core, limited by memory
     let concurrency = Math.max(1, Math.floor(cpuCores * 1.5));
-    
+
     // Memory limit (assume 1GB per job for large images)
     const memoryBasedLimit = Math.floor(totalMemoryGB);
     concurrency = Math.min(concurrency, memoryBasedLimit);
-    
+
     // Environment override
     if (process.env.IMAGE_WORKER_CONCURRENCY) {
       concurrency = parseInt(process.env.IMAGE_WORKER_CONCURRENCY);
     }
-    
+
     // Limits: 1-6 for most servers
     return Math.max(1, Math.min(concurrency, 6));
   } catch (error) {
@@ -397,7 +508,7 @@ function getConcurrencyLevel(): number {
 
 function calculateVariantsCount(variants: any): number {
   if (!variants || typeof variants !== 'object') return 0;
-  
+
   let count = 0;
   ['small', 'medium', 'large'].forEach(size => {
     if (variants[size]) {
@@ -418,7 +529,7 @@ function calculateTotalVariantsSize(variants: any): number {
       if (variants[size].jpeg?.size_mb) total += variants[size].jpeg.size_mb;
     }
   });
-  
+
   return Math.round(total * 100) / 100;
 }
 

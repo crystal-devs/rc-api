@@ -1,4 +1,4 @@
-// controllers/upload.controller.ts - FIXED race condition
+// controllers/upload.controller.ts
 
 import { Request, Response, NextFunction } from 'express';
 import fs from 'fs/promises';
@@ -8,20 +8,21 @@ import { Media } from '@models/media.model';
 import { getImageQueue } from 'queues/imageQueue';
 import { uploadPreviewImage } from '@services/uploadService';
 import sharp from 'sharp';
+import { mediaWebSocketService } from '@services/mediaWebSocket.service'; // ONLY this import
 
 interface AuthenticatedRequest extends Request {
     user: {
         _id: mongoose.Types.ObjectId | string;
         role?: string;
         subscription?: any;
+        name?: string;
     };
     files?: Express.Multer.File[];
     sessionID?: string;
 }
 
 /**
- * 🚀 OPTIMIZED: Ultra-fast upload - responds immediately to frontend
- * Users see their images instantly while processing happens in background
+ * 🚀 ENHANCED: Ultra-fast upload with real-time guest broadcasting
  */
 export const uploadMediaController = async (
     req: AuthenticatedRequest,
@@ -34,12 +35,14 @@ export const uploadMediaController = async (
         const files = req.files as Express.Multer.File[] || [];
         const { album_id, event_id } = req.body;
         const user_id = req.user._id.toString();
+        const userName = req.user.name || 'Admin';
 
         logger.info('📤 Upload request:', {
             fileCount: files.length,
             event_id,
             album_id,
-            userId: user_id
+            userId: user_id,
+            userName
         });
 
         // 🔧 FAST VALIDATION: Basic checks only
@@ -59,8 +62,9 @@ export const uploadMediaController = async (
         }
 
         // 🚀 PARALLEL PROCESSING: Process all files concurrently
-        const uploadPromises = files.map(file => processFileUpload(file, {
+        const uploadPromises = files.map(file => processFileUploadWithBroadcast(file, {
             userId: user_id,
+            userName,
             eventId: event_id,
             albumId: album_id || new mongoose.Types.ObjectId().toString()
         }));
@@ -80,13 +84,20 @@ export const uploadMediaController = async (
             }));
 
         const processingTime = Date.now() - startTime;
+
+        // 🚀 Update media statistics for guests
+        if (successful.length > 0) {
+            mediaWebSocketService.broadcastMediaStats(event_id);
+        }
+
         logger.info(`📊 Upload completed in ${processingTime}ms:`, {
             successful: successful.length,
             failed: failed.length,
-            total: files.length
+            total: files.length,
+            broadcastSent: successful.length > 0
         });
 
-        // 🚨 CRITICAL: Send response immediately - users see images right away
+        // 🚨 CRITICAL: Send response immediately
         return res.status(200).json({
             status: successful.length > 0,
             message: generateSuccessMessage(successful.length, failed.length, files.length),
@@ -97,16 +108,16 @@ export const uploadMediaController = async (
                     total: files.length,
                     successful: successful.length,
                     failed: failed.length,
-                    processingTime: `${processingTime}ms`
+                    processingTime: `${processingTime}ms`,
+                    guestsBroadcasted: successful.length > 0
                 },
-                note: "Images uploaded! High-quality versions processing in background..."
+                note: "Images uploaded! Guests can see them in real-time. High-quality versions processing..."
             }
         });
 
     } catch (error: any) {
         logger.error('❌ Upload controller error:', error);
 
-        // Cleanup files on error
         if (req.files) {
             await cleanupFiles(req.files as Express.Multer.File[]);
         }
@@ -120,22 +131,22 @@ export const uploadMediaController = async (
 };
 
 /**
- * 🚀 KEY FIX: Don't cleanup files immediately - let worker handle cleanup
+ * 🚀 ENHANCED: Process file upload with WebSocket broadcasting
  */
-async function processFileUpload(
+async function processFileUploadWithBroadcast(
     file: Express.Multer.File,
-    context: { userId: string; eventId: string; albumId: string }
+    context: { userId: string; userName: string; eventId: string; albumId: string }
 ): Promise<any> {
     try {
         // 🔧 FAST VALIDATION: Quick checks
         if (!isValidImageFile(file)) {
-            await cleanupFile(file); // Only cleanup invalid files
+            await cleanupFile(file);
             throw new Error(`Unsupported file type: ${file.mimetype}`);
         }
 
         const fileSizeMB = file.size / (1024 * 1024);
-        if (fileSizeMB > 100) { // 100MB limit
-            await cleanupFile(file); // Only cleanup oversized files
+        if (fileSizeMB > 100) {
+            await cleanupFile(file);
             throw new Error(`File too large: ${fileSizeMB.toFixed(2)}MB (max 100MB)`);
         }
 
@@ -145,17 +156,16 @@ async function processFileUpload(
         const eventObjectId = new mongoose.Types.ObjectId(context.eventId);
         const userObjectId = new mongoose.Types.ObjectId(context.userId);
 
-        // 🚀 CRITICAL OPTIMIZATION: Create preview image immediately
-        // This is what users see instantly while background processing happens
+        // 🚀 CRITICAL: Create preview image immediately
         const previewUrl = await createInstantPreview(file, mediaId.toString(), context.eventId);
 
-        // 🔧 GET BASIC METADATA: Super fast
+        // 🔧 GET BASIC METADATA
         const metadata = await getBasicImageMetadata(file.path);
 
-        // 🚀 CREATE DATABASE RECORD: With preview URL so users see something immediately
+        // 🚀 CREATE DATABASE RECORD
         const media = new Media({
             _id: mediaId,
-            url: previewUrl, // Users see this immediately
+            url: previewUrl,
             type: 'image',
             album_id: albumObjectId,
             event_id: eventObjectId,
@@ -170,7 +180,7 @@ async function processFileUpload(
                 aspect_ratio: metadata.aspect_ratio
             },
             processing: {
-                status: 'processing', // Start as processing since we're about to queue
+                status: 'processing',
                 started_at: new Date(),
                 variants_generated: false,
             },
@@ -181,12 +191,29 @@ async function processFileUpload(
             }
         });
 
-        // 🚀 SAVE TO DATABASE: Single atomic operation
         await media.save();
 
-        logger.info(`✅ Media record created with preview: ${mediaId}`);
+        // 🚀 NEW: Broadcast to guests immediately after preview is ready
+        mediaWebSocketService.broadcastNewMediaToGuests({
+            mediaId: mediaId.toString(),
+            eventId: context.eventId,
+            uploadedBy: {
+                id: context.userId,
+                name: context.userName,
+                type: 'admin'
+            },
+            mediaData: {
+                url: previewUrl,
+                filename: file.originalname,
+                type: 'image',
+                size: file.size,
+                format: getFileExtension(file)
+            }
+        });
 
-        // 🚀 QUEUE FOR BACKGROUND PROCESSING: Generate high-quality variants
+        logger.info(`✅ Media created and broadcasted to guests: ${mediaId}`);
+
+        // 🚀 QUEUE FOR BACKGROUND PROCESSING
         const imageQueue = getImageQueue();
         let jobId = null;
 
@@ -195,59 +222,57 @@ async function processFileUpload(
                 const job = await imageQueue.add('process-image', {
                     mediaId: mediaId.toString(),
                     userId: context.userId,
+                    userName: context.userName,
                     eventId: context.eventId,
                     albumId: context.albumId,
-                    filePath: file.path, // 🔧 CRITICAL: Pass absolute path to worker
+                    filePath: file.path,
                     originalFilename: file.originalname,
                     fileSize: file.size,
                     mimeType: file.mimetype,
-                    hasPreview: true // Flag to indicate preview exists
+                    hasPreview: true,
+                    previewBroadcasted: true
                 }, {
-                    // 🔧 PRIORITY: Smaller files get higher priority
                     priority: fileSizeMB < 5 ? 10 : 5,
-                    delay: 0, // Process immediately
+                    delay: 0,
                     attempts: 3,
                     backoff: { type: 'exponential', delay: 2000 }
                 });
 
                 jobId = job.id;
-                logger.info(`✅ Job queued: ${job.id} for media ${mediaId} with file: ${file.path}`);
+                logger.info(`✅ Job queued with broadcast context: ${job.id}`);
 
             } catch (queueError) {
-                logger.error('Queue error (processing will be manual):', queueError);
-                // Don't fail the upload if queue fails, but cleanup file
+                logger.error('Queue error:', queueError);
                 await cleanupFile(file);
             }
         } else {
-            // No queue available, cleanup file
-            logger.warn('No image queue available, cleaning up file');
+            logger.warn('No image queue available');
             await cleanupFile(file);
         }
 
-        // 🚀 RETURN SUCCESS: Users see this immediately
         return {
             id: mediaId.toString(),
             filename: file.originalname,
-            url: previewUrl, // Users can see image immediately
+            url: previewUrl,
             status: jobId ? 'processing' : 'pending',
             jobId: jobId,
             size: `${fileSizeMB.toFixed(2)}MB`,
             dimensions: `${metadata.width}x${metadata.height}`,
             aspectRatio: metadata.aspect_ratio,
             estimatedProcessingTime: getEstimatedProcessingTime(file.size),
-            message: "Image available! High-quality versions processing..."
+            guestsBroadcasted: true,
+            message: "Image available to guests! High-quality versions processing..."
         };
 
     } catch (error: any) {
         logger.error(`File processing error for ${file.originalname}:`, error);
-        await cleanupFile(file); // Cleanup on any error
+        await cleanupFile(file);
         throw error;
     }
 }
 
 /**
- * 🚀 CRITICAL NEW FUNCTION: Create instant preview for immediate user feedback
- * This runs fast (1-2 seconds) so users see their images right away
+ * 🚀 CRITICAL: Create instant preview for immediate user feedback
  */
 async function createInstantPreview(
     file: Express.Multer.File,
@@ -255,27 +280,23 @@ async function createInstantPreview(
     eventId: string
 ): Promise<string> {
     try {
-        // 🔧 FAST PREVIEW: Create medium-quality preview quickly
         const previewBuffer = await sharp(file.path)
             .resize(800, 800, {
                 fit: 'inside',
                 withoutEnlargement: true
             })
             .jpeg({
-                quality: 85, // Good quality, fast processing
+                quality: 85,
                 progressive: true
             })
             .toBuffer();
 
-        // 🚀 UPLOAD PREVIEW: Use upload service
         const previewUrl = await uploadPreviewImage(previewBuffer, mediaId, eventId);
-
-        logger.info(`✅ Preview created: ${mediaId} -> ${previewUrl}`);
+        logger.info(`✅ Preview created for guests: ${mediaId} -> ${previewUrl}`);
         return previewUrl;
 
     } catch (error) {
         logger.error('Preview creation failed:', error);
-        // Fallback: return placeholder URL
         return '/placeholder-image.jpg';
     }
 }
@@ -297,9 +318,7 @@ async function getBasicImageMetadata(filePath: string) {
     }
 }
 
-/**
- * 🚀 STATUS ENDPOINT: Fast status checking
- */
+// Keep all existing status controller functions unchanged...
 export const getUploadStatusController = async (
     req: Request,
     res: Response
@@ -330,7 +349,7 @@ export const getUploadStatusController = async (
                 isComplete: processingStatus === 'completed' && hasVariants,
                 isFailed: processingStatus === 'failed',
                 isProcessing: processingStatus === 'processing',
-                url: media.url, // Current best URL
+                url: media.url,
                 hasVariants,
                 dimensions: media.metadata ? `${media.metadata.width}x${media.metadata.height}` : 'Unknown',
                 message: getStatusMessage(processingStatus, hasVariants)
@@ -346,9 +365,6 @@ export const getUploadStatusController = async (
     }
 };
 
-/**
- * 🚀 BATCH STATUS ENDPOINT: For monitoring multiple uploads
- */
 export const getBatchUploadStatusController = async (
     req: Request,
     res: Response
@@ -363,7 +379,6 @@ export const getBatchUploadStatusController = async (
             });
         }
 
-        // 🔧 BATCH QUERY: Get all at once
         const mediaList = await Media.find({
             _id: { $in: mediaIds }
         })
@@ -396,10 +411,7 @@ export const getBatchUploadStatusController = async (
     }
 };
 
-/**
- * 🛠️ UTILITY FUNCTIONS
- */
-
+// Utility functions (unchanged)
 function isValidImageFile(file: Express.Multer.File): boolean {
     const supportedTypes = [
         'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
@@ -414,7 +426,7 @@ function getFileExtension(file: Express.Multer.File): string {
 
 function getEstimatedProcessingTime(fileSizeBytes: number): string {
     const sizeMB = fileSizeBytes / (1024 * 1024);
-    const seconds = Math.max(5, Math.min(sizeMB * 2, 30)); // 5-30 seconds
+    const seconds = Math.max(5, Math.min(sizeMB * 2, 30));
     return `${Math.round(seconds)}s`;
 }
 
@@ -436,8 +448,8 @@ function getStatusMessage(status: string, hasVariants: boolean): string {
 function generateSuccessMessage(successful: number, failed: number, total: number): string {
     if (failed === 0) {
         return total === 1
-            ? 'Photo uploaded successfully!'
-            : `All ${successful} photos uploaded successfully!`;
+            ? 'Photo uploaded and shared with guests!'
+            : `All ${successful} photos uploaded and shared with guests!`;
     }
 
     if (successful === 0) {
@@ -446,7 +458,7 @@ function generateSuccessMessage(successful: number, failed: number, total: numbe
             : 'All photo uploads failed';
     }
 
-    return `${successful} photo${successful > 1 ? 's' : ''} uploaded successfully, ${failed} failed`;
+    return `${successful} photo${successful > 1 ? 's' : ''} uploaded and shared, ${failed} failed`;
 }
 
 async function cleanupFile(file: Express.Multer.File): Promise<void> {

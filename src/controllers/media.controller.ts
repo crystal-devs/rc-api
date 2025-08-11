@@ -18,7 +18,7 @@ import {
 import { Event } from "@models/event.model";
 import { Media } from "@models/media.model";
 import guestMediaUploadService from "@services/guest.service";
-import { getOptimizedImageUrlForItem } from "@utils/file.util";
+import { bytesToMB, cleanupFile, getOptimizedImageUrlForItem } from "@utils/file.util";
 import { getWebSocketService } from "@services/websocket.service";
 import { MediaStatusUpdatePayload } from "types/websocket.types";
 
@@ -575,6 +575,8 @@ export const guestUploadMediaController: RequestHandler = async (
     res: Response,
     next: NextFunction
 ): Promise<void> => {
+    const startTime = Date.now();
+
     try {
         const { share_token } = req.params;
         const files = (req.files as Express.Multer.File[]) || (req.file ? [req.file] : []);
@@ -589,7 +591,7 @@ export const guestUploadMediaController: RequestHandler = async (
             userId: req.user?._id?.toString()
         });
 
-        // Validate share token
+        // 🔧 FAST VALIDATION: Basic checks only (similar to admin)
         if (!share_token) {
             res.status(400).json({
                 status: false,
@@ -602,7 +604,6 @@ export const guestUploadMediaController: RequestHandler = async (
             return;
         }
 
-        // Validate files
         if (!files || files.length === 0) {
             res.status(400).json({
                 status: false,
@@ -618,6 +619,8 @@ export const guestUploadMediaController: RequestHandler = async (
         // Find event by share token
         const event = await Event.findOne({ share_token });
         if (!event) {
+            // Cleanup files before returning error
+            await cleanupFiles(files);
             res.status(404).json({
                 status: false,
                 code: 404,
@@ -638,6 +641,7 @@ export const guestUploadMediaController: RequestHandler = async (
 
         // Check if event allows uploads
         if (!event.permissions?.can_upload) {
+            await cleanupFiles(files);
             res.status(403).json({
                 status: false,
                 code: 403,
@@ -663,67 +667,69 @@ export const guestUploadMediaController: RequestHandler = async (
             }
         };
 
-        // Process uploads
-        const results = [];
-        const errors = [];
+        // 🚀 PARALLEL PROCESSING: Process all files concurrently (like admin)
+        const uploadPromises = files.map(file =>
+            processGuestFileUploadWithOptionalBroadcast(file, {
+                shareToken: share_token,
+                guestInfo,
+                authenticatedUserId: req.user?._id?.toString(),
+                eventId: event._id.toString()
+            })
+        );
 
-        for (const file of files) {
-            try {
-                logger.info(`📁 Processing file: ${file.originalname}`);
+        const results = await Promise.allSettled(uploadPromises);
 
-                const uploadResult = await guestMediaUploadService.uploadGuestMedia(
-                    share_token,
-                    file,
-                    guestInfo,
-                    req.user?._id?.toString()
-                );
+        // 🔧 SEPARATE SUCCESS/FAILURES (same pattern as admin)
+        const successful = results
+            .filter((result): result is PromiseFulfilledResult<any> => result.status === 'fulfilled')
+            .map(result => result.value);
 
-                results.push({
-                    filename: file.originalname,
-                    ...uploadResult
-                });
+        const failed = results
+            .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+            .map((result, index) => ({
+                filename: files[index]?.originalname || 'unknown',
+                error: result.reason?.message || 'Upload failed'
+            }));
 
-                logger.info(`✅ Upload result for ${file.originalname}:`, uploadResult);
+        const processingTime = Date.now() - startTime;
 
-            } catch (fileError: any) {
-                logger.error(`❌ Error uploading ${file.originalname}:`, fileError);
-                errors.push({
-                    filename: file.originalname,
-                    error: fileError.message || 'Upload failed'
-                });
-            }
+        // 🚀 Optional: Update media statistics for guests (placeholder for WebSocket)
+        if (successful.length > 0) {
+            // TODO: Add WebSocket broadcast here when needed
+            // mediaWebSocketService.broadcastGuestMediaStats(event._id.toString());
+            logger.info('📡 WebSocket broadcast placeholder - guest uploads completed');
         }
 
         // Calculate summary
-        const successCount = results.filter(r => r.success).length;
-        const failCount = results.length - successCount;
+        const successCount = successful.length;
+        const failCount = failed.length;
 
-        logger.info('📊 Upload summary:', {
+        logger.info(`📊 Guest upload completed in ${processingTime}ms:`, {
             total: files.length,
             success: successCount,
-            failed: failCount
+            failed: failCount,
+            broadcastReady: successCount > 0
         });
 
-        // Send response
+        // 🚨 CRITICAL: Send response immediately (similar to admin pattern)
         const response = {
             status: successCount > 0,
             code: successCount > 0 ? 200 : 400,
-            message: failCount === 0 ?
-                `All ${successCount} file(s) uploaded successfully!` :
-                successCount > 0 ?
-                    `${successCount} file(s) uploaded, ${failCount} failed` :
-                    'All uploads failed',
+            message: generateGuestSuccessMessage(successCount, failCount, files.length),
             data: {
-                results,
-                errors: errors.length > 0 ? errors : undefined,
+                results: successful,
+                errors: failed.length > 0 ? failed : undefined,
                 summary: {
                     total: files.length,
                     success: successCount,
                     failed: failCount,
-                    pending_approval: results.filter(r => r.approval_status === 'pending').length
-                }
+                    processingTime: `${processingTime}ms`,
+                    pending_approval: successful.filter(r => r.approval_status === 'pending').length,
+                    broadcastReady: successCount > 0 // Indicates ready for WebSocket when implemented
+                },
+                note: "Images uploaded! High-quality versions processing in background..."
             },
-            error: errors.length > 0 ? { message: 'Some uploads failed', details: errors } : null,
+            error: failed.length > 0 ? { message: 'Some uploads failed', details: failed } : null,
             other: {
                 event_id: event._id.toString(),
                 requires_approval: event.permissions?.require_approval,
@@ -740,6 +746,11 @@ export const guestUploadMediaController: RequestHandler = async (
             shareToken: req.params.share_token
         });
 
+        // Cleanup files on error
+        if (req.files) {
+            await cleanupFiles(req.files as Express.Multer.File[]);
+        }
+
         res.status(500).json({
             status: false,
             code: 500,
@@ -749,6 +760,76 @@ export const guestUploadMediaController: RequestHandler = async (
             other: null
         });
     }
+};
+
+/**
+ * 🚀 NEW: Process individual guest file upload with optional broadcast support
+ * Similar to admin's processFileUploadWithBroadcast but for guests
+ */
+const processGuestFileUploadWithOptionalBroadcast = async (
+    file: Express.Multer.File,
+    context: {
+        shareToken: string;
+        guestInfo: any;
+        authenticatedUserId?: string;
+        eventId: string;
+    }
+): Promise<any> => {
+    try {
+        logger.info(`📁 Processing guest file: ${file.originalname}`, {
+            size: `${bytesToMB(file.size)}MB`,
+            type: file.mimetype,
+            guestName: context.guestInfo.name || 'Anonymous'
+        });
+
+        const uploadResult = await guestMediaUploadService.uploadGuestMedia(
+            context.shareToken,
+            file,
+            context.guestInfo,
+            context.authenticatedUserId
+        );
+
+        // 🚀 PLACEHOLDER: WebSocket broadcast point
+        if (uploadResult.success && uploadResult.media_id) {
+            // TODO: Add WebSocket broadcast here when needed
+            // await broadcastGuestUploadSuccess(context.eventId, uploadResult);
+            logger.info(`📡 WebSocket placeholder - guest upload success: ${uploadResult.media_id}`);
+        }
+
+        return {
+            filename: file.originalname,
+            ...uploadResult
+        };
+
+    } catch (error: any) {
+        logger.error(`❌ Error processing guest file ${file.originalname}:`, error);
+
+        // Ensure file cleanup on error
+        await cleanupFile(file);
+
+        throw new Error(`Failed to process ${file.originalname}: ${error.message}`);
+    }
+};
+
+/**
+ * 🚀 NEW: Generate success message for guest uploads (similar to admin)
+ */
+const generateGuestSuccessMessage = (successful: number, failed: number, total: number): string => {
+    if (failed === 0) {
+        return `All ${successful} file(s) uploaded successfully by guest!`;
+    } else if (successful > 0) {
+        return `${successful} file(s) uploaded successfully, ${failed} failed`;
+    } else {
+        return 'All guest uploads failed';
+    }
+};
+
+/**
+ * 🚀 NEW: Cleanup multiple files utility (if not already available)
+ */
+const cleanupFiles = async (files: Express.Multer.File[]): Promise<void> => {
+    const cleanupPromises = files.map(file => cleanupFile(file));
+    await Promise.allSettled(cleanupPromises);
 };
 
 /**

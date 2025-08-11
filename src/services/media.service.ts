@@ -7,6 +7,7 @@ import { Media } from '@models/media.model';
 import { Event } from '@models/event.model';
 import { Album } from '@models/album.model';
 import { transformMediaForResponse } from '@utils/file.util';
+import mediaWebSocketService from './mediaWebSocket.service';
 
 // ImageKit configuration
 const imagekit = new ImageKit({
@@ -422,6 +423,7 @@ export const updateMediaStatusService = async (
     status: string,
     options: {
         adminId?: string;
+        adminName?: string; // Add this for better WebSocket info
         reason?: string;
         hideReason?: string;
     }
@@ -456,6 +458,7 @@ export const updateMediaStatusService = async (
         }
 
         const previousStatus = media.approval?.status;
+        const eventId = media.event_id.toString(); // FIX: Get eventId from media
 
         // Update the media status
         const updateObj: any = {
@@ -481,6 +484,23 @@ export const updateMediaStatusService = async (
             { new: true, lean: true }
         );
 
+        // 🚀 NEW: Broadcast status change via WebSocket to both admin and guests
+        try {
+            // Your existing WebSocket service emitStatusUpdate already handles this correctly
+            // But let's also broadcast stats update
+            mediaWebSocketService.broadcastMediaStats(eventId);
+
+            logger.info('📤 WebSocket status update and stats broadcasted', {
+                mediaId: mediaId.substring(0, 8) + '...',
+                previousStatus,
+                newStatus: status,
+                eventId: eventId.substring(0, 8) + '...'
+            });
+        } catch (wsError) {
+            logger.error('❌ Failed to broadcast via WebSocket:', wsError);
+            // Don't fail the service if WebSocket fails
+        }
+
         logger.info('Media status updated:', {
             mediaId,
             previousStatus,
@@ -496,7 +516,8 @@ export const updateMediaStatusService = async (
             error: null,
             other: {
                 previousStatus,
-                newStatus: status
+                newStatus: status,
+                websocketBroadcasted: true // Indicate WebSocket was attempted
             }
         };
 
@@ -521,6 +542,7 @@ export const bulkUpdateMediaStatusService = async (
     status: string,
     options: {
         adminId?: string;
+        adminName?: string; // Add this for better WebSocket info
         reason?: string;
         hideReason?: string;
     }
@@ -578,6 +600,16 @@ export const bulkUpdateMediaStatusService = async (
             updateObj
         );
 
+        // 🚀 NEW: Broadcast stats update after bulk change
+        try {
+            mediaWebSocketService.broadcastMediaStats(eventId);
+
+            logger.info(`📤 Bulk WebSocket stats update broadcasted for ${result.modifiedCount} items`);
+        } catch (wsError) {
+            logger.error('❌ Failed to broadcast bulk update via WebSocket:', wsError);
+            // Don't fail the service if WebSocket fails
+        }
+
         logger.info('Bulk media status update completed:', {
             eventId,
             mediaCount: validMediaIds.length,
@@ -596,7 +628,8 @@ export const bulkUpdateMediaStatusService = async (
             error: null,
             other: {
                 newStatus: status,
-                updatedBy: options.adminId || 'system'
+                updatedBy: options.adminId || 'system',
+                websocketBroadcasted: true // Indicate WebSocket was attempted
             }
         };
 
@@ -618,7 +651,11 @@ export const bulkUpdateMediaStatusService = async (
  */
 export const deleteMediaService = async (
     mediaId: string,
-    userId: string
+    userId: string,
+    options?: {
+        adminName?: string; // For better WebSocket info
+        reason?: string; // Reason for deletion
+    }
 ): Promise<ServiceResponse<any>> => {
     try {
         // Validate inputs
@@ -633,8 +670,11 @@ export const deleteMediaService = async (
             };
         }
 
-        // Find the media item
-        const media = await Media.findById(mediaId);
+        // 🚀 NEW: Find the media item BEFORE deletion to get event info
+        const media = await Media.findById(mediaId).select(
+            'event_id url original_filename type approval.status'
+        );
+
         if (!media) {
             return {
                 status: false,
@@ -646,21 +686,55 @@ export const deleteMediaService = async (
             };
         }
 
+        const eventId = media.event_id.toString();
+        const wasVisible = ['approved', 'auto_approved'].includes(media.approval?.status || '');
+
         // Delete the media record
         await Media.findByIdAndDelete(mediaId);
 
+        // 🚀 NEW: Broadcast deletion to guests if the image was visible to them
+        if (wasVisible) {
+            try {
+                mediaWebSocketService.broadcastMediaRemoved({
+                    mediaId,
+                    eventId,
+                    reason: options?.reason || 'deleted_by_admin',
+                    adminName: options?.adminName
+                });
+
+                // Also update stats since total count changed
+                mediaWebSocketService.broadcastMediaStats(eventId);
+
+                logger.info('📤 Media deletion broadcasted to guests', {
+                    mediaId: mediaId.substring(0, 8) + '...',
+                    eventId: eventId.substring(0, 8) + '...',
+                    wasVisible
+                });
+            } catch (wsError) {
+                logger.error('❌ Failed to broadcast media deletion via WebSocket:', wsError);
+                // Don't fail the deletion if WebSocket fails
+            }
+        }
+
         logger.info('Media deleted successfully:', {
             mediaId,
-            deletedBy: userId
+            deletedBy: userId,
+            eventId,
+            wasVisibleToGuests: wasVisible
         });
 
         return {
             status: true,
             code: 200,
             message: 'Media deleted successfully',
-            data: { id: mediaId },
+            data: {
+                id: mediaId,
+                wasVisibleToGuests: wasVisible
+            },
             error: null,
-            other: null
+            other: {
+                websocketBroadcasted: wasVisible // Indicate if guests were notified
+            }
         };
 
     } catch (error: any) {
