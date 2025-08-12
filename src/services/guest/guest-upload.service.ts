@@ -4,7 +4,6 @@
 import mongoose from 'mongoose';
 import { logger } from '@utils/logger';
 import { Media, createGuestUploaderInfo } from '@models/media.model';
-import { getOrCreateDefaultAlbum } from '@services/album.service';
 import { determineApprovalStatus } from '@utils/user.utils';
 import { bytesToMB, cleanupFile } from '@utils/file.util';
 
@@ -15,6 +14,7 @@ import { validateGuestFile, validateShareToken } from './guest-validation.servic
 
 import type { GuestUploadResult, GuestUploadInfo } from './guest.types';
 import { getEstimatedProcessingTime } from '@services/upload/shared/image-processing.service';
+import { getOrCreateDefaultAlbum } from '@services/album';
 
 export const uploadGuestMedia = async (
     shareToken: string,

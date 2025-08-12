@@ -22,7 +22,7 @@ export const getUserProfileService = async (userId: string): Promise<ServiceResp
         }
 
         const userProfile: UserProfile = {
-            _id: user._id,
+            _id: user._id.toString(),
             name: user.name,
             email: user.email,
             phone_number: user.phone_number,

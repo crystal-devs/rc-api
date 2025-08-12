@@ -6,7 +6,6 @@ import { NextFunction, Response } from "express";
 import { injectedRequest } from "types/injected-types";
 import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
-import { createDefaultAlbumForEvent } from "@services/album.service";
 import { Event, EventType } from "@models/event.model";
 import {
     addCreatorAsParticipant,
@@ -18,6 +17,7 @@ import {
     processEventUpdateData,
     updateEventService
 } from "@services/event";
+import { createDefaultAlbumForEvent } from "@services/album";
 
 interface InjectedRequest extends Request {
     user: {

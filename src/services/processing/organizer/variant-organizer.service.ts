@@ -40,7 +40,7 @@ export class VariantOrganizerService {
         for (const sizeName of sizeNames) {
             const formats = organized[sizeName];
             if (!formats.webp || !formats.jpeg) {
-                logger.warn(`⚠️ Missing variant: ${sizeName} - some formats may be incomplete`);
+                logger.warn(`⚠️ Missing variant: ${sizeName.toString()} - some formats may be incomplete`);
             }
         }
     }

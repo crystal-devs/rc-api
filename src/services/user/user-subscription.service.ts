@@ -34,8 +34,8 @@ export const getUserSubscriptionService = async (userId: string): Promise<Servic
 
         // Format the response for frontend
         const formattedSubscription: FormattedSubscription = {
-            id: subscription._id,
-            userId: subscription.userId,
+            id: subscription._id.toString(),
+            userId: subscription.userId.toString(),
             planId: subscription.planId,
             planName: subscription.planName,
             status: subscription.status,

@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express';
-import { checkUserLimitsService, getUserSubscriptionService } from '../services/user.service';
 import { logger } from '../utils/logger';
 import { injectedRequest } from '../types/injected-types';
+import { checkUserLimitsService, getUserSubscriptionService } from '@services/user';
 
 /**
  * Middleware to check if user has reached their event creation limit

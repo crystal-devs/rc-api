@@ -4,7 +4,6 @@ import { Request, Response, NextFunction, RequestHandler } from "express";
 import mongoose from "mongoose";
 import { logger } from "@utils/logger";
 import { sendResponse } from "@utils/express.util";
-import { getOrCreateDefaultAlbum } from "@services/album.service";
 import { Event } from "@models/event.model";
 import { Media } from "@models/media.model";
 import { bytesToMB, cleanupFile, getOptimizedImageUrlForItem } from "@utils/file.util";

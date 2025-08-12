@@ -14,13 +14,13 @@ export {
 export { getGuestUploadStats } from './guest-stats.service';
 
 // Re-export shared upload services
-export { 
-    createInstantPreview, 
-    getBasicImageMetadata, 
-    calculateTotalVariantsSize,
-    getFileExtension,
-    getEstimatedProcessingTime
-} from '../upload/image-processing.service';
+// export { 
+//     createInstantPreview, 
+//     getBasicImageMetadata, 
+//     calculateTotalVariantsSize,
+//     getFileExtension,
+//     getEstimatedProcessingTime
+// } from '../upload/image-processing.service';
 export { queueImageProcessing } from '../upload/shared/queue-processing.service';
 
 // Export types

@@ -5,12 +5,12 @@
 import mongoose from 'mongoose';
 import { logger } from '@utils/logger';
 import { Media } from '@models/media.model';
-import { getOrCreateDefaultAlbum } from '@services/album.service';
 import { bytesToMB, cleanupFile } from '@utils/file.util';
 
 // Import shared utilities
 import { createInstantPreview, getBasicImageMetadata, getFileExtension, getEstimatedProcessingTime } from '../shared/image-processing.service';
-import { queueImageProcessing } from '../shared/queue-processing.service';
+import { getOrCreateDefaultAlbum } from '@services/album';
+import { queueImageProcessing } from '@services/guest';
 
 export interface AdminUploadResult {
     success: boolean;
