@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction, RequestHandler } from "express";
 import * as authService from "@services/auth.service"
 import { trimObject } from "@utils/sanitizers.util";
+import { loginService } from "@services/auth";
 
 export const loginController: RequestHandler = async (req, res, next) => {
     try {
@@ -16,7 +17,7 @@ export const loginController: RequestHandler = async (req, res, next) => {
             return
         }
 
-        const response = await authService.loginService({
+        const response = await loginService.login({
             email,
             phone_number,
             name,

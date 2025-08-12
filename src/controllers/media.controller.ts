@@ -5,22 +5,22 @@ import mongoose from "mongoose";
 import { logger } from "@utils/logger";
 import { sendResponse } from "@utils/express.util";
 import { getOrCreateDefaultAlbum } from "@services/album.service";
-import {
-    uploadCoverImageService,
-    getMediaByEventService,
-    getMediaByAlbumService,
-    deleteMediaService,
-    updateMediaStatusService,
-    bulkUpdateMediaStatusService,
-    getGuestMediaService,
-    MediaQueryOptions
-} from "@services/media.service";
 import { Event } from "@models/event.model";
 import { Media } from "@models/media.model";
-import guestMediaUploadService from "@services/guest.service";
 import { bytesToMB, cleanupFile, getOptimizedImageUrlForItem } from "@utils/file.util";
-import { getWebSocketService } from "@services/websocket.service";
-import mediaWebSocketService from "@services/mediaWebSocket.service";
+import { mediaNotificationService } from "@services/websocket/notifications";
+import { getWebSocketService } from "@services/websocket/websocket.service";
+import {
+    bulkUpdateMediaStatusService,
+    deleteMediaService,
+    getGuestMediaService,
+    getMediaByAlbumService,
+    getMediaByEventService,
+    MediaQueryOptions,
+    updateMediaStatusService,
+    uploadCoverImageService
+} from "@services/media";
+import { uploadGuestMedia } from "@services/guest";
 
 // Enhanced interface for authenticated requests
 interface AuthenticatedRequest extends Request {
@@ -717,7 +717,7 @@ export const guestUploadMediaController: RequestHandler = async (
                     const uploadResult = successful[0];
                     const originalFile = files[0];
 
-                    mediaWebSocketService.notifyAdminsAboutGuestUpload({
+                    mediaNotificationService.notifyAdminsAboutGuestUpload({
                         eventId: event._id.toString(),
                         uploadedBy: uploaderInfo,
                         mediaData: {
@@ -741,7 +741,7 @@ export const guestUploadMediaController: RequestHandler = async (
                         approvalStatus: uploadResult.approval_status || 'pending'
                     }));
 
-                    mediaWebSocketService.notifyAdminsAboutBulkGuestUpload({
+                    mediaNotificationService.notifyAdminsAboutBulkGuestUpload({
                         eventId: event._id.toString(),
                         uploadedBy: uploaderInfo,
                         mediaItems,
@@ -890,7 +890,7 @@ const processGuestFileUploadWithOptionalBroadcast = async (
             guestName: context.guestInfo.name || 'Anonymous'
         });
 
-        const uploadResult = await guestMediaUploadService.uploadGuestMedia(
+        const uploadResult = await uploadGuestMedia(
             context.shareToken,
             file,
             context.guestInfo,

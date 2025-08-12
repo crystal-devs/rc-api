@@ -10,7 +10,7 @@ import { logger, morganMiddleware } from "@utils/logger";
 import { createDefaultPlans } from "@models/subscription-plan.model";
 
 // WebSocket imports
-import { initializeWebSocketService } from "@services/websocket.service";
+import { initializeWebSocketService } from "@services/websocket/websocket.service";
 
 // Image processing imports
 

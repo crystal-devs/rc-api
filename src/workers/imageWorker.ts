@@ -1,4 +1,4 @@
-// workers/imageWorker.ts - CORRECTED: Fix imports and use only mediaWebSocketService
+// workers/imageWorker.ts - CORRECTED: Fix imports and use only
 
 import { Job, Worker } from 'bullmq';
 import { logger } from '@utils/logger';
@@ -7,7 +7,7 @@ import { Media } from '@models/media.model';
 import sharp from 'sharp';
 import fs from 'fs/promises';
 import { uploadVariantImage, uploadOriginalImage } from '@services/uploadService';
-import { mediaWebSocketService } from '@services/mediaWebSocket.service'; // CORRECTED: Only this import
+import { mediaNotificationService } from '@services/websocket/notifications';
 
 // Types that should exist in your types/queue.ts - add these if they don't exist
 interface ImageProcessingJobData {
@@ -134,7 +134,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
             // Admin uploads: Broadcast to guests (existing functionality)
             const bestGuestUrl = variants.medium?.webp?.url || variants.medium?.jpeg?.url || originalUrl;
 
-            mediaWebSocketService.broadcastProcessingComplete({
+            mediaNotificationService.broadcastProcessingComplete({
               mediaId,
               eventId,
               newUrl: bestGuestUrl,
@@ -200,7 +200,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
           // 🚀 NEW: Handle failure notifications differently for guest vs admin
           if (!isGuestUpload) {
             // Admin uploads: Notify guests of failure
-            mediaWebSocketService.broadcastProcessingFailed({
+            mediaNotificationService.broadcastProcessingFailed({
               mediaId,
               eventId,
               errorMessage: error.message || 'Processing failed'
@@ -240,7 +240,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
       if (result.success && job.data.eventId) {
         if (!job.data.isGuestUpload) {
           // Only broadcast stats for admin uploads (guests see this)
-          mediaWebSocketService.broadcastMediaStats(job.data.eventId);
+          mediaNotificationService.broadcastMediaStats(job.data.eventId);
         }
         // For guest uploads, admin will see updated counts when they refresh
       }
@@ -263,7 +263,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
 
         if (!job.data.isGuestUpload) {
           // Admin upload failure: Notify guests
-          mediaWebSocketService.broadcastProcessingFailed({
+          mediaNotificationService.broadcastProcessingFailed({
             mediaId: job.data.mediaId,
             eventId: job.data.eventId,
             errorMessage: 'Processing failed after multiple attempts'

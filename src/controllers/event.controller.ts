@@ -4,11 +4,20 @@
 import { trimObject } from "@utils/sanitizers.util";
 import { NextFunction, Response } from "express";
 import { injectedRequest } from "types/injected-types";
-import * as eventService from "@services/event.service";
 import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
 import { createDefaultAlbumForEvent } from "@services/album.service";
 import { Event, EventType } from "@models/event.model";
+import {
+    addCreatorAsParticipant,
+    checkUpdatePermission,
+    createEventService,
+    deleteEventService,
+    getEventDetailService,
+    getUserEventsService,
+    processEventUpdateData,
+    updateEventService
+} from "@services/event";
 
 interface InjectedRequest extends Request {
     user: {
@@ -101,7 +110,7 @@ export const createEventController = async (req: injectedRequest, res: Response,
             // are omitted to use schema defaults
         };
 
-        const response = await eventService.createEventService(eventData);
+        const response = await createEventService(eventData);
 
         if (!response || typeof response.status === 'undefined') {
             console.error('Invalid response from createEventService:', response);
@@ -118,7 +127,7 @@ export const createEventController = async (req: injectedRequest, res: Response,
             try {
                 await Promise.all([
                     createDefaultAlbumForEvent(response.data._id.toString(), req.user._id.toString()),
-                    eventService.addCreatorAsParticipant(response.data._id.toString(), req.user._id.toString()),
+                    addCreatorAsParticipant(response.data._id.toString(), req.user._id.toString()),
                 ]);
             } catch (albumError) {
                 console.error('Error creating default album:', albumError);
@@ -185,7 +194,7 @@ export const getUserEventsController = async (req: injectedRequest, res: Respons
             tags: tags ? (tags as string).split(',') : undefined
         };
 
-        const response = await eventService.getUserEventsService(filters);
+        const response = await getUserEventsService(filters);
         console.log('===== GET USER EVENTS REQUEST =====', response);
         sendResponse(res, response);
     } catch (error) {
@@ -202,7 +211,7 @@ export const getEventController = async (req: injectedRequest, res: Response, ne
             throw new Error("Valid event ID is required");
         }
 
-        const response = await eventService.getEventDetailService(event_id, userId);
+        const response = await getEventDetailService(event_id, userId);
         console.log('===== GET EVENT DETAIL REQUEST =====', response);
         sendResponse(res, response);
     } catch (error) {
@@ -226,7 +235,7 @@ export const updateEventController = async (req: injectedRequest, res: Response,
         }
 
         // Validate update permissions
-        const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
+        const hasPermission = await checkUpdatePermission(event_id, userId);
         if (!hasPermission) {
             res.status(403).json({
                 status: false,
@@ -257,13 +266,13 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             'visibility',
             'default_guest_permissions',
             'cover_image',
-            
+
         ];
 
         // Process and validate update data
-        const processedUpdateData = await eventService.processEventUpdateData(updateData, fieldsToProcess);
+        const processedUpdateData = await processEventUpdateData(updateData, fieldsToProcess);
 
-        const response = await eventService.updateEventService(event_id, processedUpdateData, userId);
+        const response = await updateEventService(event_id, processedUpdateData, userId);
 
         // Check if response has proper structure
         if (!response || typeof response.status === 'undefined') {
@@ -302,7 +311,7 @@ export const deleteEventController = async (req: injectedRequest, res: Response,
             throw new Error("Valid event ID is required");
         }
 
-        const response = await eventService.deleteEventService(event_id, userId);
+        const response = await deleteEventService(event_id, userId);
         sendResponse(res, response);
     } catch (error) {
         next(error);

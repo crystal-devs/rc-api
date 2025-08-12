@@ -6,9 +6,9 @@ import mongoose from 'mongoose';
 import { logger } from '@utils/logger';
 import { Media } from '@models/media.model';
 import { getImageQueue } from 'queues/imageQueue';
-import { uploadPreviewImage } from '@services/uploadService';
 import sharp from 'sharp';
-import { mediaWebSocketService } from '@services/mediaWebSocket.service'; // ONLY this import
+import { mediaNotificationService } from '@services/websocket/notifications';
+import { uploadPreviewImage } from '@services/upload/core/upload-variants.service';
 
 interface AuthenticatedRequest extends Request {
     user: {
@@ -87,7 +87,7 @@ export const uploadMediaController = async (
 
         // 🚀 Update media statistics for guests
         if (successful.length > 0) {
-            mediaWebSocketService.broadcastMediaStats(event_id);
+            mediaNotificationService.broadcastMediaStats(event_id);
         }
 
         logger.info(`📊 Upload completed in ${processingTime}ms:`, {
@@ -194,7 +194,7 @@ async function processFileUploadWithBroadcast(
         await media.save();
 
         // 🚀 NEW: Broadcast to guests immediately after preview is ready
-        mediaWebSocketService.broadcastNewMediaToGuests({
+        mediaNotificationService.broadcastNewMediaToGuests({
             mediaId: mediaId.toString(),
             eventId: context.eventId,
             uploadedBy: {
