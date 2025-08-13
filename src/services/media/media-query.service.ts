@@ -1,4 +1,4 @@
-// 2. services/media/media-query.service.ts
+// services/media/media-query.service.ts
 // ====================================
 
 import mongoose from 'mongoose';
@@ -320,51 +320,32 @@ export const getGuestMediaService = async (
         const totalCount = await Media.countDocuments(query);
 
         // Calculate pagination
-        const page = parseInt(options.page) || 1;
-        const limit = Math.min(parseInt(options.limit) || 20, 30);
+        const page = parseInt(options.page as string) || 1;
+        const limit = Math.min(parseInt(options.limit as string) || 20, 30);
         const skip = (page - 1) * limit;
 
-        // Get media
+        // Get media items (same fields as admin service)
         const mediaItems = await Media.find(query)
-            .select({
-                _id: 1,
-                url: 1,
-                type: 1,
-                original_filename: 1,
-                size_mb: 1,
-                format: 1,
-                'metadata.width': 1,
-                'metadata.height': 1,
-                'metadata.aspect_ratio': 1,
-                'approval.status': 1,
-                'approval.approved_at': 1,
-                'image_variants': 1,
-                created_at: 1,
-                updated_at: 1
-            })
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)
             .lean();
 
-        // Transform for guest consumption
-        const transformedMedia = mediaItems.map(item => ({
-            _id: item._id.toString(),
-            url: getOptimizedUrlForGuest(item, options.quality),
-            original_url: item.url,
-            type: item.type,
-            original_filename: item.original_filename,
-            metadata: {
-                width: item.metadata?.width,
-                height: item.metadata?.height,
-                aspect_ratio: item.metadata?.aspect_ratio
-            },
-            approval: {
-                status: item.approval?.status,
-                approved_at: item.approval?.approved_at
-            },
-            created_at: item.created_at,
-            updated_at: item.updated_at
+        // 🚀 Use the SAME transformation function as admin service
+        const transformedMedia = transformMediaForResponse(mediaItems, {
+            quality: options.quality || 'medium',
+            format: options.format || 'auto',
+            context: options.context || 'mobile', // Default to mobile for guests
+            includeVariants: true // Enable progressive URLs for guests
+        }, options.userAgent);
+
+        // Add guest-specific metadata to each item
+        const guestEnhancedMedia = transformedMedia.map(item => ({
+            ...item,
+            // Hide uploader info for privacy
+            uploaded_by: "Guest",
+            // Ensure guest access context
+            guest_access: true
         }));
 
         // Pagination info
@@ -383,17 +364,25 @@ export const getGuestMediaService = async (
             status: true,
             code: 200,
             message: 'Guest media retrieved successfully',
-            data: transformedMedia,
+            data: guestEnhancedMedia,
             error: null,
             other: {
-                eventId: event._id,
+                eventId: event._id.toString(),
                 eventTitle: event.title,
                 pagination,
                 guest_access: true,
                 share_settings: {
                     can_view: true,
                     can_download: event.permissions?.can_download || false
-                }
+                },
+                // Same optimization info as admin service
+                optimization_settings: {
+                    quality: options.quality || 'medium',
+                    format: options.format || 'auto',
+                    context: options.context || 'mobile'
+                },
+                progressive_loading_enabled: true,
+                supported_qualities: ['small', 'medium', 'large', 'original']
             }
         };
 
@@ -409,35 +398,89 @@ export const getGuestMediaService = async (
     }
 };
 
-// Helper function to get optimized URL for guests
-const getOptimizedUrlForGuest = (media: any, quality: string = 'thumbnail'): string => {
-    if (!media.image_variants) {
-        return media.url;
-    }
-
-    const variants = media.image_variants;
-
+// 🎯 Simplified batch service using existing transformation
+export const getGuestMediaBatchService = async (
+    shareToken: string,
+    mediaIds: string[],
+    quality: string = 'medium'
+): Promise<ServiceResponse<any[]>> => {
     try {
-        switch (quality) {
-            case 'thumbnail':
-                return variants.small?.jpeg?.url ||
-                    variants.small?.webp?.url ||
-                    variants.medium?.jpeg?.url ||
-                    media.url;
-            case 'display':
-                return variants.medium?.jpeg?.url ||
-                    variants.medium?.webp?.url ||
-                    variants.large?.jpeg?.url ||
-                    media.url;
-            case 'full':
-                return variants.large?.jpeg?.url ||
-                    variants.large?.webp?.url ||
-                    media.url;
-            default:
-                return variants.small?.jpeg?.url || media.url;
+        // Validate input
+        if (!shareToken || !mediaIds || !Array.isArray(mediaIds) || mediaIds.length === 0) {
+            return {
+                status: false,
+                code: 400,
+                message: 'Invalid parameters',
+                data: null,
+                error: { message: 'Share token and media IDs are required' }
+            };
         }
-    } catch (error) {
-        logger.warn('Error getting optimized URL, falling back to original:', error);
-        return media.url;
+
+        // Validate all media IDs
+        const validMediaIds = mediaIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+        if (validMediaIds.length === 0) {
+            return {
+                status: false,
+                code: 400,
+                message: 'No valid media IDs provided',
+                data: null,
+                error: { message: 'All media IDs must be valid ObjectIds' }
+            };
+        }
+
+        // Find event by share token
+        const event = await Event.findOne({
+            share_token: shareToken
+        }).select('_id permissions share_settings').lean();
+
+        if (!event || !event.permissions?.can_view || !event.share_settings?.is_active) {
+            return {
+                status: false,
+                code: 403,
+                message: 'Access denied',
+                data: null,
+                error: { message: 'Cannot access this event' }
+            };
+        }
+
+        // Get specific media items
+        const mediaItems = await Media.find({
+            _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
+            event_id: event._id,
+            'approval.status': { $in: ['approved', 'auto_approved'] }
+        }).lean();
+
+        // 🚀 Use the SAME transformation function
+        const optimizedBatch = transformMediaForResponse(mediaItems, {
+            quality: quality,
+            format: 'auto',
+            context: 'mobile',
+            includeVariants: true
+        });
+
+        return {
+            status: true,
+            code: 200,
+            message: 'Batch media URLs retrieved',
+            data: optimizedBatch,
+            error: null,
+            other: {
+                quality_used: quality,
+                progressive_loading: true,
+                requested_count: mediaIds.length,
+                valid_count: validMediaIds.length,
+                returned_count: optimizedBatch.length
+            }
+        };
+
+    } catch (error: any) {
+        logger.error('❌ Error in getGuestMediaBatchService:', error);
+        return {
+            status: false,
+            code: 500,
+            message: 'Failed to get batch media',
+            data: null,
+            error: { message: error.message }
+        };
     }
 };
