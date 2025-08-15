@@ -6,6 +6,7 @@ import { injectedRequest } from "types/injected-types";
 import * as albumService from "@services/album.service";
 import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
+import { createAlbumService, deleteAlbumService, getAlbumsByParams, getOrCreateDefaultAlbum, updateAlbumService } from "@services/album";
 
 export const createAlbumController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
@@ -28,7 +29,7 @@ export const createAlbumController = async (req: injectedRequest, res: Response,
             throw new Error("Invalid event ID format");
         }
 
-        const response = await albumService.createAlbumService({
+        const response = await createAlbumService({
             title,
             description: description || "",
             event_id: new mongoose.Types.ObjectId(event_id),
@@ -48,7 +49,7 @@ export const createAlbumController = async (req: injectedRequest, res: Response,
 export const getUserAlbumsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
     try {
         const user_id = req.user._id.toString();
-        const response = await albumService.getAlbumsByParams({ user_id });
+        const response = await getAlbumsByParams({ user_id });
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
@@ -64,7 +65,7 @@ export const getEventAlbumsController = async (req: injectedRequest, res: Respon
             throw new Error("Invalid event ID format");
         }
 
-        const response = await albumService.getAlbumsByParams({ event_id });
+        const response = await getAlbumsByParams({ event_id });
         sendResponse(res, response);
     } catch (_err) {
         next(_err);
@@ -80,7 +81,7 @@ export const getAlbumController = async (req: injectedRequest, res: Response, ne
             throw new Error("Invalid album ID format");
         }
 
-        const response = await albumService.getAlbumsByParams({ album_id });
+        const response = await getAlbumsByParams({ album_id });
 
         // If array is empty, album was not found
         if (response.status && (!response.data || response.data.length === 0)) {
@@ -154,7 +155,7 @@ export const updateAlbumController = async (req: injectedRequest, res: Response,
         }
 
         // Perform the update
-        const response = await albumService.updateAlbumService(
+        const response = await updateAlbumService(
             album_id,
             updateData,
             req.user._id.toString()
@@ -177,7 +178,7 @@ export const deleteAlbumController = async (req: injectedRequest, res: Response,
         }
 
         // Perform the deletion
-        const response = await albumService.deleteAlbumService(
+        const response = await deleteAlbumService(
             album_id,
             req.user._id.toString()
         );
@@ -197,7 +198,7 @@ export const getOrCreateDefaultAlbumController = async (req: injectedRequest, re
             throw new Error("Invalid event ID format");
         }
 
-        const response = await albumService.getOrCreateDefaultAlbum(
+        const response = await getOrCreateDefaultAlbum(
             event_id,
             req.user._id.toString()
         );

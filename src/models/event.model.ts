@@ -17,9 +17,9 @@ const coverImageSchema = new mongoose.Schema({
 
 const coHostInviteTokenSchema = new mongoose.Schema({
     token: { type: String, unique: true, sparse: true, index: true },
-    created_by: { 
-        type: mongoose.Schema.Types.ObjectId, 
-        ref: MODEL_NAMES.USER, 
+    created_by: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: MODEL_NAMES.USER,
         required: false, // Changed from required: true to false
         default: null // Added default value
     },
@@ -63,6 +63,7 @@ const permissionsSchema = new mongoose.Schema({
         videos: { type: Boolean, default: true },
     },
     require_approval: { type: Boolean, default: true },
+    max_file_size_mb: { type: Number }
 }, { _id: false });
 
 // Main event schema
@@ -82,7 +83,7 @@ const eventSchema = new mongoose.Schema({
     // Separate co-host invite token - Updated default function
     co_host_invite_token: {
         type: coHostInviteTokenSchema,
-        default: function() {
+        default: function () {
             return {
                 created_by: this.created_by || null, // Use the event's created_by
                 created_at: new Date(),
@@ -166,17 +167,17 @@ eventSchema.pre('save', function (next) {
                     used_count: 0
                 };
             }
-            
+
             // Generate token if not exists
             if (!this.co_host_invite_token.token) {
                 this.co_host_invite_token.token = `coh_${new mongoose.Types.ObjectId().toString()}_${Math.random().toString(36).slice(2, 8)}`;
             }
-            
+
             // Ensure created_by is set
             if (!this.co_host_invite_token.created_by) {
                 this.co_host_invite_token.created_by = this.created_by;
             }
-            
+
             console.log('pre(save): Set co_host_invite_token.created_by to', this.created_by.toString());
         }
     }

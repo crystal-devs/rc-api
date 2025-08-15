@@ -1,6 +1,6 @@
 // middlewares/guest-auth.middleware.ts
 
-import { validateShareToken } from '@services/share-token.service';
+import { validateShareToken } from '@services/event';
 import { Request, Response, NextFunction } from 'express';
 
 interface GuestRequest extends Request {

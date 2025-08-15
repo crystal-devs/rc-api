@@ -1,13 +1,13 @@
 import { Request, Response, NextFunction, RequestHandler } from "express";
 import * as authService from "@services/auth.service"
 import { trimObject } from "@utils/sanitizers.util";
+import { loginService } from "@services/auth";
 
 export const loginController: RequestHandler = async (req, res, next) => {
     try {
         const { email, phone_number, name, profile_pic, provider } = trimObject(req.body);
 
         console.log({ email, phone_number, name, profile_pic, provider })
-        console.log(req.body)
 
         if ((!email && !phone_number) || !provider) {
              res.status(400).json({
@@ -17,7 +17,7 @@ export const loginController: RequestHandler = async (req, res, next) => {
             return
         }
 
-        const response = await authService.loginService({
+        const response = await loginService.login({
             email,
             phone_number,
             name,
