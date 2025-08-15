@@ -8,6 +8,7 @@ import { logger } from "@utils/logger";
 import mongoose from "mongoose";
 import { ServiceResponse } from "@services/media";
 import { EventType } from "./event.types";
+import { PhotoWall } from "@models/photowall.model";
 
 export const createEventService = async (
     eventData: Partial<EventType>
@@ -34,6 +35,36 @@ export const createEventService = async (
 
         const eventId = event[0]._id;
         const creatorId = eventData.created_by;
+        const shareToken = event[0].share_token; // This should be generated in your Event model
+
+        // 🎯 NEW: Create Photo Wall for the event
+        try {
+            const photoWall = await PhotoWall.create([{
+                _id: `wall_${shareToken}`,
+                eventId: eventId,
+                shareToken: shareToken,
+                settings: {
+                    isEnabled: true,
+                    displayMode: 'slideshow',
+                    transitionDuration: 5000,
+                    showUploaderNames: false,
+                    autoAdvance: true,
+                    newImageInsertion: 'after_current'
+                },
+                stats: {
+                    activeViewers: 0,
+                    totalViews: 0,
+                    lastViewedAt: null
+                },
+                isActive: true
+            }], { session });
+
+            logger.info(`[createEventService] 📺 Created photo wall: ${photoWall[0]._id} for event: ${eventId}`);
+        } catch (photoWallError) {
+            logger.error(`[createEventService] ❌ Failed to create photo wall:`, photoWallError);
+            // Don't fail the entire event creation if photo wall fails
+            // Just log the error and continue
+        }
 
         // Create activity log
         await ActivityLog.create(
@@ -47,6 +78,7 @@ export const createEventService = async (
                         event_title: eventData.title,
                         template: eventData.template,
                         visibility: event[0].visibility,
+                        photo_wall_created: true, // New field
                     },
                 },
             ],
@@ -57,15 +89,18 @@ export const createEventService = async (
         await updateUsageForEventCreation(creatorId.toString(), eventId.toString(), session);
 
         await session.commitTransaction();
-        logger.info(`[createEventService] Successfully created event: ${eventId}`);
+        logger.info(`[createEventService] Successfully created event with photo wall: ${eventId}`);
 
         return {
             status: true,
             code: 201,
-            message: 'Event created successfully',
+            message: 'Event and photo wall created successfully',
             data: event[0] as EventType,
             error: null,
-            other: null,
+            other: {
+                photoWallCreated: true,
+                photoWallUrl: `/wall/${shareToken}` // Frontend can use this
+            },
         };
     } catch (error) {
         logger.error(`[createEventService] Error: ${error.message}`);

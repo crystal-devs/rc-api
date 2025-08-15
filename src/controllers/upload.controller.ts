@@ -9,6 +9,7 @@ import { getImageQueue } from 'queues/imageQueue';
 import sharp from 'sharp';
 import { mediaNotificationService } from '@services/websocket/notifications';
 import { uploadPreviewImage } from '@services/upload/core/upload-variants.service';
+import { getPhotoWallWebSocketService } from '@services/photoWallWebSocketService';
 
 interface AuthenticatedRequest extends Request {
     user: {
@@ -85,15 +86,23 @@ export const uploadMediaController = async (
 
         const processingTime = Date.now() - startTime;
 
-        // 🚀 Update media statistics for guests
+        // 🚀 Update media statistics for guests (existing functionality)
         if (successful.length > 0) {
             mediaNotificationService.broadcastMediaStats(event_id);
         }
+
+        // 📺 Count how many were sent to photo walls
+        const photoWallEligible = successful.filter(item =>
+            item.type === 'image' &&
+            item.approval?.status === 'auto_approved' &&
+            item.processing?.variants_generated === true
+        ).length;
 
         logger.info(`📊 Upload completed in ${processingTime}ms:`, {
             successful: successful.length,
             failed: failed.length,
             total: files.length,
+            photoWallNotified: photoWallEligible,
             broadcastSent: successful.length > 0
         });
 
@@ -109,9 +118,10 @@ export const uploadMediaController = async (
                     successful: successful.length,
                     failed: failed.length,
                     processingTime: `${processingTime}ms`,
-                    guestsBroadcasted: successful.length > 0
+                    guestsBroadcasted: successful.length > 0,
+                    photoWallsNotified: photoWallEligible // New field
                 },
-                note: "Images uploaded! Guests can see them in real-time. High-quality versions processing..."
+                note: "Images uploaded! Guests can see them in real-time. Photo walls updated instantly. High-quality versions processing..."
             }
         });
 
@@ -129,6 +139,33 @@ export const uploadMediaController = async (
         });
     }
 };
+
+async function handlePhotoWallIntegration(mediaItem: any, eventId: string): Promise<void> {
+    try {
+        // Check if media is auto-approved and has image variants
+        const isAutoApproved = mediaItem.approval?.status === 'approved';
+        const hasVariants = mediaItem.processing?.variants_generated === true;
+        const isImage = mediaItem.type === 'image';
+
+        if (!isAutoApproved || !isImage) {
+            logger.info(`📺 Skipping photo wall notification for ${mediaItem._id}: approved=${isAutoApproved}, image=${isImage}`);
+            return;
+        }
+
+        // Get WebSocket service and notify photo walls
+        const wsService = getPhotoWallWebSocketService();
+        if (wsService) {
+            await wsService.notifyNewMediaUpload(eventId, mediaItem);
+            logger.info(`📺 ✅ Notified photo walls about new media: ${mediaItem._id}`);
+        } else {
+            logger.warn(`📺 ⚠️ WebSocket service not available for photo wall notification`);
+        }
+
+    } catch (error) {
+        logger.error('❌ Error in photo wall integration:', error);
+        // Don't throw - photo wall notification failure shouldn't break upload
+    }
+}
 
 /**
  * 🚀 ENHANCED: Process file upload with WebSocket broadcasting
@@ -192,7 +229,7 @@ async function processFileUploadWithBroadcast(
         });
 
         await media.save();
-
+        await handlePhotoWallIntegration(media, context.eventId);
         // 🚀 NEW: Broadcast to guests immediately after preview is ready
         mediaNotificationService.broadcastNewMediaToGuests({
             mediaId: mediaId.toString(),

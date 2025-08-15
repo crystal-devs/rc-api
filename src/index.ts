@@ -34,6 +34,10 @@ import http from "http";
 import mongoose from "mongoose";
 import { getImageQueue, initializeImageQueue } from "queues/imageQueue";
 import { getImageWorker, initializeImageWorker } from "workers/imageWorker";
+import photoWallRouter from "@routes/photo-wall.router";
+import { initializePhotoWallWebSocket } from "@services/photoWallWebSocketService";
+import { createPhotoWallsForExistingEvents } from "@services/photo-wall-setup.service";
+
 
 const app = express();
 const PORT = keys.port;
@@ -71,28 +75,41 @@ app.use(`/api/${VERSION}/album`, albumRouter);
 app.use(`/api/${VERSION}/media`, mediaRouter);
 app.use(`/api/${VERSION}/user`, userRouter);
 app.use(`/api/${VERSION}/token`, shareTokenRouter);
+app.use(`/api/${VERSION}/photo-wall`, photoWallRouter);
 
 connectToMongoDB().then(async () => {
   await createDefaultPlans();
-  
+
   // Initialize image processing system
   try {
     logger.info('🖼️ Initializing image processing system...');
-    
+
     // Initialize Redis connection first
     await redisConnection.connect();
     logger.info('✅ Redis connected for image processing');
-    
+
     // Initialize queue and worker
     await initializeImageQueue();
     await initializeImageWorker();
-    
+    let photoWallWsService: any = null;
+    try {
+      photoWallWsService = initializePhotoWallWebSocket(server);
+      logger.info("📺 Photo Wall WebSocket service initialized successfully");
+    } catch (wsError) {
+      logger.error("❌ Photo Wall WebSocket initialization failed:", wsError);
+      logger.warn("⚠️ Continuing without Photo Wall real-time features");
+    }
     logger.info('✅ Image processing system fully initialized');
+    if (photoWallWsService) {
+      await photoWallWsService.cleanup();
+      logger.info('✅ Photo Wall WebSocket cleanup completed');
+    }
   } catch (error) {
     logger.error('❌ Failed to initialize image processing:', error);
     logger.warn('⚠️ Continuing without image processing queue - uploads will fail');
   }
-  
+
+
   // WebSocket is already initialized above, just log the status
   if (webSocketService) {
     // Test WebSocket service is working
@@ -102,7 +119,11 @@ connectToMongoDB().then(async () => {
       serverId: process.env.SERVER_ID || 'server-1'
     });
   }
-  
+
+  if (process.env.SETUP_PHOTO_WALLS === 'true') {
+    await createPhotoWallsForExistingEvents();
+  }
+
   startServer();
 }).catch((err) => {
   logger.error("mongodb connection failed: ", err);
@@ -130,47 +151,47 @@ app.use(globalErrorHandler);
 // Enhanced graceful shutdown
 const handleGracefulShutdown = async () => {
   logger.info('🛑 Received shutdown signal, starting graceful shutdown...');
-  
+
   try {
     // Cleanup image processing system
     logger.info('🖼️ Shutting down image processing system...');
-    
+
     const imageWorker = getImageWorker();
     const imageQueue = getImageQueue();
-    
+
     if (imageWorker) {
       await imageWorker.close();
       logger.info('✅ Image worker closed');
     }
-    
+
     if (imageQueue) {
       await imageQueue.close();
       logger.info('✅ Image queue closed');
     }
-    
+
     // Redis cleanup
     await redisConnection.disconnect();
     logger.info('✅ Redis disconnected');
-    
+
     // Get WebSocket service and cleanup
     if (webSocketService) {
       await webSocketService.cleanup();
       logger.info('✅ WebSocket cleanup completed');
     }
-    
+
   } catch (error) {
     logger.error('❌ Error during cleanup:', error);
   }
-  
+
   // Close HTTP server
   server.close(async (err) => {
     if (err) {
       logger.error('❌ Error during server shutdown:', err);
       process.exit(1);
     }
-    
+
     logger.info('✅ HTTP server closed');
-    
+
     // Close database connection
     try {
       if (mongoose.connection.readyState === 1) {
@@ -183,7 +204,7 @@ const handleGracefulShutdown = async () => {
       process.exit(1);
     }
   });
-  
+
   // Force exit after 30 seconds
   setTimeout(() => {
     logger.error('⚠️ Force shutdown - timeout exceeded');
@@ -221,7 +242,7 @@ if (process.env.NODE_ENV === 'production') {
           timestamp: new Date().toISOString()
         });
       }
-      
+
       // Add image processing stats
       const imageQueue = getImageQueue();
       if (imageQueue) {
@@ -229,7 +250,7 @@ if (process.env.NODE_ENV === 'production') {
         const active = await imageQueue.getActive();
         const completed = await imageQueue.getCompleted();
         const failed = await imageQueue.getFailed();
-        
+
         logger.info('🖼️ Image Queue Stats:', {
           waiting: waiting.length,
           active: active.length,
@@ -238,7 +259,7 @@ if (process.env.NODE_ENV === 'production') {
           timestamp: new Date().toISOString()
         });
       }
-      
+
     } catch (error) {
       logger.error('❌ Error getting service stats:', error);
     }
