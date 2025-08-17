@@ -35,9 +35,6 @@ import mongoose from "mongoose";
 import { getImageQueue, initializeImageQueue } from "queues/imageQueue";
 import { getImageWorker, initializeImageWorker } from "workers/imageWorker";
 import photoWallRouter from "@routes/photo-wall.router";
-import { initializePhotoWallWebSocket } from "@services/photoWallWebSocketService";
-import { createPhotoWallsForExistingEvents } from "@services/photo-wall-setup.service";
-
 
 const app = express();
 const PORT = keys.port;
@@ -91,19 +88,9 @@ connectToMongoDB().then(async () => {
     // Initialize queue and worker
     await initializeImageQueue();
     await initializeImageWorker();
-    let photoWallWsService: any = null;
-    try {
-      photoWallWsService = initializePhotoWallWebSocket(server);
-      logger.info("📺 Photo Wall WebSocket service initialized successfully");
-    } catch (wsError) {
-      logger.error("❌ Photo Wall WebSocket initialization failed:", wsError);
-      logger.warn("⚠️ Continuing without Photo Wall real-time features");
-    }
+
     logger.info('✅ Image processing system fully initialized');
-    if (photoWallWsService) {
-      await photoWallWsService.cleanup();
-      logger.info('✅ Photo Wall WebSocket cleanup completed');
-    }
+ 
   } catch (error) {
     logger.error('❌ Failed to initialize image processing:', error);
     logger.warn('⚠️ Continuing without image processing queue - uploads will fail');
@@ -118,10 +105,6 @@ connectToMongoDB().then(async () => {
       totalConnections: stats.totalConnections,
       serverId: process.env.SERVER_ID || 'server-1'
     });
-  }
-
-  if (process.env.SETUP_PHOTO_WALLS === 'true') {
-    await createPhotoWallsForExistingEvents();
   }
 
   startServer();

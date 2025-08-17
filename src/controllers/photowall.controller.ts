@@ -14,15 +14,7 @@ export const getPhotoWallController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { shareToken } = req.params;
-
-        console.log('📺 Photo Wall request:', shareToken);
-        const {
-            quality,
-            maxItems,
-            currentIndex,
-            sessionId,
-            lastFetchTime
-        } = req.query;
+        const { quality, maxItems, currentIndex, sessionId, lastFetchTime } = req.query;
 
         if (!shareToken) {
             res.status(400).json({
@@ -42,11 +34,6 @@ export const getPhotoWallController: RequestHandler = async (
             lastFetchTime: lastFetchTime as string
         };
 
-        logger.info(`📺 Photo wall request:`, {
-            shareToken: shareToken.substring(0, 8) + '...',
-            options
-        });
-
         const response = await getPhotoWallService(shareToken, options);
 
         // Add cache headers for optimal performance
@@ -60,7 +47,6 @@ export const getPhotoWallController: RequestHandler = async (
 
         res.status(response.code).json(response);
     } catch (error: any) {
-        logger.error('❌ Error in getPhotoWallController:', error);
         res.status(500).json({
             status: false,
             code: 500,
@@ -71,6 +57,8 @@ export const getPhotoWallController: RequestHandler = async (
     }
 };
 
+// Remove all other controller functions - they're not needed with unified approach
+
 export const updatePhotoWallSettingsController: RequestHandler = async (
     req: Request,
     res: Response,
@@ -79,7 +67,7 @@ export const updatePhotoWallSettingsController: RequestHandler = async (
     try {
         const { shareToken } = req.params;
         const settings = req.body;
-        const userId = (req as any).user?._id;
+        // const userId = (req as any).user?._id;
 
         if (!shareToken) {
             res.status(400).json({
@@ -92,11 +80,10 @@ export const updatePhotoWallSettingsController: RequestHandler = async (
 
         logger.info(`⚙️ Updating photo wall settings:`, {
             shareToken: shareToken.substring(0, 8) + '...',
-            userId,
             settings
         });
 
-        const response = await updatePhotoWallSettingsService(shareToken, settings, userId);
+        const response = await updatePhotoWallSettingsService(shareToken, settings);
         res.status(response.code).json(response);
     } catch (error: any) {
         logger.error('❌ Error in updatePhotoWallSettingsController:', error);

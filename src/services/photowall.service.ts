@@ -147,19 +147,19 @@ export const updatePhotoWallSettingsService = async (
     }
 
     // Check permissions
-    const isOwner = event.created_by.toString() === userId;
-    const isCoHost = event.co_hosts?.some((coHost: any) => 
-      coHost.user_id.toString() === userId && coHost.status === 'approved'
-    );
+    // const isOwner = event.created_by.toString() === userId;
+    // const isCoHost = event.co_hosts?.some((coHost: any) => 
+    //   coHost.user_id.toString() === userId && coHost.status === 'approved'
+    // );
 
-    if (!isOwner && !isCoHost) {
-      return {
-        status: false,
-        code: 403,
-        message: 'Not authorized to update photo wall settings',
-        data: null
-      };
-    }
+    // if (!isOwner && !isCoHost) {
+    //   return {
+    //     status: false,
+    //     code: 403,
+    //     message: 'Not authorized to update photo wall settings',
+    //     data: null
+    //   };
+    // }
 
     // Validate and filter settings
     const allowedSettings = [
