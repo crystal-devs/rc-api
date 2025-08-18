@@ -1,3 +1,4 @@
+// configs/dotenv.config.ts
 import dotenv from 'dotenv';
 import { logger } from '@utils/logger';
 
@@ -8,7 +9,6 @@ const buildRedisUrl = (): string => {
   const host = process.env.REDIS_HOST || 'localhost';
   const port = process.env.REDIS_PORT || '6379';
   const password = process.env.REDIS_PASSWORD;
-  
   // Build Redis URL based on available credentials
   if (password) {
     // Format: redis://:password@host:port
@@ -20,15 +20,41 @@ const buildRedisUrl = (): string => {
 };
 
 export const keys: Record<string, string | number | string[]> = {
+  
+  // 🚀 Server Configuration
   port: process.env.PORT ? Number(process.env.PORT) : 8080,
   nodeEnv: process.env.NODE_ENV || 'development',
-  mongoURI: process.env.MONGO_URI,
-  mongoDBName: process.env.MONGO_DB_NAME,
-  APILiveVersion: process.env.VERSION,
+  APILiveVersion: process.env.VERSION || 'v1',
   corsOrigins: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : [],
-  jwtSecret: process.env.JWT_SECRET,
   
-  // Redis configuration - Use URL if provided, otherwise build from separate credentials
+  // 🔐 Security
+  jwtSecret: process.env.JWT_SECRET || '',
+  
+  // 📊 MongoDB Configuration
+  mongoURI: process.env.MONGO_URI || '',
+  mongoDBName: process.env.MONGO_DB_NAME || '',
+  
+  // 📈 MongoDB Connection Pool Settings (with defaults)
+  mongoMaxPoolSize: process.env.MONGO_MAX_POOL_SIZE 
+    ? Number(process.env.MONGO_MAX_POOL_SIZE) 
+    : (process.env.NODE_ENV === 'production' ? 50 : 10),
+  mongoMinPoolSize: process.env.MONGO_MIN_POOL_SIZE 
+    ? Number(process.env.MONGO_MIN_POOL_SIZE) 
+    : (process.env.NODE_ENV === 'production' ? 5 : 2),
+  mongoMaxIdleTimeMS: process.env.MONGO_MAX_IDLE_TIME_MS 
+    ? Number(process.env.MONGO_MAX_IDLE_TIME_MS) 
+    : 30000,
+  mongoServerSelectionTimeoutMS: process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS 
+    ? Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS) 
+    : 10000,
+  mongoSocketTimeoutMS: process.env.MONGO_SOCKET_TIMEOUT_MS 
+    ? Number(process.env.MONGO_SOCKET_TIMEOUT_MS) 
+    : 45000,
+  mongoConnectTimeoutMS: process.env.MONGO_CONNECT_TIMEOUT_MS 
+    ? Number(process.env.MONGO_CONNECT_TIMEOUT_MS) 
+    : 10000,
+  
+  // 🔴 Redis Configuration
   redisUrl: process.env.REDIS_URL || buildRedisUrl(),
   redisHost: process.env.REDIS_HOST || 'localhost',
   redisPort: process.env.REDIS_PORT ? Number(process.env.REDIS_PORT) : 6379,
@@ -36,7 +62,7 @@ export const keys: Record<string, string | number | string[]> = {
 };
 
 // Validate environment variables
-const requiredKeys = ['port', 'mongoURI', 'mongoDBName', 'APILiveVersion'];
+const requiredKeys = ['mongoURI', 'mongoDBName', 'jwtSecret'];
 const missingKeys = requiredKeys.filter((key) => !keys[key]);
 
 // Check if Redis configuration is available (either URL or host/port)
@@ -51,12 +77,21 @@ if (missingKeys.length) {
   process.exit(1);
 }
 
-// Secure Logging
+// 🔒 Secure Logging (hide sensitive information)
 logger.info('✅ Environment Variables Loaded:');
-requiredKeys.forEach((key) => {
-  const value = key.includes('mongo') || key === 'redisUrl' ? '***HIDDEN***' : keys[key];
-  logger.info(`   - ${key}: ${value}`);
-});
+logger.info(`   - NODE_ENV: ${keys.nodeEnv}`);
+logger.info(`   - PORT: ${keys.port}`);
+logger.info(`   - API_VERSION: ${keys.APILiveVersion}`);
+logger.info(`   - MONGO_URI: ***HIDDEN***`);
+logger.info(`   - MONGO_DB_NAME: ${keys.mongoDBName}`);
+logger.info(`   - JWT_SECRET: ***HIDDEN***`);
+
+// 📊 Log MongoDB Pool Configuration
+logger.info('📊 MongoDB Pool Configuration:');
+logger.info(`   - Max Pool Size: ${keys.mongoMaxPoolSize}`);
+logger.info(`   - Min Pool Size: ${keys.mongoMinPoolSize}`);
+logger.info(`   - Max Idle Time: ${keys.mongoMaxIdleTimeMS}ms`);
+logger.info(`   - Socket Timeout: ${keys.mongoSocketTimeoutMS}ms`);
 
 // Log Redis connection info (without sensitive data)
 const redisInfo = keys.redisPassword 
