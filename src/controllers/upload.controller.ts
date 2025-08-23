@@ -1,15 +1,15 @@
-// controllers/upload.controller.ts
+// controllers/upload.controller.ts - Fixed with proper TypeScript types
 
 import { Request, Response, NextFunction } from 'express';
 import fs from 'fs/promises';
 import mongoose from 'mongoose';
 import { logger } from '@utils/logger';
-import { Media } from '@models/media.model';
+import { Media, MediaDocument, ProcessingStage } from '@models/media.model'; // ✅ Import the stage type
 import { getImageQueue } from 'queues/imageQueue';
 import sharp from 'sharp';
 import { mediaNotificationService } from '@services/websocket/notifications';
+import { progressIntegrationService } from '@services/websocket/progress-integration.service';
 import { uploadPreviewImage } from '@services/upload/core/upload-variants.service';
-import { getPhotoWallWebSocketService } from '@services/photoWallWebSocketService';
 
 interface AuthenticatedRequest extends Request {
     user: {
@@ -23,7 +23,7 @@ interface AuthenticatedRequest extends Request {
 }
 
 /**
- * 🚀 ENHANCED: Ultra-fast upload with real-time guest broadcasting
+ * 🚀 ENHANCED: Ultra-fast upload with WebSocket progress tracking
  */
 export const uploadMediaController = async (
     req: AuthenticatedRequest,
@@ -46,7 +46,7 @@ export const uploadMediaController = async (
             userName
         });
 
-        // 🔧 FAST VALIDATION: Basic checks only
+        // Basic validation
         if (!files || files.length === 0) {
             return res.status(400).json({
                 status: false,
@@ -62,8 +62,8 @@ export const uploadMediaController = async (
             });
         }
 
-        // 🚀 PARALLEL PROCESSING: Process all files concurrently
-        const uploadPromises = files.map(file => processFileUploadWithBroadcast(file, {
+        // Process all files with progress tracking
+        const uploadPromises = files.map(file => processFileUploadWithProgress(file, {
             userId: user_id,
             userName,
             eventId: event_id,
@@ -72,7 +72,7 @@ export const uploadMediaController = async (
 
         const results = await Promise.allSettled(uploadPromises);
 
-        // 🔧 SEPARATE SUCCESS/FAILURES
+        // Separate successes and failures
         const successful = results
             .filter((result): result is PromiseFulfilledResult<any> => result.status === 'fulfilled')
             .map(result => result.value);
@@ -86,7 +86,7 @@ export const uploadMediaController = async (
 
         const processingTime = Date.now() - startTime;
 
-        // 🚀 SINGLE BROADCAST: Update all clients (guests AND photo walls)
+        // Broadcast media stats update
         if (successful.length > 0) {
             mediaNotificationService.broadcastMediaStats(event_id);
         }
@@ -94,11 +94,9 @@ export const uploadMediaController = async (
         logger.info(`📊 Upload completed in ${processingTime}ms:`, {
             successful: successful.length,
             failed: failed.length,
-            total: files.length,
-            broadcastSent: successful.length > 0
+            total: files.length
         });
 
-        // 🚨 CRITICAL: Send response immediately
         return res.status(200).json({
             status: successful.length > 0,
             message: generateSuccessMessage(successful.length, failed.length, files.length),
@@ -109,10 +107,9 @@ export const uploadMediaController = async (
                     total: files.length,
                     successful: successful.length,
                     failed: failed.length,
-                    processingTime: `${processingTime}ms`,
-                    allClientsBroadcasted: successful.length > 0
+                    processingTime: `${processingTime}ms`
                 },
-                note: "Images uploaded! All clients (guests & photo walls) updated in real-time. High-quality versions processing..."
+                note: "Upload started! Real-time progress updates sent via WebSocket."
             }
         });
 
@@ -131,16 +128,15 @@ export const uploadMediaController = async (
     }
 };
 
-
 /**
- * 🚀 ENHANCED: Process file upload with WebSocket broadcasting
+ * 🚀 Process file upload with WebSocket progress tracking
  */
-async function processFileUploadWithBroadcast(
+async function processFileUploadWithProgress(
     file: Express.Multer.File,
     context: { userId: string; userName: string; eventId: string; albumId: string }
 ): Promise<any> {
     try {
-        // 🔧 FAST VALIDATION: Quick checks
+        // Quick validation
         if (!isValidImageFile(file)) {
             await cleanupFile(file);
             throw new Error(`Unsupported file type: ${file.mimetype}`);
@@ -152,22 +148,16 @@ async function processFileUploadWithBroadcast(
             throw new Error(`File too large: ${fileSizeMB.toFixed(2)}MB (max 100MB)`);
         }
 
-        // 🚀 GENERATE IDs
+        // Generate IDs
         const mediaId = new mongoose.Types.ObjectId();
         const albumObjectId = new mongoose.Types.ObjectId(context.albumId);
         const eventObjectId = new mongoose.Types.ObjectId(context.eventId);
         const userObjectId = new mongoose.Types.ObjectId(context.userId);
 
-        // 🚀 CRITICAL: Create preview image immediately
-        const previewUrl = await createInstantPreview(file, mediaId.toString(), context.eventId);
-
-        // 🔧 GET BASIC METADATA
-        const metadata = await getBasicImageMetadata(file.path);
-
-        // 🚀 CREATE DATABASE RECORD
+        // ✅ STEP 1: Create database record with initial progress - FIXED CASTING
         const media = new Media({
             _id: mediaId,
-            url: previewUrl,
+            url: '/placeholder-image.jpg', // Temporary URL
             type: 'image',
             album_id: albumObjectId,
             event_id: eventObjectId,
@@ -176,25 +166,43 @@ async function processFileUploadWithBroadcast(
             original_filename: file.originalname,
             size_mb: fileSizeMB,
             format: getFileExtension(file),
-            metadata: {
-                width: metadata.width,
-                height: metadata.height,
-                aspect_ratio: metadata.aspect_ratio
-            },
             processing: {
-                status: 'processing',
+                status: 'processing' as const,
+                current_stage: 'uploading' as ProcessingStage,
+                progress_percentage: 0,
                 started_at: new Date(),
                 variants_generated: false,
             },
             approval: {
-                status: 'approved', // Auto-approve for authenticated users
+                status: 'approved',
                 auto_approval_reason: 'authenticated_user',
                 approved_at: new Date(),
             }
-        });
+        }) as MediaDocument; // ✅ FIXED: Proper casting
 
         await media.save();
-        // 🚀 NEW: Broadcast to guests immediately after preview is ready
+
+        // ✅ STEP 2: Send initial progress update
+        await progressIntegrationService.sendUploadStarted(
+            mediaId.toString(),
+            context.eventId,
+            file.originalname
+        );
+
+        // ✅ STEP 3: Create preview image
+        await progressIntegrationService.sendPreviewReady(
+            mediaId.toString(),
+            context.eventId,
+            file.originalname
+        );
+
+        const previewUrl = await createInstantPreview(file, mediaId.toString(), context.eventId);
+
+        // Update media with preview URL
+        media.url = previewUrl;
+        await media.save();
+
+        // ✅ STEP 4: Broadcast to guests immediately
         mediaNotificationService.broadcastNewMediaToGuests({
             mediaId: mediaId.toString(),
             eventId: context.eventId,
@@ -212,9 +220,7 @@ async function processFileUploadWithBroadcast(
             }
         });
 
-        logger.info(`✅ Media created and broadcasted to guests: ${mediaId}`);
-
-        // 🚀 QUEUE FOR BACKGROUND PROCESSING
+        // ✅ STEP 5: Queue for background processing
         const imageQueue = getImageQueue();
         let jobId = null;
 
@@ -239,30 +245,54 @@ async function processFileUploadWithBroadcast(
                     backoff: { type: 'exponential', delay: 2000 }
                 });
 
-                jobId = job.id;
-                logger.info(`✅ Job queued with broadcast context: ${job.id}`);
+                jobId = job.id?.toString();
+
+                // ✅ FIXED: Set job ID using the proper method
+                if (jobId) {
+                    await media.setJobId(jobId); // Now this works with proper types
+
+                    // Start monitoring progress
+                    await progressIntegrationService.sendProcessingStarted(
+                        mediaId.toString(),
+                        context.eventId,
+                        file.originalname,
+                        jobId
+                    );
+
+                    // Start job monitoring (this will send progress updates via WebSocket)
+                    progressIntegrationService.startJobMonitoring(
+                        jobId,
+                        mediaId.toString(),
+                        context.eventId,
+                        file.originalname
+                    );
+                }
+
+                logger.info(`✅ Job queued: ${job.id} for ${file.originalname}`);
 
             } catch (queueError) {
                 logger.error('Queue error:', queueError);
-                await cleanupFile(file);
+                await progressIntegrationService.sendProcessingStarted(
+                    mediaId.toString(),
+                    context.eventId,
+                    'Failed to queue for processing'
+                );
             }
         } else {
             logger.warn('No image queue available');
-            await cleanupFile(file);
         }
 
         return {
             id: mediaId.toString(),
             filename: file.originalname,
             url: previewUrl,
-            status: jobId ? 'processing' : 'pending',
+            status: jobId ? 'processing' : 'failed',
             jobId: jobId,
             size: `${fileSizeMB.toFixed(2)}MB`,
-            dimensions: `${metadata.width}x${metadata.height}`,
-            aspectRatio: metadata.aspect_ratio,
             estimatedProcessingTime: getEstimatedProcessingTime(file.size),
             guestsBroadcasted: true,
-            message: "Image available to guests! High-quality versions processing..."
+            progressTracking: true,
+            message: "Upload started! Real-time progress updates available via WebSocket."
         };
 
     } catch (error: any) {
@@ -272,9 +302,47 @@ async function processFileUploadWithBroadcast(
     }
 }
 
-/**
- * 🚀 CRITICAL: Create instant preview for immediate user feedback
- */
+// ✅ Get progress for multiple uploads - REMOVED REFERENCE TO simpleProgressService
+export const getBatchUploadProgressController = async (
+    req: Request,
+    res: Response
+): Promise<Response | void> => {
+    try {
+        const { mediaIds } = req.body;
+
+        if (!Array.isArray(mediaIds) || mediaIds.length === 0) {
+            return res.status(400).json({
+                status: false,
+                message: 'mediaIds must be a non-empty array'
+            });
+        }
+
+        // ✅ FIXED: Get progress from database directly
+        const mediaItems = await Media.find({
+            _id: { $in: mediaIds.map(id => new mongoose.Types.ObjectId(id)) }
+        }).select('processing original_filename');
+
+        const progressData = mediaItems.map(media => ({
+            mediaId: media._id.toString(),
+            filename: media.original_filename,
+            progress: (media as MediaDocument).getProgressInfo() // ✅ Now properly typed
+        }));
+
+        return res.json({
+            status: true,
+            data: progressData
+        });
+
+    } catch (error: any) {
+        logger.error('Batch progress error:', error);
+        return res.status(500).json({
+            status: false,
+            message: 'Failed to get progress data'
+        });
+    }
+};
+
+// Utility functions remain the same...
 async function createInstantPreview(
     file: Express.Multer.File,
     mediaId: string,
@@ -293,7 +361,7 @@ async function createInstantPreview(
             .toBuffer();
 
         const previewUrl = await uploadPreviewImage(previewBuffer, mediaId, eventId);
-        logger.info(`✅ Preview created for guests: ${mediaId} -> ${previewUrl}`);
+        logger.info(`✅ Preview created: ${mediaId} -> ${previewUrl}`);
         return previewUrl;
 
     } catch (error) {
@@ -302,24 +370,6 @@ async function createInstantPreview(
     }
 }
 
-/**
- * 🚀 FAST METADATA: Get basic info quickly
- */
-async function getBasicImageMetadata(filePath: string) {
-    try {
-        const metadata = await sharp(filePath).metadata();
-        return {
-            width: metadata.width || 0,
-            height: metadata.height || 0,
-            aspect_ratio: metadata.height && metadata.width ? metadata.height / metadata.width : 1
-        };
-    } catch (error) {
-        logger.warn('Failed to get metadata:', error);
-        return { width: 0, height: 0, aspect_ratio: 1 };
-    }
-}
-
-// Keep all existing status controller functions unchanged...
 export const getUploadStatusController = async (
     req: Request,
     res: Response
@@ -412,7 +462,22 @@ export const getBatchUploadStatusController = async (
     }
 };
 
-// Utility functions (unchanged)
+function getStatusMessage(status: string, hasVariants: boolean): string {
+    switch (status) {
+        case 'completed':
+            return hasVariants ? 'All variants ready!' : 'Processing completed';
+        case 'failed':
+            return 'Processing failed';
+        case 'processing':
+            return 'Creating high-quality versions...';
+        case 'pending':
+            return 'Queued for processing';
+        default:
+            return 'Status unknown';
+    }
+}
+
+
 function isValidImageFile(file: Express.Multer.File): boolean {
     const supportedTypes = [
         'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
@@ -431,42 +496,22 @@ function getEstimatedProcessingTime(fileSizeBytes: number): string {
     return `${Math.round(seconds)}s`;
 }
 
-function getStatusMessage(status: string, hasVariants: boolean): string {
-    switch (status) {
-        case 'completed':
-            return hasVariants ? 'All variants ready!' : 'Processing completed';
-        case 'failed':
-            return 'Processing failed';
-        case 'processing':
-            return 'Creating high-quality versions...';
-        case 'pending':
-            return 'Queued for processing';
-        default:
-            return 'Status unknown';
-    }
-}
-
 function generateSuccessMessage(successful: number, failed: number, total: number): string {
     if (failed === 0) {
         return total === 1
-            ? 'Photo uploaded and shared with guests!'
-            : `All ${successful} photos uploaded and shared with guests!`;
+            ? 'Photo uploaded successfully!'
+            : `All ${successful} photos uploaded successfully!`;
     }
-
     if (successful === 0) {
-        return total === 1
-            ? 'Photo upload failed'
-            : 'All photo uploads failed';
+        return total === 1 ? 'Photo upload failed' : 'All photo uploads failed';
     }
-
-    return `${successful} photo${successful > 1 ? 's' : ''} uploaded and shared, ${failed} failed`;
+    return `${successful} photo${successful > 1 ? 's' : ''} uploaded, ${failed} failed`;
 }
 
 async function cleanupFile(file: Express.Multer.File): Promise<void> {
     try {
         if (file.path) {
             await fs.unlink(file.path);
-            logger.debug(`🧹 Cleaned up file: ${file.path}`);
         }
     } catch (error) {
         logger.warn(`Failed to cleanup file ${file.path}:`, error);
