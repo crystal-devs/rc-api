@@ -245,18 +245,7 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             return;
         }
 
-        // Get current event for visibility transition handling
-        const currentEvent = await Event.findById(event_id);
-        if (!currentEvent) {
-            res.status(404).json({
-                status: false,
-                message: 'Event not found',
-                data: null
-            });
-            return;
-        }
-
-        // Define fields that can be updated
+        // Define fields that can be updated (including photowall)
         const fieldsToProcess = [
             'title',
             'description',
@@ -266,7 +255,7 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             'visibility',
             'default_guest_permissions',
             'cover_image',
-
+            'photowall_settings'  // 🚀 NEW: Allow photowall updates
         ];
 
         // Process and validate update data
@@ -274,22 +263,10 @@ export const updateEventController = async (req: injectedRequest, res: Response,
 
         const response = await updateEventService(event_id, processedUpdateData, userId);
 
-        // Check if response has proper structure
-        if (!response || typeof response.status === 'undefined') {
-            console.error('Invalid response from updateEventService:', response);
-            res.status(500).json({
-                status: false,
-                message: 'Internal server error - invalid service response',
-                data: null
-            });
-            return;
-        }
-
-        // Send proper response
         if (response.status) {
             res.status(200).json(response);
         } else {
-            res.status(400).json(response);
+            res.status(response.code).json(response);
         }
     } catch (error) {
         console.error('Error in updateEventController:', error);

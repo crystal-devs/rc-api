@@ -8,7 +8,7 @@ import { logger } from "@utils/logger";
 import mongoose from "mongoose";
 import { ServiceResponse } from "@services/media";
 import { EventType } from "./event.types";
-import { PhotoWall } from "@models/photowall.model";
+import { getPhotoWallWebSocketService } from "@services/photoWallWebSocketService";
 
 export const createEventService = async (
     eventData: Partial<EventType>
@@ -27,7 +27,7 @@ export const createEventService = async (
 
         logger.info(`[createEventService] eventData.created_by = ${eventData.created_by.toString()}`);
 
-        // Create the event
+        // 🚀 SIMPLIFIED: Create event (photowall_settings handled by schema defaults)
         const event = await Event.create([eventData], { session });
         if (!event[0]?._id) {
             throw new Error('Invalid event creation result');
@@ -35,36 +35,7 @@ export const createEventService = async (
 
         const eventId = event[0]._id;
         const creatorId = eventData.created_by;
-        const shareToken = event[0].share_token; // This should be generated in your Event model
-
-        // 🎯 NEW: Create Photo Wall for the event
-        try {
-            const photoWall = await PhotoWall.create([{
-                _id: `wall_${shareToken}`,
-                eventId: eventId,
-                shareToken: shareToken,
-                settings: {
-                    isEnabled: true,
-                    displayMode: 'slideshow',
-                    transitionDuration: 5000,
-                    showUploaderNames: false,
-                    autoAdvance: true,
-                    newImageInsertion: 'after_current'
-                },
-                stats: {
-                    activeViewers: 0,
-                    totalViews: 0,
-                    lastViewedAt: null
-                },
-                isActive: true
-            }], { session });
-
-            logger.info(`[createEventService] 📺 Created photo wall: ${photoWall[0]._id} for event: ${eventId}`);
-        } catch (photoWallError) {
-            logger.error(`[createEventService] ❌ Failed to create photo wall:`, photoWallError);
-            // Don't fail the entire event creation if photo wall fails
-            // Just log the error and continue
-        }
+        const shareToken = event[0].share_token;
 
         // Create activity log
         await ActivityLog.create(
@@ -78,7 +49,7 @@ export const createEventService = async (
                         event_title: eventData.title,
                         template: eventData.template,
                         visibility: event[0].visibility,
-                        photo_wall_created: true, // New field
+                        photowall_enabled: event[0].photowall_settings?.isEnabled || true,
                     },
                 },
             ],
@@ -89,17 +60,17 @@ export const createEventService = async (
         await updateUsageForEventCreation(creatorId.toString(), eventId.toString(), session);
 
         await session.commitTransaction();
-        logger.info(`[createEventService] Successfully created event with photo wall: ${eventId}`);
+        logger.info(`[createEventService] Successfully created event: ${eventId}`);
 
         return {
             status: true,
             code: 201,
-            message: 'Event and photo wall created successfully',
+            message: 'Event created successfully',
             data: event[0] as EventType,
             error: null,
             other: {
-                photoWallCreated: true,
-                photoWallUrl: `/wall/${shareToken}` // Frontend can use this
+                photoWallUrl: `/wall/${shareToken}`, // Frontend can use this
+                photowallSettings: event[0].photowall_settings
             },
         };
     } catch (error) {
@@ -206,6 +177,25 @@ export const updateEventService = async (
     session.startTransaction();
 
     try {
+        // Process PhotoWall settings if included
+        if (updateData.photowall_settings) {
+            const allowedPhotowallFields = [
+                'isEnabled', 'displayMode', 'transitionDuration',
+                'showUploaderNames', 'autoAdvance', 'newImageInsertion'
+            ];
+
+            const filteredPhotowallSettings: any = {};
+            Object.keys(updateData.photowall_settings).forEach(key => {
+                if (allowedPhotowallFields.includes(key)) {
+                    filteredPhotowallSettings[`photowall_settings.${key}`] = updateData.photowall_settings[key];
+                }
+            });
+
+            // Replace photowall_settings with filtered nested updates
+            delete updateData.photowall_settings;
+            Object.assign(updateData, filteredPhotowallSettings);
+        }
+
         const updatedEvent = await Event.findByIdAndUpdate(
             eventId,
             { $set: updateData },
@@ -227,6 +217,17 @@ export const updateEventService = async (
                 error: null,
                 other: null
             };
+        }
+
+        // If photowall settings were updated, notify WebSocket clients
+        if (updateData.includes('photowall_settings')) {
+            const wsService = getPhotoWallWebSocketService();
+            if (wsService && updatedEvent.share_token) {
+                wsService.broadcastSettingsUpdate(
+                    updatedEvent.share_token,
+                    updatedEvent.photowall_settings
+                );
+            }
         }
 
         await session.commitTransaction();

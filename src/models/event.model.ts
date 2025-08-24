@@ -125,7 +125,27 @@ const eventSchema = new mongoose.Schema({
         total_size_mb: { type: Number, default: 0 },
         pending_approval: { type: Number, default: 0 },
     },
-
+    photowall_settings: {
+        isEnabled: { type: Boolean, default: true },
+        displayMode: {
+            type: String,
+            enum: ['slideshow', 'grid', 'mosaic'],
+            default: 'slideshow'
+        },
+        transitionDuration: {
+            type: Number,
+            default: 5000,
+            min: 2000,
+            max: 30000
+        },
+        showUploaderNames: { type: Boolean, default: false },
+        autoAdvance: { type: Boolean, default: true },
+        newImageInsertion: {
+            type: String,
+            enum: ['immediate', 'after_current', 'end_of_queue', 'smart_priority'],
+            default: 'after_current'
+        }
+    },
     // Timestamps
     created_at: { type: Date, default: Date.now },
     updated_at: { type: Date, default: Date.now },

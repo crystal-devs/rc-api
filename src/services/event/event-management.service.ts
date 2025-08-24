@@ -2,12 +2,12 @@
 // 5. services/event/event-management.service.ts
 // ====================================
 
-import { 
-    processLocationData, 
-    processCoverImageData, 
-    processPermissionsData, 
+import {
+    processLocationData,
+    processCoverImageData,
+    processPermissionsData,
     processShareSettingsData,
-    handleVisibilityTransition 
+    handleVisibilityTransition
 } from './event-utils.service';
 
 export const processEventUpdateData = async (
@@ -115,6 +115,17 @@ export const processEventUpdateData = async (
             processed.co_host_invite_token = processCoHostInviteTokenData(updateData.co_host_invite_token);
         }
 
+        // PhotoWall settings processing
+        if (updateData.photowall_settings !== undefined) {
+            const photowallSettings = processPhotowallSettings(updateData.photowall_settings);
+            if (photowallSettings) {
+                // Use dot notation for nested updates
+                Object.keys(photowallSettings).forEach(key => {
+                    processed[`photowall_settings.${key}`] = photowallSettings[key];
+                });
+            }
+        }
+
         // Always update the timestamp
         processed.updated_at = new Date();
 
@@ -172,4 +183,51 @@ const processGuestPermissions = (permissions: any): any => {
         share: Boolean(permissions.share ?? false),
         create_albums: Boolean(permissions.create_albums ?? false)
     };
+};
+
+export const processPhotowallSettings = (photowallData: any): any => {
+    if (!photowallData || typeof photowallData !== 'object') {
+        return null; // Let schema defaults handle it
+    }
+
+    const processed: any = {};
+    const allowedFields = [
+        'isEnabled', 'displayMode', 'transitionDuration', 
+        'showUploaderNames', 'autoAdvance', 'newImageInsertion'
+    ];
+
+    allowedFields.forEach(field => {
+        if (photowallData[field] !== undefined) {
+            switch (field) {
+                case 'isEnabled':
+                case 'showUploaderNames':
+                case 'autoAdvance':
+                    processed[field] = Boolean(photowallData[field]);
+                    break;
+                
+                case 'displayMode':
+                    const validModes = ['slideshow', 'grid', 'mosaic'];
+                    if (validModes.includes(photowallData[field])) {
+                        processed[field] = photowallData[field];
+                    }
+                    break;
+                
+                case 'transitionDuration':
+                    const duration = Number(photowallData[field]);
+                    if (duration >= 2000 && duration <= 30000) {
+                        processed[field] = duration;
+                    }
+                    break;
+                
+                case 'newImageInsertion':
+                    const validStrategies = ['immediate', 'after_current', 'end_of_queue', 'smart_priority'];
+                    if (validStrategies.includes(photowallData[field])) {
+                        processed[field] = photowallData[field];
+                    }
+                    break;
+            }
+        }
+    });
+
+    return Object.keys(processed).length > 0 ? processed : null;
 };

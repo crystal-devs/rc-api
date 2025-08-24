@@ -4,8 +4,10 @@
 import mongoose from 'mongoose';
 import { logger } from '@utils/logger';
 import { Media } from '@models/media.model';
+import { Event } from '@models/event.model';
 import { mediaNotificationService } from '../websocket/notifications';
 import type { ServiceResponse, StatusUpdateOptions } from './media.types';
+import { getPhotoWallWebSocketService } from '@services/photoWallWebSocketService';
 
 export const updateMediaStatusService = async (
     mediaId: string,
@@ -66,14 +68,39 @@ export const updateMediaStatusService = async (
             { new: true, lean: true }
         );
 
+        // 🚀 NEW: Get event share token for PhotoWall notification
+        let shareToken: string | null = null;
+        if (status === 'approved' || status === 'auto_approved') {
+            try {
+                const event = await Event.findById(eventId).select('share_token').lean();
+                shareToken = event?.share_token || null;
+            } catch (eventError) {
+                logger.warn('Could not fetch share token for PhotoWall notification', { eventId });
+            }
+        }
+
         // Broadcast status change via WebSocket
         try {
             mediaNotificationService.broadcastMediaStats(eventId);
+
+            // 🚀 NEW: Notify PhotoWall if media was approved and we have share token
+            if ((status === 'approved' || status === 'auto_approved') &&
+                shareToken &&
+                previousStatus !== 'approved' &&
+                previousStatus !== 'auto_approved') {
+
+                const photoWallService = getPhotoWallWebSocketService();
+                if (photoWallService) {
+                    await photoWallService.notifyNewMediaUpload(shareToken, updatedMedia);
+                }
+            }
+
             logger.info('📤 WebSocket status update and stats broadcasted', {
                 mediaId: mediaId.substring(0, 8) + '...',
                 previousStatus,
                 newStatus: status,
-                eventId: eventId.substring(0, 8) + '...'
+                eventId: eventId.substring(0, 8) + '...',
+                photoWallNotified: !!(shareToken && (status === 'approved' || status === 'auto_approved'))
             });
         } catch (wsError) {
             logger.error('❌ Failed to broadcast via WebSocket:', wsError);
@@ -95,7 +122,8 @@ export const updateMediaStatusService = async (
             other: {
                 previousStatus,
                 newStatus: status,
-                websocketBroadcasted: true
+                websocketBroadcasted: true,
+                photoWallNotified: !!(shareToken && (status === 'approved' || status === 'auto_approved'))
             }
         };
 
@@ -141,6 +169,17 @@ export const bulkUpdateMediaStatusService = async (
             };
         }
 
+        // 🚀 NEW: Get share token if we're approving media for PhotoWall
+        let shareToken: string | null = null;
+        if (status === 'approved' || status === 'auto_approved') {
+            try {
+                const event = await Event.findById(eventId).select('share_token').lean();
+                shareToken = event?.share_token || null;
+            } catch (eventError) {
+                logger.warn('Could not fetch share token for bulk PhotoWall notification', { eventId });
+            }
+        }
+
         // Prepare update object
         const updateObj: any = {
             'approval.status': status,
@@ -159,6 +198,20 @@ export const bulkUpdateMediaStatusService = async (
             updateObj['approval.approved_by'] = options.adminId ? new mongoose.Types.ObjectId(options.adminId) : null;
         }
 
+        // 🚀 NEW: Get media items that were NOT already approved (for PhotoWall notification)
+        let newlyApprovedMedia: any[] = [];
+        if ((status === 'approved' || status === 'auto_approved') && shareToken) {
+            try {
+                newlyApprovedMedia = await Media.find({
+                    _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
+                    event_id: new mongoose.Types.ObjectId(eventId),
+                    'approval.status': { $nin: ['approved', 'auto_approved'] }
+                }).select('_id image_variants original_filename type').lean();
+            } catch (error) {
+                logger.warn('Could not fetch newly approved media for PhotoWall', { error: error.message });
+            }
+        }
+
         // Perform bulk update
         const result = await Media.updateMany(
             {
@@ -171,7 +224,23 @@ export const bulkUpdateMediaStatusService = async (
         // Broadcast stats update after bulk change
         try {
             mediaNotificationService.broadcastMediaStats(eventId);
-            logger.info(`📤 Bulk WebSocket stats update broadcasted for ${result.modifiedCount} items`);
+
+            // 🚀 NEW: Notify PhotoWall for each newly approved media
+            if ((status === 'approved' || status === 'auto_approved') &&
+                shareToken &&
+                newlyApprovedMedia.length > 0) {
+
+                const photoWallService = getPhotoWallWebSocketService();
+                if (photoWallService) {
+                    for (const media of newlyApprovedMedia) {
+                        await photoWallService.notifyNewMediaUpload(shareToken, media);
+                    }
+                }
+            }
+
+            logger.info(`📤 Bulk WebSocket stats update broadcasted for ${result.modifiedCount} items`, {
+                photoWallNotifications: newlyApprovedMedia.length
+            });
         } catch (wsError) {
             logger.error('❌ Failed to broadcast bulk update via WebSocket:', wsError);
         }
@@ -180,7 +249,8 @@ export const bulkUpdateMediaStatusService = async (
             eventId,
             mediaCount: validMediaIds.length,
             modifiedCount: result.modifiedCount,
-            status
+            status,
+            newlyApprovedForPhotoWall: newlyApprovedMedia.length
         });
 
         return {
@@ -195,7 +265,8 @@ export const bulkUpdateMediaStatusService = async (
             other: {
                 newStatus: status,
                 updatedBy: options.adminId || 'system',
-                websocketBroadcasted: true
+                websocketBroadcasted: true,
+                photoWallNotifications: newlyApprovedMedia.length
             }
         };
 
@@ -231,10 +302,11 @@ export const deleteMediaService = async (
             };
         }
 
-        // Find the media item BEFORE deletion
-        const media = await Media.findById(mediaId).select(
-            'event_id url original_filename type approval.status'
-        );
+        // 🚀 UPDATED: Find the media item AND get share token in one query
+        const media = await Media.findById(mediaId)
+            .select('event_id url original_filename type approval.status')
+            .populate('event_id', 'share_token') // Get share token
+            .lean();
 
         if (!media) {
             return {
@@ -246,7 +318,8 @@ export const deleteMediaService = async (
             };
         }
 
-        const eventId = media.event_id.toString();
+        const eventId = media.event_id._id?.toString() || media.event_id.toString();
+        const shareToken = (media.event_id as any)?.share_token || null;
         const wasVisible = ['approved', 'auto_approved'].includes(media.approval?.status || '');
 
         // Delete the media record
@@ -265,10 +338,23 @@ export const deleteMediaService = async (
                 // Also update stats since total count changed
                 mediaNotificationService.broadcastMediaStats(eventId);
 
+                // 🚀 NEW: Notify PhotoWall about media removal
+                if (shareToken) {
+                    const photoWallService = getPhotoWallWebSocketService();
+                    if (photoWallService) {
+                        await photoWallService.notifyMediaRemoved(
+                            shareToken,
+                            mediaId,
+                            options?.reason || 'Removed by admin'
+                        );
+                    }
+                }
+
                 logger.info('📤 Media deletion broadcasted to guests', {
                     mediaId: mediaId.substring(0, 8) + '...',
                     eventId: eventId.substring(0, 8) + '...',
-                    wasVisible
+                    wasVisible,
+                    photoWallNotified: !!shareToken
                 });
             } catch (wsError) {
                 logger.error('❌ Failed to broadcast media deletion via WebSocket:', wsError);
@@ -292,7 +378,8 @@ export const deleteMediaService = async (
             },
             error: null,
             other: {
-                websocketBroadcasted: wasVisible
+                websocketBroadcasted: wasVisible,
+                photoWallNotified: !!(wasVisible && shareToken)
             }
         };
 
