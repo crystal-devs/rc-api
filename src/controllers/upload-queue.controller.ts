@@ -230,7 +230,7 @@ export const retryUploadController = async (
         media.processing.error_message = '';
         media.processing.retry_count = (media.processing.retry_count || 0) + 1;
         media.processing.started_at = new Date();
-        
+
         await media.save();
 
         // Re-queue the job if possible
@@ -316,17 +316,11 @@ export const pauseResumeUploadController = async (
             });
         }
 
-        if (action === 'pause') {
-            // For BullMQ, we can't pause jobs directly, so we mark as paused in DB
-            media.processing.status = 'paused';
-            await media.save();
-            
-            logger.info(`⏸️ Paused upload: ${mediaId}`);
-        } else {
+        if (action === 'pending') {
             // Resume the job
             media.processing.status = 'pending';
             await media.save();
-            
+
             logger.info(`▶️ Resumed upload: ${mediaId}`);
         }
 

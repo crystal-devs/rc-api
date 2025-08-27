@@ -12,6 +12,7 @@ export const MODEL_NAMES = {
     EVENT_PARTICIPANT: "event-participants",
     EVENT_SESSION: "event-sessions",
     PHOTO_WALL: "photo-wall",
+    BULK_DOWNLOAD: 'bulk_downloads'
 } as const;
 
 export const getModelName = (model: keyof typeof MODEL_NAMES) => MODEL_NAMES[model];

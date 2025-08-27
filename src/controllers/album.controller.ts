@@ -3,7 +3,6 @@
 import { trimObject } from "@utils/sanitizers.util";
 import { NextFunction, Response } from "express";
 import { injectedRequest } from "types/injected-types";
-import * as albumService from "@services/album.service";
 import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
 import { createAlbumService, deleteAlbumService, getAlbumsByParams, getOrCreateDefaultAlbum, updateAlbumService } from "@services/album";

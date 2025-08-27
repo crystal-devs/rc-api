@@ -1,6 +1,5 @@
 import { NextFunction, Response } from "express";
 import { injectedRequest } from "types/injected-types";
-import * as eventService from "@services/event.service";
 import * as cohostService from "@services/cohost.service";
 import { sendResponse } from "@utils/express.util";
 import mongoose from "mongoose";

@@ -1,5 +1,4 @@
 import { Request, Response, NextFunction } from "express";
-import * as userService from "@services/user.service";
 import { logger } from "@utils/logger";
 import { injectedRequest } from "types/injected-types";
 import { SubscriptionPlan } from "@models/subscription-plan.model";
