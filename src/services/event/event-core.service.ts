@@ -220,7 +220,7 @@ export const updateEventService = async (
         }
 
         // If photowall settings were updated, notify WebSocket clients
-        if (updateData.includes('photowall_settings')) {
+        if ('photowall_settings' in updateData) {
             const wsService = getPhotoWallWebSocketService();
             if (wsService && updatedEvent.share_token) {
                 wsService.broadcastSettingsUpdate(

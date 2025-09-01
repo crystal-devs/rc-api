@@ -52,6 +52,26 @@ export interface CoverImageData {
     thumbnail_url: string;
 }
 
+export interface StylingConfig {
+    cover: {
+        template_id: number;
+        type: number;
+    };
+    gallery: {
+        layout_id: number;
+        grid_spacing: number;
+        thumbnail_size: number;
+    };
+    theme: {
+        theme_id: number;
+        fontset_id: number;
+    };
+    navigation: {
+        style_id: number;
+    };
+    language?: string;
+}
+
 export interface PermissionsData {
     can_view?: boolean;
     can_upload?: boolean;

@@ -25,6 +25,7 @@ export interface EventResponse {
         can_download: boolean;
         require_approval: boolean;
     };
+    styling_config?: any;
 }
 
 export interface ShareTokenValidation {

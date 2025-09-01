@@ -7,13 +7,14 @@ import { User } from "@models/user.model";
 import { ActivityLog } from "@models/activity-log.model";
 import { logger } from "@utils/logger";
 import mongoose from "mongoose";
-import type { 
-    EventStats, 
-    LocationData, 
-    CoverImageData, 
-    PermissionsData, 
+import type {
+    EventStats,
+    LocationData,
+    CoverImageData,
+    PermissionsData,
     ShareSettingsData,
-    VisibilityTransitionResult 
+    VisibilityTransitionResult,
+    StylingConfig
 } from './event.types';
 
 export const generateUniqueSlug = async (baseSlug: string): Promise<string> => {
@@ -69,6 +70,149 @@ export const processCoverImageData = (coverImageData: any): CoverImageData => {
         thumbnail_url: coverImageData.thumbnail_url?.trim() || ''
     };
 };
+
+export const processStylingData = (stylingData: any): StylingConfig => {
+    if (!stylingData || typeof stylingData !== 'object') {
+        // Return default values matching your schema
+        return {
+            cover: {
+                template_id: 0,
+                type: 0
+            },
+            gallery: {
+                layout_id: 1,
+                grid_spacing: 0,
+                thumbnail_size: 1
+            },
+            theme: {
+                theme_id: 8,
+                fontset_id: 0
+            },
+            navigation: {
+                style_id: 0
+            },
+            language: 'en'
+        };
+    }
+
+    // Validate and process cover settings
+    const cover = {
+        template_id: 0,
+        type: 0
+    };
+
+    if (stylingData.cover) {
+        if (stylingData.cover.template_id !== undefined) {
+            const templateId = parseInt(stylingData.cover.template_id);
+            if (isNaN(templateId) || templateId < 0 || templateId > 10) {
+                throw new Error('Cover template_id must be a number between 0 and 10');
+            }
+            cover.template_id = templateId;
+        }
+
+        if (stylingData.cover.type !== undefined) {
+            const type = parseInt(stylingData.cover.type);
+            if (isNaN(type) || type < 0 || type > 5) {
+                throw new Error('Cover type must be a number between 0 and 5');
+            }
+            cover.type = type;
+        }
+    }
+
+    // Validate and process gallery settings
+    const gallery = {
+        layout_id: 1,
+        grid_spacing: 0,
+        thumbnail_size: 1
+    };
+
+    if (stylingData.gallery) {
+        if (stylingData.gallery.layout_id !== undefined) {
+            const layoutId = parseInt(stylingData.gallery.layout_id);
+            if (isNaN(layoutId) || layoutId < 0 || layoutId > 5) {
+                throw new Error('Gallery layout_id must be a number between 0 and 5');
+            }
+            gallery.layout_id = layoutId;
+        }
+
+        if (stylingData.gallery.grid_spacing !== undefined) {
+            const spacing = parseInt(stylingData.gallery.grid_spacing);
+            if (isNaN(spacing) || spacing < 0 || spacing > 2) {
+                throw new Error('Gallery grid_spacing must be a number between 0 and 2');
+            }
+            gallery.grid_spacing = spacing;
+        }
+
+        if (stylingData.gallery.thumbnail_size !== undefined) {
+            const thumbSize = parseInt(stylingData.gallery.thumbnail_size);
+            if (isNaN(thumbSize) || thumbSize < 0 || thumbSize > 2) {
+                throw new Error('Gallery thumbnail_size must be a number between 0 and 2');
+            }
+            gallery.thumbnail_size = thumbSize;
+        }
+    }
+
+    // Validate and process theme settings
+    const theme = {
+        theme_id: 8,
+        fontset_id: 0
+    };
+
+    if (stylingData.theme) {
+        if (stylingData.theme.theme_id !== undefined) {
+            const themeId = parseInt(stylingData.theme.theme_id);
+            if (isNaN(themeId) || themeId < 0 || themeId > 10) {
+                throw new Error('Theme theme_id must be a number between 0 and 10');
+            }
+            theme.theme_id = themeId;
+        }
+
+        if (stylingData.theme.fontset_id !== undefined) {
+            const fontsetId = parseInt(stylingData.theme.fontset_id);
+            if (isNaN(fontsetId) || fontsetId < 0 || fontsetId > 5) {
+                throw new Error('Theme fontset_id must be a number between 0 and 5');
+            }
+            theme.fontset_id = fontsetId;
+        }
+    }
+
+    // Validate and process navigation settings
+    const navigation = {
+        style_id: 0
+    };
+
+    if (stylingData.navigation) {
+        if (stylingData.navigation.style_id !== undefined) {
+            const styleId = parseInt(stylingData.navigation.style_id);
+            if (isNaN(styleId) || styleId < 0 || styleId > 5) {
+                throw new Error('Navigation style_id must be a number between 0 and 5');
+            }
+            navigation.style_id = styleId;
+        }
+    }
+
+    // Validate language setting
+    let language = 'en';
+    if (stylingData.language !== undefined) {
+        if (typeof stylingData.language !== 'string') {
+            throw new Error('Language must be a string');
+        }
+        // Basic language code validation (can be expanded)
+        const validLanguages = ['en', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'ja', 'ko', 'zh'];
+        if (!validLanguages.includes(stylingData.language)) {
+            throw new Error('Invalid language code');
+        }
+        language = stylingData.language;
+    }
+
+    return {
+        cover,
+        gallery,
+        theme,
+        navigation,
+        language
+    };
+};  
 
 export const processPermissionsData = (permissionsData: any): PermissionsData => {
     if (!permissionsData || typeof permissionsData !== 'object') {
@@ -231,9 +375,9 @@ export const getUserEventStats = async (userId: string): Promise<EventStats> => 
 };
 
 export const recordEventActivity = async (
-    eventId: string, 
-    userId: string, 
-    action: string, 
+    eventId: string,
+    userId: string,
+    action: string,
     additionalDetails: any = {}
 ): Promise<void> => {
     try {

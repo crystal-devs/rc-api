@@ -26,11 +26,11 @@ export class ShareTokenService {
     }) {
         try {
             // Find event by share_token - only select necessary fields
-            const event = await Event.findOne({ 
-                share_token: tokenId 
+            const event = await Event.findOne({
+                share_token: tokenId
             })
-            .select('_id title description start_date location cover_image visibility share_settings permissions created_by co_hosts')
-            .lean();
+                .select('_id title description start_date location cover_image visibility share_settings permissions created_by co_hosts styling_config')
+                .lean();
 
             if (!event) {
                 return {
@@ -121,11 +121,11 @@ export class ShareTokenService {
 
             // Check visibility access
             const accessCheck = shareValidationService.checkVisibilityAccess(
-                visibility, 
-                authToken, 
+                visibility,
+                authToken,
                 userEmail
             );
-            
+
             if (!accessCheck.valid) {
                 return {
                     valid: false,

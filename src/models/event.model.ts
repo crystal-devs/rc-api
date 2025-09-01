@@ -13,6 +13,41 @@ const coverImageSchema = new mongoose.Schema({
     public_id: { type: String, default: '' },
     uploaded_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, default: null },
     thumbnail_url: { type: String, default: '' },
+    // Cover image dimensions and focal point
+    width: { type: Number, default: null },
+    height: { type: Number, default: null },
+    focal_x: { type: Number, default: 50 }, // Percentage (0-100)
+    focal_y: { type: Number, default: 50 }, // Percentage (0-100)
+}, { _id: false });
+
+// New styling configuration schema
+const stylingConfigSchema = new mongoose.Schema({
+    // Cover styling
+    cover: {
+        template_id: { type: Number, default: 0 }, // Template/style variant
+        type: { type: Number, default: 0 }, // Cover display type
+    },
+
+    // Gallery layout and appearance
+    gallery: {
+        layout_id: { type: Number, default: 1 }, // 0: grid, 1: masonry, 2: justified, etc.
+        grid_spacing: { type: Number, default: 0 }, // 0: tight, 1: normal, 2: loose
+        thumbnail_size: { type: Number, default: 1 }, // 0: small, 1: medium, 2: large
+    },
+
+    // Theme and typography
+    theme: {
+        theme_id: { type: Number, default: 8 }, // Theme identifier
+        fontset_id: { type: Number, default: 0 }, // Typography set
+    },
+
+    // Navigation and interaction
+    navigation: {
+        style_id: { type: Number, default: 0 }, // Navigation style
+    },
+
+    // Localization
+    language: { type: String, default: 'en' },
 }, { _id: false });
 
 const coHostInviteTokenSchema = new mongoose.Schema({
@@ -20,13 +55,13 @@ const coHostInviteTokenSchema = new mongoose.Schema({
     created_by: {
         type: mongoose.Schema.Types.ObjectId,
         ref: MODEL_NAMES.USER,
-        required: false, // Changed from required: true to false
-        default: null // Added default value
+        required: false,
+        default: null
     },
     created_at: { type: Date, default: Date.now },
-    expires_at: { type: Date, required: true }, // Enforce expiry for security
+    expires_at: { type: Date, required: true },
     is_active: { type: Boolean, default: true },
-    max_uses: { type: Number, default: 1 }, // Single-use by default
+    max_uses: { type: Number, default: 1 },
     used_count: { type: Number, default: 0 },
 }, { _id: false });
 
@@ -80,14 +115,14 @@ const eventSchema = new mongoose.Schema({
     // Permissions for users with the share token
     permissions: { type: permissionsSchema, default: () => ({}) },
 
-    // Separate co-host invite token - Updated default function
+    // Separate co-host invite token
     co_host_invite_token: {
         type: coHostInviteTokenSchema,
         default: function () {
             return {
-                created_by: this.created_by || null, // Use the event's created_by
+                created_by: this.created_by || null,
                 created_at: new Date(),
-                expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7-day expiry
+                expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
                 is_active: true,
                 max_uses: 1,
                 used_count: 0
@@ -117,6 +152,9 @@ const eventSchema = new mongoose.Schema({
         default: 'custom',
     },
 
+    // Styling configuration - Clean and organized
+    styling_config: { type: stylingConfigSchema, default: () => ({}) },
+
     // Basic stats with pending_approval
     stats: {
         participants: { type: Number, default: 0 },
@@ -125,6 +163,7 @@ const eventSchema = new mongoose.Schema({
         total_size_mb: { type: Number, default: 0 },
         pending_approval: { type: Number, default: 0 },
     },
+
     photowall_settings: {
         isEnabled: { type: Boolean, default: true },
         displayMode: {
@@ -146,6 +185,7 @@ const eventSchema = new mongoose.Schema({
             default: 'after_current'
         }
     },
+
     // Timestamps
     created_at: { type: Date, default: Date.now },
     updated_at: { type: Date, default: Date.now },
@@ -176,7 +216,6 @@ eventSchema.pre('save', function (next) {
 
         // Generate co_host_invite_token and ensure created_by is set
         if (!this.co_host_invite_token || !this.co_host_invite_token.token) {
-            // Initialize co_host_invite_token if it doesn't exist with all required properties
             if (!this.co_host_invite_token) {
                 this.co_host_invite_token = {
                     created_by: this.created_by,
@@ -188,12 +227,10 @@ eventSchema.pre('save', function (next) {
                 };
             }
 
-            // Generate token if not exists
             if (!this.co_host_invite_token.token) {
                 this.co_host_invite_token.token = `coh_${new mongoose.Types.ObjectId().toString()}_${Math.random().toString(36).slice(2, 8)}`;
             }
 
-            // Ensure created_by is set
             if (!this.co_host_invite_token.created_by) {
                 this.co_host_invite_token.created_by = this.created_by;
             }

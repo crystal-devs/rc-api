@@ -7,7 +7,8 @@ import {
     processCoverImageData,
     processPermissionsData,
     processShareSettingsData,
-    handleVisibilityTransition
+    handleVisibilityTransition,
+    processStylingData
 } from './event-utils.service';
 
 export const processEventUpdateData = async (
@@ -82,6 +83,12 @@ export const processEventUpdateData = async (
         // Cover image handling
         if (updateData.cover_image !== undefined) {
             processed.cover_image = processCoverImageData(updateData.cover_image);
+        }
+
+        // Cover image handling
+        if (updateData.styling_config !== undefined) {
+            console.log(updateData.styling_config, 'updatedcoverimagae');
+            processed.styling_config = processStylingData(updateData.styling_config);
         }
 
         // Visibility and permissions

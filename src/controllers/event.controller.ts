@@ -255,7 +255,8 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             'visibility',
             'default_guest_permissions',
             'cover_image',
-            'photowall_settings'  // 🚀 NEW: Allow photowall updates
+            'photowall_settings',
+            'styling_config'
         ];
 
         // Process and validate update data
