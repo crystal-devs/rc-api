@@ -137,7 +137,7 @@ export const processStylingData = (stylingData: any): StylingConfig => {
 
         if (stylingData.gallery.grid_spacing !== undefined) {
             const spacing = parseInt(stylingData.gallery.grid_spacing);
-            if (isNaN(spacing) || spacing < 0 || spacing > 2) {
+            if (isNaN(spacing) || spacing < 0 || spacing > 3) {
                 throw new Error('Gallery grid_spacing must be a number between 0 and 2');
             }
             gallery.grid_spacing = spacing;

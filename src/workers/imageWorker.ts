@@ -1,5 +1,4 @@
-// workers/imageWorker.ts - CORRECTED: Fix imports and use only
-
+// workers/imageWorker.ts - Fixed to use only SimpleProgressService
 import { Job, Worker } from 'bullmq';
 import { logger } from '@utils/logger';
 import { keys } from '@configs/dotenv.config';
@@ -8,8 +7,9 @@ import sharp from 'sharp';
 import fs from 'fs/promises';
 import { mediaNotificationService } from '@services/websocket/notifications';
 import { uploadOriginalImage, uploadVariantImage } from '@services/upload/core/upload-variants.service';
+import { simpleProgressService } from '@services/websocket/simple-progress.service'; // Add this import
 
-// Types that should exist in your types/queue.ts - add these if they don't exist
+// Types
 interface ImageProcessingJobData {
   mediaId: string;
   userId: string;
@@ -76,32 +76,55 @@ export const initializeImageWorker = async (): Promise<Worker> => {
         logger.info(`🔄 Processing variants: ${originalFilename} (${mediaId}) - ${isGuestUpload ? 'Guest' : 'Admin'} upload`);
 
         try {
-          // 🚀 STEP 1: Update status to processing
+          // STEP 1: Update status to processing - USING SIMPLE PROGRESS SERVICE ONLY
           await Media.findByIdAndUpdate(mediaId, {
             'processing.status': 'processing',
             'processing.started_at': new Date(),
           });
 
-          await job.updateProgress(5);
-
-          // 🚀 STEP 2: Generate all variants (10-90%)
-          const variants = await generateImageVariants(filePath, mediaId, eventId, (progress) => {
-            job.updateProgress(10 + (progress * 0.8)); // 10% to 90%
+          // Use SimpleProgressService instead of job.updateProgress
+          await simpleProgressService.updateProgress({
+            mediaId,
+            eventId,
+            stage: 'processing',
+            percentage: 5,
+            message: 'Starting image processing...',
+            jobId: job.id
           });
 
-          await job.updateProgress(90);
+          // STEP 2: Generate all variants (10-90%)
+          const variants = await generateImageVariants(filePath, mediaId, eventId, async (progress) => {
+            // Use SimpleProgressService for all progress updates
+            await simpleProgressService.updateProgress({
+              mediaId,
+              eventId,
+              stage: 'variants_creating',
+              percentage: 10 + (progress * 0.8),
+              message: `Creating variants... ${Math.round(10 + (progress * 0.8))}%`,
+              jobId: job.id
+            });
+          });
 
-          // 🚀 STEP 3: Get original metadata
+          await simpleProgressService.updateProgress({
+            mediaId,
+            eventId,
+            stage: 'variants_creating',
+            percentage: 90,
+            message: 'Finalizing variants...',
+            jobId: job.id
+          });
+
+          // STEP 3: Get original metadata
           const originalMetadata = await getOriginalImageMetadata(filePath);
 
-          // 🚀 STEP 4: Upload original to permanent storage
+          // STEP 4: Upload original to permanent storage
           const originalUrl = await uploadOriginal(filePath, mediaId, eventId);
 
-          // 🚀 STEP 5: Update database with everything (95%)
+          // STEP 5: Update database with everything (95%)
           const processingTime = Date.now() - startTime;
 
           const updateData = {
-            url: originalUrl, // Update to permanent URL
+            url: originalUrl,
             'metadata.width': originalMetadata.width,
             'metadata.height': originalMetadata.height,
             'metadata.aspect_ratio': originalMetadata.aspect_ratio,
@@ -129,9 +152,8 @@ export const initializeImageWorker = async (): Promise<Worker> => {
 
           await Media.findByIdAndUpdate(mediaId, updateData);
 
-          // 🚀 NEW: Handle WebSocket differently for guest vs admin uploads
+          // Handle WebSocket differently for guest vs admin uploads
           if (!isGuestUpload) {
-            // Admin uploads: Broadcast to guests (existing functionality)
             const bestGuestUrl = variants.medium?.webp?.url || variants.medium?.jpeg?.url || originalUrl;
 
             mediaNotificationService.broadcastProcessingComplete({
@@ -146,22 +168,19 @@ export const initializeImageWorker = async (): Promise<Worker> => {
               processingTimeMs: processingTime
             });
           } else {
-            // 🚀 NEW: Guest uploads: Only notify admin about new guest content
             logger.info(`✅ Guest upload processed: ${mediaId} - Admin can review`);
-
-            // TODO: In future, you can add admin notification here
-            // For now, admin will see guest uploads when they refresh their admin panel
           }
 
-          // 🧹 CLEANUP: Remove local file
+          // Final completion update - USING SIMPLE PROGRESS SERVICE
+          await simpleProgressService.markCompleted(mediaId, eventId);
+
+          // Cleanup: Remove local file
           try {
             await fs.unlink(filePath);
             logger.info(`🧹 Cleaned up local file: ${filePath}`);
           } catch (cleanupError) {
             logger.warn('Failed to cleanup local file:', cleanupError);
           }
-
-          await job.updateProgress(100);
 
           logger.info(`✅ Variants completed: ${originalFilename} in ${processingTime}ms - ${isGuestUpload ? 'Guest' : 'Admin'} upload`);
 
@@ -180,7 +199,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
               large_webp: variants.large?.webp?.url,
               large_jpeg: variants.large?.jpeg?.url,
             },
-            guestsBroadcasted: !isGuestUpload, // Only admin uploads broadcast to guests
+            guestsBroadcasted: !isGuestUpload,
             isGuestUpload: isGuestUpload || false
           };
 
@@ -188,7 +207,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
           const processingTime = Date.now() - startTime;
           logger.error(`❌ Processing failed: ${originalFilename} after ${processingTime}ms (${isGuestUpload ? 'Guest' : 'Admin'}):`, error);
 
-          // 🔧 UPDATE FAILURE STATUS
+          // Update failure status
           await Media.findByIdAndUpdate(mediaId, {
             'processing.status': 'failed',
             'processing.completed_at': new Date(),
@@ -197,9 +216,11 @@ export const initializeImageWorker = async (): Promise<Worker> => {
             'processing.retry_count': job.attemptsMade || 0,
           });
 
-          // 🚀 NEW: Handle failure notifications differently for guest vs admin
+          // Mark as failed - USING SIMPLE PROGRESS SERVICE
+          await simpleProgressService.markFailed(mediaId, eventId, error.message || 'Processing failed');
+
+          // Handle failure notifications differently for guest vs admin
           if (!isGuestUpload) {
-            // Admin uploads: Notify guests of failure
             mediaNotificationService.broadcastProcessingFailed({
               mediaId,
               eventId,
@@ -207,7 +228,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
             });
           }
 
-          // 🧹 CLEANUP on failure
+          // Cleanup on failure
           try {
             if (filePath) {
               await fs.unlink(filePath);
@@ -225,24 +246,21 @@ export const initializeImageWorker = async (): Promise<Worker> => {
       }
     );
 
-    // 🚀 EVENT HANDLERS with WebSocket integration
+    // Event handlers - REMOVED PROGRESS LOGGING TO PREVENT SPAM
     imageWorkerInstance.on('completed', (job: Job<ImageProcessingJobData>, result: ProcessingResult) => {
       const processingTime = Date.now() - job.timestamp;
       const uploadType = job.data.isGuestUpload ? 'Guest' : 'Admin';
 
-      logger.info(`✅ Worker completed job ${job.id} in ${processingTime}ms - ${uploadType} upload - Guests notified: ${result.guestsBroadcasted}`);
+      logger.info(`✅ Worker completed job ${job.id} in ${processingTime}ms - ${uploadType} upload`);
 
-      if (processingTime > 60000) { // 1 minute
+      if (processingTime > 60000) {
         logger.warn(`🐌 Very slow job: ${job.id} took ${(processingTime / 1000).toFixed(1)}s`);
       }
 
-      // 🚀 NEW: Update media statistics (for both admin and guest uploads)
       if (result.success && job.data.eventId) {
         if (!job.data.isGuestUpload) {
-          // Only broadcast stats for admin uploads (guests see this)
           mediaNotificationService.broadcastMediaStats(job.data.eventId);
         }
-        // For guest uploads, admin will see updated counts when they refresh
       }
     });
 
@@ -257,29 +275,22 @@ export const initializeImageWorker = async (): Promise<Worker> => {
         isGuestUpload: job?.data.isGuestUpload
       });
 
-      // 🚀 NEW: Handle final failure differently for guest vs admin
       if (job && job.attemptsMade >= 3 && job.data?.eventId && job.data?.mediaId) {
-        logger.warn(`❌ Final failure for ${job.data.mediaId} (${uploadType}), notifying appropriately`);
+        logger.warn(`❌ Final failure for ${job.data.mediaId} (${uploadType})`);
 
         if (!job.data.isGuestUpload) {
-          // Admin upload failure: Notify guests
           mediaNotificationService.broadcastProcessingFailed({
             mediaId: job.data.mediaId,
             eventId: job.data.eventId,
             errorMessage: 'Processing failed after multiple attempts'
           });
         }
-        // Guest upload failure: Just log (admin will see failed status in their panel)
       }
     });
 
-    imageWorkerInstance.on('progress', (job: Job<ImageProcessingJobData>, progress: number | object) => {
-      if (typeof progress === 'number' && progress % 20 === 0) { // Log every 20%
-        logger.debug(`📊 Job ${job.id} progress: ${progress}%`);
-      }
-    });
+    // REMOVED progress event handler to prevent spam logging
 
-    logger.info(`✅ Enhanced image worker initialized with concurrency: ${getConcurrencyLevel()}`);
+    logger.info(`✅ Image worker initialized with concurrency: ${getConcurrencyLevel()}`);
     return imageWorkerInstance;
 
   } catch (error) {
@@ -288,14 +299,12 @@ export const initializeImageWorker = async (): Promise<Worker> => {
   }
 };
 
-/**
- * 🚀 CORE FUNCTION: Generate all image variants efficiently
- */
+// Generate image variants with progress callback
 async function generateImageVariants(
   filePath: string,
   mediaId: string,
   eventId: string,
-  progressCallback: (progress: number) => void
+  progressCallback: (progress: number) => Promise<void> // Changed to async
 ): Promise<{
   small?: { webp?: ImageVariant; jpeg?: ImageVariant };
   medium?: { webp?: ImageVariant; jpeg?: ImageVariant };
@@ -304,22 +313,21 @@ async function generateImageVariants(
   const variants: any = {};
 
   try {
-    // 🔧 DEFINE SIZES: Optimized for different use cases
     const sizes = {
-      small: { width: 400, height: 400, quality: 80 },   // Thumbnails, mobile
-      medium: { width: 800, height: 800, quality: 85 },  // Desktop feeds  
-      large: { width: 1200, height: 1200, quality: 90 }  // Lightbox, zoom
+      small: { width: 400, height: 400, quality: 80 },
+      medium: { width: 800, height: 800, quality: 85 },
+      large: { width: 1200, height: 1200, quality: 90 }
     } as const;
 
     const sizeNames = Object.keys(sizes) as Array<keyof typeof sizes>;
     let completed = 0;
-    const total = sizeNames.length * 2; // 2 formats per size
+    const total = sizeNames.length * 2;
 
-    // 🚀 PARALLEL PROCESSING: Generate all variants concurrently
     for (const sizeName of sizeNames) {
       const config = sizes[sizeName];
 
-      // Generate both WebP and JPEG in parallel
+      await progressCallback((completed / total) * 100);
+
       const [webpVariant, jpegVariant] = await Promise.all([
         generateSingleVariant(filePath, mediaId, eventId, sizeName, 'webp', config),
         generateSingleVariant(filePath, mediaId, eventId, sizeName, 'jpeg', config)
@@ -331,7 +339,7 @@ async function generateImageVariants(
       };
 
       completed += 2;
-      progressCallback((completed / total) * 100);
+      await progressCallback((completed / total) * 100);
     }
 
     return variants;
@@ -342,9 +350,7 @@ async function generateImageVariants(
   }
 }
 
-/**
- * 🚀 OPTIMIZED: Generate single variant efficiently
- */
+// Rest of your functions remain the same...
 async function generateSingleVariant(
   filePath: string,
   mediaId: string,
@@ -354,7 +360,6 @@ async function generateSingleVariant(
   config: { width: number; height: number; quality: number }
 ): Promise<ImageVariant> {
   try {
-    // 🔧 SHARP OPTIMIZATION: Progressive, optimized settings
     let sharpInstance = sharp(filePath)
       .resize(config.width, config.height, {
         fit: 'inside',
@@ -366,7 +371,7 @@ async function generateSingleVariant(
       buffer = await sharpInstance
         .webp({
           quality: config.quality,
-          effort: 4, // Good balance of quality/speed
+          effort: 4,
           nearLossless: false
         })
         .toBuffer();
@@ -375,17 +380,15 @@ async function generateSingleVariant(
         .jpeg({
           quality: config.quality,
           progressive: true,
-          mozjpeg: true // Better compression
+          mozjpeg: true
         })
         .toBuffer();
     }
 
-    // 🚀 GET VARIANT METADATA
     const metadata = await sharp(buffer).metadata();
     const sizeBytes = buffer.length;
     const sizeMB = Math.round((sizeBytes / (1024 * 1024)) * 100) / 100;
 
-    // 🚀 UPLOAD TO IMAGEKIT with proper folder structure
     const url = await uploadVariantImage(
       buffer,
       mediaId,
@@ -411,23 +414,17 @@ async function generateSingleVariant(
   }
 }
 
-/**
- * 🚀 GET ORIGINAL METADATA: Comprehensive info with proper typing
- */
 async function getOriginalImageMetadata(filePath: string) {
   try {
     const metadata = await sharp(filePath).metadata();
     const stats = await fs.stat(filePath);
     const sizeMB = Math.round((stats.size / (1024 * 1024)) * 100) / 100;
 
-    // 🔧 FIX: Proper ICC profile handling
     let colorProfile = '';
     if (metadata.icc) {
       try {
-        // ICC profile is a Buffer, extract description properly
         const iccBuffer = metadata.icc;
         if (Buffer.isBuffer(iccBuffer) && iccBuffer.length > 80) {
-          // Look for description in ICC profile
           const descriptionMatch = iccBuffer.toString('ascii', 80, 200).match(/[A-Za-z0-9\s]{4,}/);
           colorProfile = descriptionMatch ? descriptionMatch[0].trim() : 'Unknown';
         }
@@ -460,45 +457,32 @@ async function getOriginalImageMetadata(filePath: string) {
   }
 }
 
-/**
- * 🚀 UPLOAD ORIGINAL: Move to permanent storage
- */
 async function uploadOriginal(filePath: string, mediaId: string, eventId: string): Promise<string> {
   try {
     const buffer = await fs.readFile(filePath);
-
     const url = await uploadOriginalImage(buffer, mediaId, eventId);
-
     logger.info(`✅ Uploaded original: ${url}`);
     return url;
-
   } catch (error) {
     logger.error('Failed to upload original:', error);
     throw error;
   }
 }
 
-/**
- * 🛠️ UTILITY FUNCTIONS
- */
+// Utility functions remain the same...
 function getConcurrencyLevel(): number {
   try {
     const cpuCores = require('os').cpus().length;
     const totalMemoryGB = require('os').totalmem() / (1024 * 1024 * 1024);
 
-    // Conservative: 1-2 jobs per CPU core, limited by memory
     let concurrency = Math.max(1, Math.floor(cpuCores * 1.5));
-
-    // Memory limit (assume 1GB per job for large images)
     const memoryBasedLimit = Math.floor(totalMemoryGB);
     concurrency = Math.min(concurrency, memoryBasedLimit);
 
-    // Environment override
     if (process.env.IMAGE_WORKER_CONCURRENCY) {
       concurrency = parseInt(process.env.IMAGE_WORKER_CONCURRENCY);
     }
 
-    // Limits: 1-6 for most servers
     return Math.max(1, Math.min(concurrency, 6));
   } catch (error) {
     logger.warn('Could not determine optimal concurrency, using default of 2');

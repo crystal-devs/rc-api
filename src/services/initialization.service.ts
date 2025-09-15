@@ -1,21 +1,19 @@
-// services/initialization.service.ts - Updated version
+// services/initialization.service.ts - Updated to disable QueueWebSocketBridge
 import { connectToMongoDB, logConnectionPoolStats } from '@configs/database.config';
 import { redisConnection } from '@configs/redis.config';
 import { createDefaultPlans } from '@models/subscription-plan.model';
 import { logger } from '@utils/logger';
-import {  initializeImageQueue } from 'queues/imageQueue';
-import {  initializeImageWorker } from 'workers/imageWorker';
+import { initializeImageQueue } from 'queues/imageQueue';
+import { initializeImageWorker } from 'workers/imageWorker';
 import { BulkDownloadService } from './media/bulk-download.service';
 
 export class InitializationService {
-    
+
     static async initializeDatabase() {
         logger.info('Initializing MongoDB with connection pooling...');
         await connectToMongoDB();
-        
         await createDefaultPlans();
         logger.info('Default subscription plans created/verified');
-        
         logConnectionPoolStats();
     }
 
@@ -34,11 +32,13 @@ export class InitializationService {
     static async initializeImageProcessing() {
         try {
             logger.info('Initializing image processing system...');
-            
-            await initializeImageQueue();
+
+            const imageQueue = await initializeImageQueue();
             await initializeImageWorker();
-            
-            logger.info('Image processing system fully initialized');
+
+            logger.info('QueueWebSocketBridge disabled - using SimpleProgressService only');
+
+            logger.info('Image processing system initialized (WebSocket bridge disabled)');
             return true;
         } catch (error) {
             logger.error('Failed to initialize image processing:', error);

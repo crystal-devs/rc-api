@@ -22,6 +22,7 @@ import albumRouter from "@routes/album.router";
 import shareTokenRouter from "@routes/share-token.router";
 import photoWallRouter from "@routes/photo-wall.router";
 import bulkDownloadRouter from "@routes/bulk-download.routes";
+import uploadQueueRouter from "@routes/upload-queue.routes";
 
 // Packages
 import compression from "compression";
@@ -90,6 +91,7 @@ app.use(`/api/${VERSION}/user`, userRouter);
 app.use(`/api/${VERSION}/token`, shareTokenRouter);
 app.use(`/api/${VERSION}/photo-wall`, photoWallRouter);
 app.use(`/api/${VERSION}/download`, bulkDownloadRouter);
+app.use(`/api/${VERSION}/upload-queue`, uploadQueueRouter);
 
 // Enhanced Application Initialization
 async function initializeApplication() {

@@ -1,35 +1,40 @@
 // routes/index.ts or app.ts - ADD THESE ROUTES
 
-import { cancelUploadController, clearQueueHistoryController, getQueueStatsController, getUploadQueueController, pauseResumeUploadController, retryUploadController } from '@controllers/upload-queue.controller';
+// routes/upload-queue.routes.ts
 import express from 'express';
+import {
+  cancelUploadController,
+  clearQueueHistoryController,
+  getQueueStatsController,
+  getUploadQueueController,
+  pauseResumeUploadController,
+  retryUploadController
+} from '@controllers/upload-queue.controller';
 
+const uploadQueueRouter = express.Router();
 
-const router = express.Router();
+// Ensure async controllers conform to Express's RequestHandler typing
+const wrap = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// ✅ ADD THESE ROUTES to your existing routes:
+// GET /api/v1/upload-queue/events/:eventId - Get queue items
+uploadQueueRouter.get('/events/:eventId', wrap(getUploadQueueController));
 
-// All queue routes require authentication
-router.use('/events/:eventId/upload-queue', authenticateToken);
+// GET /api/v1/upload-queue/events/:eventId/stats - Get queue statistics
+uploadQueueRouter.get('/events/:eventId/stats', wrap(getQueueStatsController));
 
-// GET /api/events/:eventId/upload-queue - Get queue items
-router.get('/events/:eventId/upload-queue', getUploadQueueController);
+// POST /api/v1/upload-queue/events/:eventId/:mediaId/retry - Retry failed upload
+uploadQueueRouter.post('/events/:eventId/:mediaId/retry', wrap(retryUploadController));
 
-// GET /api/events/:eventId/upload-queue/stats - Get queue statistics
-router.get('/events/:eventId/upload-queue/stats', getQueueStatsController);
+// POST /api/v1/upload-queue/events/:eventId/:mediaId/pause-resume - Pause/Resume upload
+uploadQueueRouter.post('/events/:eventId/:mediaId/pause-resume', wrap(pauseResumeUploadController));
 
-// POST /api/events/:eventId/upload-queue/:mediaId/retry - Retry failed upload
-router.post('/events/:eventId/upload-queue/:mediaId/retry', retryUploadController);
+// DELETE /api/v1/upload-queue/events/:eventId/:mediaId/cancel - Cancel upload
+uploadQueueRouter.delete('/events/:eventId/:mediaId/cancel', wrap(cancelUploadController));
 
-// POST /api/events/:eventId/upload-queue/:mediaId/pause-resume - Pause/Resume upload
-router.post('/events/:eventId/upload-queue/:mediaId/pause-resume', pauseResumeUploadController);
+// DELETE /api/v1/upload-queue/events/:eventId/history - Clear old completed/failed items
+uploadQueueRouter.delete('/events/:eventId/history', wrap(clearQueueHistoryController));
 
-// DELETE /api/events/:eventId/upload-queue/:mediaId/cancel - Cancel upload
-router.delete('/events/:eventId/upload-queue/:mediaId/cancel', cancelUploadController);
-
-// DELETE /api/events/:eventId/upload-queue/history - Clear old completed/failed items
-router.delete('/events/:eventId/upload-queue/history', clearQueueHistoryController);
-
-export default router;
+export default uploadQueueRouter;
 
 // ✅ OR if you're adding directly to app.ts:
 /*
