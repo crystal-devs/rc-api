@@ -178,7 +178,7 @@ async function processFileUploadWithProgress(
                 auto_approval_reason: 'authenticated_user',
                 approved_at: new Date(),
             }
-        }) as MediaDocument; // ✅ FIXED: Proper casting
+        }) as MediaDocument;
 
         await media.save();
 

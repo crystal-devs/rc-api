@@ -1,4 +1,4 @@
-// 2. services/websocket/management/websocket-auth.service.ts
+// services/websocket/management/websocket-auth.service.ts - Updated for Subscription Pattern
 // ====================================
 
 import jwt from 'jsonwebtoken';
@@ -37,16 +37,17 @@ export const authenticateConnection = async (
         if (authData.token && !authData.shareToken) {
             const decoded = jwt.verify(authData.token, keys.jwtSecret as string) as any;
 
-            if (event.created_by._id.toString() === decoded.userId) {
+            // FIX: Use user_id instead of userId
+            if (event.created_by._id.toString() === decoded.user_id) {
                 user = {
-                    id: decoded.userId,
+                    id: decoded.user_id, // CHANGED: use user_id
                     name: (event.created_by as any).name || 'Admin',
                     type: 'admin',
                     eventId: actualEventId
                 };
             } else {
                 user = {
-                    id: decoded.userId,
+                    id: decoded.user_id, // CHANGED: use user_id
                     name: decoded.name || 'Co-host',
                     type: 'co_host',
                     eventId: actualEventId
@@ -77,7 +78,6 @@ export const authenticateConnection = async (
             user: user
         };
 
-        // Enhanced client state
         const now = new Date();
         connectedClients.set(socket.id, {
             user: user,
@@ -102,7 +102,7 @@ export const authenticateConnection = async (
             }
         });
 
-        logger.info(`✅ Authenticated: ${socket.id} as ${user.type} - ${user.name}`);
+        logger.info(`✅ Authenticated: ${socket.id} as ${user.type} - ${user.name} (ID: ${user.id})`);
 
     } catch (error: any) {
         logger.error(`❌ Auth failed ${socket.id}:`, error.message);
@@ -110,37 +110,218 @@ export const authenticateConnection = async (
     }
 };
 
+
+// NEW: Handle event subscription with validation
+export const handleSubscription = async (
+    socket: Socket,
+    eventId: string,
+    shareToken: string,
+    connectedClients: Map<string, ClientConnectionState>
+): Promise<boolean> => {
+    if (!socket.data?.authenticated || !socket.data?.user) {
+        logger.warn(`❌ Subscription denied - not authenticated: ${socket.id}`);
+        return false;
+    }
+
+    const user = socket.data.user;
+
+    // DEBUGGING: Log the user object to see what we have
+    logger.info(`🔍 Subscription validation for user:`, {
+        userId: user.id,
+        userName: user.name,
+        userType: user.type,
+        userEventId: user.eventId,
+        targetEventId: eventId,
+        shareToken: shareToken?.substring(0, 8) + '...'
+    });
+
+    try {
+        // For admin/co_host users
+        if (user.type === 'admin' || user.type === 'co_host') {
+            // ADDED: Check if user.id exists
+            if (!user.id) {
+                logger.error(`❌ User ID is missing for ${user.type} user on socket ${socket.id}`);
+                return false;
+            }
+
+            // Check if they have access to this specific event
+            const hasAccess = await validateAdminEventAccess(user.id, eventId);
+            if (hasAccess) {
+                logger.info(`✅ Admin/Co-host ${user.id} granted access to event ${eventId}`);
+                return true;
+            }
+
+            // FALLBACK: If it's the same event they're authenticated for
+            if (user.eventId === eventId) {
+                logger.info(`✅ User ${user.id} accessing their authenticated event ${eventId}`);
+                return true;
+            }
+
+            logger.warn(`❌ Admin/Co-host ${user.id} denied access to event ${eventId}`);
+            return false;
+        }
+
+        // For guest users
+        else if (user.type === 'guest') {
+            const tokenToValidate = shareToken || user.shareToken || user.eventId;
+            const hasAccess = await validateGuestEventAccess(eventId, tokenToValidate);
+
+            if (hasAccess) {
+                logger.info(`✅ Guest granted access to event ${eventId}`);
+                return true;
+            }
+
+            // FALLBACK: Check if it's their authenticated event
+            if (user.eventId === eventId) {
+                logger.info(`✅ Guest accessing their authenticated event ${eventId}`);
+                return true;
+            }
+
+            logger.warn(`❌ Guest denied access to event ${eventId}`);
+            return false;
+        }
+
+        logger.warn(`❌ Unknown user type: ${user.type}`);
+        return false;
+
+    } catch (error: any) {
+        logger.error(`❌ Subscription validation failed for ${socket.id}:`, error.message);
+        return false;
+    }
+};
+// NEW: Handle event unsubscription
+export const handleUnsubscription = async (
+    socket: Socket,
+    eventId: string,
+    connectedClients: Map<string, ClientConnectionState>
+): Promise<void> => {
+    if (!socket.data?.authenticated || !socket.data?.user) {
+        return;
+    }
+
+    try {
+        // Update client state (remove from rooms for backward compatibility)
+        const client = connectedClients.get(socket.id);
+        if (client) {
+            const adminRoom = `admin_${eventId}`;
+            const guestRoom = `guest_${eventId}`;
+
+            client.rooms = client.rooms.filter(room =>
+                room !== adminRoom && room !== guestRoom
+            );
+        }
+
+        logger.info(`✅ Unsubscription processed: ${socket.id} from event ${eventId}`);
+
+    } catch (error: any) {
+        logger.error(`❌ Unsubscription failed for ${socket.id}:`, error.message);
+    }
+};
+
+// Helper function to validate admin/co-host access to event
+const validateAdminEventAccess = async (userId: string, eventId: string): Promise<boolean> => {
+    try {
+        logger.info(`🔍 Validating admin access: userId=${userId}, eventId=${eventId}`);
+
+        const event = await Event.findById(eventId)
+            .populate('created_by', '_id')
+            .populate('co_hosts.user_id', '_id');
+
+        if (!event) {
+            logger.warn(`❌ Event not found: ${eventId}`);
+            return false;
+        }
+
+        // Check if user is event creator
+        if (event.created_by._id.toString() === userId) {
+            logger.info(`✅ User ${userId} is creator of event ${eventId}`);
+            return true;
+        }
+
+        // Check if user is approved co-host
+        const isCoHost = event.co_hosts.some((ch: any) =>
+            ch.user_id._id.toString() === userId && ch.status === 'approved'
+        );
+
+        if (isCoHost) {
+            logger.info(`✅ User ${userId} is co-host of event ${eventId}`);
+            return true;
+        }
+
+        logger.info(`❌ User ${userId} has no access to event ${eventId}`);
+        return false;
+
+    } catch (error: any) {
+        logger.error(`❌ Admin access validation error:`, error);
+        return false;
+    }
+};
+
+// Helper function to validate guest access to event
+const validateGuestEventAccess = async (eventId: string, shareToken: string): Promise<boolean> => {
+    try {
+        const event = await Event.findById(eventId);
+
+        if (!event) {
+            return false;
+        }
+
+        // Check if share token matches
+        if (event.share_token !== shareToken) {
+            return false;
+        }
+
+        // Check if event sharing is active
+        if (!event.share_settings.is_active) {
+            logger.warn(`❌ Event ${eventId} sharing is disabled`);
+            return false;
+        }
+
+        // Check if share link has expired
+        if (event.share_settings.expires_at && new Date() > new Date(event.share_settings.expires_at)) {
+            logger.warn(`❌ Event ${eventId} share link has expired`);
+            return false;
+        }
+
+        // Check event visibility
+        if (event.visibility === 'private') {
+            logger.warn(`❌ Event ${eventId} is private`);
+            return false;
+        }
+
+        return true;
+
+    } catch (error: any) {
+        logger.error(`❌ Guest access validation failed:`, error);
+        return false;
+    }
+};
+
+// LEGACY: Keeping these for backward compatibility
 export const handleRoomJoin = async (
     socket: Socket,
     eventId: string,
     connectedClients: Map<string, ClientConnectionState>
 ): Promise<void> => {
-    if (socket.data?.authenticated && socket.data?.user?.eventId === eventId) {
-        const adminRoom = `admin_${eventId}`;
-        const guestRoom = `guest_${eventId}`;
+    logger.info(`🔄 Legacy handleRoomJoin called for ${socket.id}, converting to subscription`);
+
+    const isValid = await handleSubscription(socket, eventId, '', connectedClients);
+
+    if (isValid && socket.data?.authenticated && socket.data?.user?.eventId === eventId) {
         const user = socket.data.user;
-        const targetRoom = (user.type === 'admin' || user.type === 'co_host') ? adminRoom : guestRoom;
+        const targetRoom = (user.type === 'admin' || user.type === 'co_host')
+            ? `admin_${eventId}`
+            : `guest_${eventId}`;
 
-        try {
-            const client = connectedClients.get(socket.id);
-            const alreadyInRoom = client?.rooms.includes(targetRoom);
+        socket.emit('joined_event', {
+            eventId,
+            room: targetRoom,
+            userType: user.type
+        });
 
-            if (!alreadyInRoom && client) {
-                await socket.join(targetRoom);
-                client.rooms.push(targetRoom);
-                logger.info(`👥 ${socket.id} (${user.type}) joined room: ${targetRoom}`);
-            }
-
-            socket.emit('joined_event', {
-                eventId,
-                room: targetRoom,
-                userType: user.type
-            });
-
-        } catch (error) {
-            logger.error(`❌ Error joining room ${targetRoom}:`, error);
-            socket.emit('join_error', { message: 'Failed to join room' });
-        }
+        logger.info(`✅ Legacy room join processed: ${socket.id} -> ${targetRoom}`);
+    } else {
+        socket.emit('join_error', { message: 'Failed to join room' });
     }
 };
 
@@ -149,22 +330,6 @@ export const handleRoomLeave = async (
     eventId: string,
     connectedClients: Map<string, ClientConnectionState>
 ): Promise<void> => {
-    const adminRoom = `admin_${eventId}`;
-    const guestRoom = `guest_${eventId}`;
-
-    try {
-        await socket.leave(adminRoom);
-        await socket.leave(guestRoom);
-
-        const client = connectedClients.get(socket.id);
-        if (client) {
-            client.rooms = client.rooms.filter(room =>
-                room !== adminRoom && room !== guestRoom
-            );
-        }
-
-        logger.info(`👋 ${socket.id} left event rooms for ${eventId}`);
-    } catch (error) {
-        logger.error(`❌ Error leaving rooms for ${eventId}:`, error);
-    }
+    logger.info(`🔄 Legacy handleRoomLeave called for ${socket.id}, converting to unsubscription`);
+    await handleUnsubscription(socket, eventId, connectedClients);
 };
