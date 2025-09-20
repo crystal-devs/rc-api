@@ -1,6 +1,10 @@
-// index.ts - Clean and modular application entry point
+// index.ts - UPDATED to include bulk operations router
 import { keys } from "@configs/dotenv.config";
-import { corsOptions, rateLimiter, securityHeaders } from "@configs/security.config";
+import { 
+  corsOptions, 
+  rateLimiter, 
+  securityHeaders
+} from "@configs/security.config";
 import { gracefulShutdown } from "@configs/shutdown.config";
 import { globalErrorHandler } from "@middlewares/error-handler.middleware";
 import { logGojo } from "@utils/gojo-satoru";
@@ -8,9 +12,6 @@ import { logger, morganMiddleware } from "@utils/logger";
 
 // WebSocket imports
 import { initializeWebSocketService } from "@services/websocket/websocket.service";
-
-// Service imports
-
 
 // Route imports
 import authRouter from "@routes/auth-router";
@@ -23,6 +24,7 @@ import shareTokenRouter from "@routes/share-token.router";
 import photoWallRouter from "@routes/photo-wall.router";
 import bulkDownloadRouter from "@routes/bulk-download.routes";
 import uploadQueueRouter from "@routes/upload-queue.routes";
+import bulkOperationsRouter from "@routes/bulk-operations.router";
 
 // Packages
 import compression from "compression";
@@ -40,13 +42,16 @@ const app = express();
 const PORT = keys.port;
 const VERSION = keys.APILiveVersion;
 
-// Middlewares
+// Basic middlewares
 app.use(compression());
 app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(securityHeaders);
+
+// Apply general rate limiter globally
 app.use(rateLimiter);
+
 app.use(cors(corsOptions));
 app.use(morganMiddleware);
 
@@ -81,8 +86,10 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Express routes
+// Non-rate-limited routes
 app.use("/system", systemRouter);
+
+// API routes
 app.use(`/api/${VERSION}/auth`, authRouter);
 app.use(`/api/${VERSION}/event`, eventRouter);
 app.use(`/api/${VERSION}/album`, albumRouter);
@@ -92,6 +99,9 @@ app.use(`/api/${VERSION}/token`, shareTokenRouter);
 app.use(`/api/${VERSION}/photo-wall`, photoWallRouter);
 app.use(`/api/${VERSION}/download`, bulkDownloadRouter);
 app.use(`/api/${VERSION}/upload-queue`, uploadQueueRouter);
+
+// NEW: Dedicated bulk operations router with its own rate limiting
+app.use(`/api/${VERSION}/bulk`, bulkOperationsRouter);
 
 // Enhanced Application Initialization
 async function initializeApplication() {
@@ -119,6 +129,20 @@ async function initializeApplication() {
         serverId: process.env.SERVER_ID || 'server-1'
       });
     }
+
+    // Log routing configuration
+    logger.info('API routing configuration:', {
+      general: '500 req/10min',
+      bulk_operations: '30 ops/2min (status), 10 ops/5min (delete)',
+      bulk_download: '3 req/5min',
+      version: VERSION,
+      endpoints: {
+        bulk_status: `/api/${VERSION}/bulk/media/event/:id/status`,
+        bulk_approve: `/api/${VERSION}/bulk/media/event/:id/approve`,
+        bulk_reject: `/api/${VERSION}/bulk/media/event/:id/reject`,
+        bulk_hide: `/api/${VERSION}/bulk/media/event/:id/hide`
+      }
+    });
 
     startServer();
   } catch (error) {
