@@ -8,7 +8,7 @@ const activityLogSchema = new mongoose.Schema({
     user_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: true },
     action: { 
         type: String,
-        enum: ["viewed", "edited", "deleted", "created", "added", "removed", "permission_changed"], 
+        enum: ["viewed", "edited", "deleted", "created", "added", "removed", "permission_changed", "co_host_joined"], 
         required: true 
     },
     details: { type: mongoose.Schema.Types.Mixed, default: null },

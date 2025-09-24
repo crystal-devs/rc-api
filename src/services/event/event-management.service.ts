@@ -181,17 +181,6 @@ const processCoHostInviteTokenData = (tokenData: any): any => {
     return processed;
 };
 
-const processGuestPermissions = (permissions: any): any => {
-    return {
-        view: Boolean(permissions.view ?? true),
-        upload: Boolean(permissions.upload ?? false),
-        download: Boolean(permissions.download ?? false),
-        comment: Boolean(permissions.comment ?? true),
-        share: Boolean(permissions.share ?? false),
-        create_albums: Boolean(permissions.create_albums ?? false)
-    };
-};
-
 export const processPhotowallSettings = (photowallData: any): any => {
     if (!photowallData || typeof photowallData !== 'object') {
         return null; // Let schema defaults handle it

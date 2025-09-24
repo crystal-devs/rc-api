@@ -50,39 +50,6 @@ const stylingConfigSchema = new mongoose.Schema({
     language: { type: String, default: 'en' },
 }, { _id: false });
 
-const coHostInviteTokenSchema = new mongoose.Schema({
-    token: { type: String, unique: true, sparse: true, index: true },
-    created_by: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: MODEL_NAMES.USER,
-        required: false,
-        default: null
-    },
-    created_at: { type: Date, default: Date.now },
-    expires_at: { type: Date, required: true },
-    is_active: { type: Boolean, default: true },
-    max_uses: { type: Number, default: 1 },
-    used_count: { type: Number, default: 0 },
-}, { _id: false });
-
-const coHostSchema = new mongoose.Schema({
-    user_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: true },
-    invited_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: true },
-    status: {
-        type: String,
-        enum: ['pending', 'approved', 'blocked', 'removed'],
-        default: 'pending',
-    },
-    permissions: {
-        manage_content: { type: Boolean, default: true },
-        manage_guests: { type: Boolean, default: true },
-        manage_settings: { type: Boolean, default: true },
-        approve_content: { type: Boolean, default: true },
-    },
-    invited_at: { type: Date, default: Date.now },
-    approved_at: { type: Date, default: null },
-}, { _id: false });
-
 const shareSettingsSchema = new mongoose.Schema({
     is_active: { type: Boolean, default: true },
     password: { type: String, default: null },
@@ -109,29 +76,11 @@ const eventSchema = new mongoose.Schema({
     created_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: [true, 'Created by is required'] },
 
     // Share token for general event access
-    share_token: { type: String, unique: true, sparse: true, index: true },
+    share_token: { type: String, unique: true, sparse: true },
     share_settings: { type: shareSettingsSchema, default: () => ({}) },
 
     // Permissions for users with the share token
     permissions: { type: permissionsSchema, default: () => ({}) },
-
-    // Separate co-host invite token
-    co_host_invite_token: {
-        type: coHostInviteTokenSchema,
-        default: function () {
-            return {
-                created_by: this.created_by || null,
-                created_at: new Date(),
-                expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-                is_active: true,
-                max_uses: 1,
-                used_count: 0
-            };
-        },
-    },
-
-    // Co-hosts with admin-like permissions
-    co_hosts: [coHostSchema],
 
     // Privacy settings for access control
     visibility: {
@@ -157,11 +106,15 @@ const eventSchema = new mongoose.Schema({
 
     // Basic stats with pending_approval
     stats: {
-        participants: { type: Number, default: 0 },
+        total_participants: { type: Number, default: 0 },
+        creators_count: { type: Number, default: 1 },
+        co_hosts_count: { type: Number, default: 0 },
+        guests_count: { type: Number, default: 0 },
         photos: { type: Number, default: 0 },
         videos: { type: Number, default: 0 },
         total_size_mb: { type: Number, default: 0 },
         pending_approval: { type: Number, default: 0 },
+        pending_invitations: { type: Number, default: 0 }
     },
 
     photowall_settings: {
@@ -214,29 +167,6 @@ eventSchema.pre('save', function (next) {
             this.share_token = `evt_${Math.random().toString(36).slice(2, 8)}`;
         }
 
-        // Generate co_host_invite_token and ensure created_by is set
-        if (!this.co_host_invite_token || !this.co_host_invite_token.token) {
-            if (!this.co_host_invite_token) {
-                this.co_host_invite_token = {
-                    created_by: this.created_by,
-                    created_at: new Date(),
-                    expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-                    is_active: true,
-                    max_uses: 1,
-                    used_count: 0
-                };
-            }
-
-            if (!this.co_host_invite_token.token) {
-                this.co_host_invite_token.token = `coh_${new mongoose.Types.ObjectId().toString()}_${Math.random().toString(36).slice(2, 8)}`;
-            }
-
-            if (!this.co_host_invite_token.created_by) {
-                this.co_host_invite_token.created_by = this.created_by;
-            }
-
-            console.log('pre(save): Set co_host_invite_token.created_by to', this.created_by.toString());
-        }
     }
     this.updated_at = new Date();
     next();

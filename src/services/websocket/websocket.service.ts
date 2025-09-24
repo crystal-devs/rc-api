@@ -1,4 +1,4 @@
-// services/websocket/websocket.service.ts - Updated with Subscription Pattern
+// services/websocket/websocket.service.ts - Enhanced with Bulk Operations
 // ====================================
 
 import { Server as HttpServer } from 'http';
@@ -12,21 +12,102 @@ import { WebSocketHealthService } from './management/websocket-health.service';
 
 import type {
     ClientConnectionState,
-    AuthData,
+    AuthData,   
     StatusUpdatePayload,
     ConnectionStats,
     ConnectionHealth,
     SubscriptionData
 } from './websocket.types';
 
+// New types for bulk operations
+interface BulkStatusUpdatePayload {
+    type: 'bulk_status_update';
+    eventId: string;
+    operation: {
+        mediaIds: string[];
+        newStatus: string;
+        previousStatus: string;
+        updatedBy: {
+            id: string;
+            name: string;
+            type: string;
+        };
+        reason?: string;
+        hideReason?: string;
+        timestamp: Date;
+        summary: {
+            totalRequested: number;
+            totalModified: number;
+            totalFailed: number;
+            success: boolean;
+        };
+    };
+}
+
+interface BulkStatusBatchPayload {
+    type: 'bulk_status_batch';
+    eventId: string;
+    batchIndex: number;
+    totalBatches: number;
+    mediaIds: string[];
+    newStatus: string;
+    updatedBy: {
+        id: string;
+        name: string;
+        type: string;
+    };
+    timestamp: Date;
+}
+
+interface BulkProgressPayload {
+    eventId: string;
+    operationType: 'status_update' | 'delete' | 'move';
+    progress: {
+        completed: number;
+        total: number;
+        percentage: number;
+        errors: number;
+    };
+    status: 'in_progress' | 'completed' | 'failed';
+    updatedBy: {
+        id: string;
+        name: string;
+        type: string;
+    };
+    timestamp: Date;
+}
+
+interface IndividualStatusUpdate {
+    type: 'status_update';
+    mediaId: string;
+    eventId: string;
+    newStatus: string;
+    previousStatus: string;
+    updatedBy: {
+        id: string;
+        name: string;
+        type: string;
+    };
+    timestamp: Date;
+    bulkOperation: boolean;
+}
+
 class SimpleWebSocketService {
     public io: Server;
     private connectedClients: Map<string, ClientConnectionState> = new Map();
     private healthService: WebSocketHealthService;
 
-    // New: Track subscriptions separately from Socket.IO rooms
+    // Track subscriptions separately from Socket.IO rooms
     private eventSubscriptions: Map<string, Set<string>> = new Map(); // eventId -> Set(socketIds)
     private clientSubscriptions: Map<string, Set<string>> = new Map(); // socketId -> Set(eventIds)
+
+    // New: Track active bulk operations for rate limiting and monitoring
+    private activeBulkOperations: Map<string, {
+        operationType: string;
+        startTime: Date;
+        totalItems: number;
+        userId: string;
+    }> = new Map();
 
     constructor(httpServer: HttpServer) {
         this.io = new Server(httpServer, {
@@ -55,7 +136,7 @@ class SimpleWebSocketService {
         this.healthService = new WebSocketHealthService(this.connectedClients, this.io);
         this.setupMiddleware();
         this.initializeEventHandlers();
-        logger.info('🔌 Enhanced WebSocket service initialized with subscription management');
+        logger.info('🔌 Enhanced WebSocket service initialized with subscription management and bulk operations');
     }
 
     private setupMiddleware(): void {
@@ -87,7 +168,7 @@ class SimpleWebSocketService {
                 await authenticateConnection(socket, authData, this.connectedClients);
             });
 
-            // NEW: Subscription-based event handling
+            // Subscription-based event handling
             socket.on('subscribe_to_event', async (data: SubscriptionData) => {
                 await this.handleEventSubscription(socket, data);
             });
@@ -105,6 +186,20 @@ class SimpleWebSocketService {
             socket.on('leave_event', async (eventId: string) => {
                 logger.info(`🔄 Legacy leave_event converted to unsubscription for ${socket.id}`);
                 await this.handleEventUnsubscription(socket, { eventId });
+            });
+
+            // NEW: Bulk operation event handlers
+            socket.on('bulk_operation_status', (data: { operationId: string }) => {
+                const operation = this.activeBulkOperations.get(data.operationId);
+                if (operation) {
+                    socket.emit('bulk_operation_info', {
+                        operationId: data.operationId,
+                        ...operation,
+                        duration: Date.now() - operation.startTime.getTime()
+                    });
+                } else {
+                    socket.emit('bulk_operation_not_found', { operationId: data.operationId });
+                }
             });
 
             // Enhanced heartbeat handling
@@ -293,6 +388,7 @@ class SimpleWebSocketService {
             : `guest_${eventId}`;
     }
 
+    // EXISTING: Single status update method (unchanged)
     public emitStatusUpdate(payload: StatusUpdatePayload): void {
         const adminRoom = `admin_${payload.eventId}`;
         const guestRoom = `guest_${payload.eventId}`;
@@ -324,6 +420,318 @@ class SimpleWebSocketService {
         }
     }
 
+    // NEW: Bulk status update methods
+    public async emitBulkStatusUpdate(payload: BulkStatusUpdatePayload): Promise<void> {
+        try {
+            const eventId = payload.eventId;
+            const adminRoom = `admin_${eventId}`;
+            const guestRoom = `guest_${eventId}`;
+
+            // Create operation ID for tracking
+            const operationId = `bulk_${eventId}_${Date.now()}`;
+
+            // Track the operation
+            this.activeBulkOperations.set(operationId, {
+                operationType: 'status_update',
+                startTime: payload.operation.timestamp,
+                totalItems: payload.operation.mediaIds.length,
+                userId: payload.operation.updatedBy.id
+            });
+
+            const emitPayload = {
+                ...payload,
+                operationId,
+                timestamp: payload.operation.timestamp.toISOString()
+            };
+
+            // Emit to admin room with full details
+            this.io.to(adminRoom).emit('bulk_media_status_update', {
+                ...emitPayload,
+                details: {
+                    reason: payload.operation.reason,
+                    hideReason: payload.operation.hideReason
+                }
+            });
+
+            // Emit to guest room (filtered for guest-relevant updates)
+            if (['approved', 'auto_approved'].includes(payload.operation.newStatus)) {
+                // Guests see approved content
+                this.io.to(guestRoom).emit('bulk_media_approved', {
+                    eventId,
+                    operationId,
+                    mediaIds: payload.operation.mediaIds,
+                    newStatus: payload.operation.newStatus,
+                    summary: payload.operation.summary,
+                    timestamp: payload.operation.timestamp.toISOString()
+                });
+            } else if (['rejected', 'hidden', 'pending'].includes(payload.operation.newStatus)) {
+                // Guests see content removal
+                this.io.to(guestRoom).emit('bulk_media_removed', {
+                    eventId,
+                    operationId,
+                    mediaIds: payload.operation.mediaIds,
+                    reason: `Status changed to ${payload.operation.newStatus}`,
+                    summary: payload.operation.summary,
+                    timestamp: payload.operation.timestamp.toISOString()
+                });
+            }
+
+            logger.info(`✅ Bulk status update emitted for event ${eventId}:`, {
+                operationId,
+                mediaCount: payload.operation.mediaIds.length,
+                status: payload.operation.newStatus,
+                modifiedCount: payload.operation.summary.totalModified
+            });
+
+            // Clean up operation tracking after 5 minutes
+            setTimeout(() => {
+                this.activeBulkOperations.delete(operationId);
+            }, 5 * 60 * 1000);
+
+        } catch (error: any) {
+            logger.error('❌ Failed to emit bulk status update:', {
+                error: error.message,
+                eventId: payload.eventId,
+                mediaCount: payload.operation.mediaIds.length
+            });
+            throw error;
+        }
+    }
+
+    public async emitBulkStatusBatch(payload: BulkStatusBatchPayload): Promise<void> {
+        try {
+            const eventId = payload.eventId;
+            const adminRoom = `admin_${eventId}`;
+            const guestRoom = `guest_${eventId}`;
+
+            const batchPayload = {
+                ...payload,
+                timestamp: payload.timestamp.toISOString(),
+                progress: {
+                    current: payload.batchIndex + 1,
+                    total: payload.totalBatches,
+                    percentage: Math.round(((payload.batchIndex + 1) / payload.totalBatches) * 100)
+                }
+            };
+
+            // Emit to admin room
+            this.io.to(adminRoom).emit('bulk_status_batch', batchPayload);
+
+            // Emit to guest room only for relevant status changes
+            if (['approved', 'auto_approved'].includes(payload.newStatus)) {
+                this.io.to(guestRoom).emit('bulk_batch_approved', {
+                    eventId,
+                    mediaIds: payload.mediaIds,
+                    batchIndex: payload.batchIndex,
+                    totalBatches: payload.totalBatches,
+                    progress: batchPayload.progress,
+                    timestamp: batchPayload.timestamp
+                });
+            }
+
+            logger.debug(`✅ Bulk status batch emitted: ${payload.batchIndex + 1}/${payload.totalBatches}`, {
+                eventId,
+                mediaCount: payload.mediaIds.length,
+                status: payload.newStatus
+            });
+
+        } catch (error: any) {
+            logger.error('❌ Failed to emit bulk status batch:', {
+                error: error.message,
+                eventId: payload.eventId,
+                batchIndex: payload.batchIndex
+            });
+            throw error;
+        }
+    }
+
+    public async emitBulkIndividualUpdates(updates: IndividualStatusUpdate[]): Promise<void> {
+        try {
+            if (updates.length === 0) return;
+
+            const eventId = updates[0].eventId;
+            const adminRoom = `admin_${eventId}`;
+            const guestRoom = `guest_${eventId}`;
+
+            // Group updates by chunks to avoid overwhelming the network
+            const chunkSize = 5;
+            const chunks = [];
+
+            for (let i = 0; i < updates.length; i += chunkSize) {
+                chunks.push(updates.slice(i, i + chunkSize));
+            }
+
+            // Emit chunks with small delays
+            for (let index = 0; index < chunks.length; index++) {
+                const chunk = chunks[index];
+                const adminChunkPayload = {
+                    type: 'bulk_individual_updates',
+                    eventId,
+                    updates: chunk.map((update:any) => ({
+                        ...update,
+                        timestamp: update.timestamp.toISOString()
+                    })),
+                    chunkInfo: {
+                        index,
+                        total: chunks.length,
+                        isLast: index === chunks.length - 1
+                    }
+                };
+
+                // Send full updates to admin room
+                this.io.to(adminRoom).emit('bulk_individual_updates', adminChunkPayload);
+
+                // Send filtered updates to guest room
+                const guestUpdates = chunk.filter((update: any) =>
+                    ['approved', 'auto_approved'].includes(update.newStatus) ||
+                    (['approved', 'auto_approved'].includes(update.previousStatus) &&
+                        !['approved', 'auto_approved'].includes(update.newStatus))
+                );
+
+                if (guestUpdates.length > 0) {
+                    this.io.to(guestRoom).emit('bulk_individual_updates', {
+                        ...adminChunkPayload,
+                        updates: guestUpdates.map((update: any) => ({
+                            ...update,
+                            timestamp: update.timestamp.toISOString()
+                        }))
+                    });
+                }
+
+                // Small delay between chunks for large operations
+                if (index < chunks.length - 1 && updates.length > 20) {
+                    await new Promise(resolve => setTimeout(resolve, 5));
+                }
+            }
+
+            logger.debug(`✅ Bulk individual updates emitted: ${updates.length} updates in ${chunks.length} chunks`, {
+                eventId
+            });
+
+        } catch (error: any) {
+            logger.error('❌ Failed to emit bulk individual updates:', {
+                error: error.message,
+                updateCount: updates.length
+            });
+            throw error;
+        }
+    }
+
+    public async emitBulkProgress(payload: BulkProgressPayload): Promise<void> {
+        try {
+            const eventId = payload.eventId;
+            const adminRoom = `admin_${eventId}`;
+            const guestRoom = `guest_${eventId}`;
+
+            const progressPayload = {
+                type: 'bulk_progress',
+                ...payload,
+                timestamp: payload.timestamp.toISOString()
+            };
+
+            // Emit to admin room
+            this.io.to(adminRoom).emit('bulk_operation_progress', progressPayload);
+
+            // Emit simplified progress to guest room
+            this.io.to(guestRoom).emit('bulk_operation_progress', {
+                type: 'bulk_progress',
+                eventId,
+                operationType: payload.operationType,
+                progress: {
+                    percentage: payload.progress.percentage,
+                    completed: payload.progress.completed,
+                    total: payload.progress.total
+                },
+                status: payload.status,
+                timestamp: progressPayload.timestamp
+            });
+
+            // Log only significant progress milestones to avoid spam
+            const { percentage } = payload.progress;
+            if (percentage % 25 === 0 || payload.status !== 'in_progress') {
+                logger.info(`📊 Bulk operation progress: ${eventId} - ${payload.operationType}`, {
+                    progress: `${payload.progress.completed}/${payload.progress.total} (${percentage}%)`,
+                    status: payload.status,
+                    errors: payload.progress.errors
+                });
+            }
+
+        } catch (error: any) {
+            logger.error('❌ Failed to emit bulk progress:', {
+                error: error.message,
+                eventId: payload.eventId,
+                operation: payload.operationType
+            });
+            throw error;
+        }
+    }
+
+    public async emitBulkOperationComplete(payload: {
+        eventId: string;
+        operationType: 'status_update' | 'delete' | 'move';
+        summary: {
+            requested: number;
+            completed: number;
+            failed: number;
+            skipped: number;
+            duration: number; // in milliseconds
+        };
+        newStatus?: string;
+        updatedBy: {
+            id: string;
+            name: string;
+            type: string;
+        };
+        timestamp: Date;
+    }): Promise<void> {
+        try {
+            const eventId = payload.eventId;
+            const adminRoom = `admin_${eventId}`;
+            const guestRoom = `guest_${eventId}`;
+
+            const completionPayload = {
+                type: 'bulk_operation_complete',
+                ...payload,
+                timestamp: payload.timestamp.toISOString(),
+                success: payload.summary.completed > 0,
+                successRate: payload.summary.requested > 0
+                    ? Math.round((payload.summary.completed / payload.summary.requested) * 100)
+                    : 0
+            };
+
+            // Emit to admin room
+            this.io.to(adminRoom).emit('bulk_operation_complete', completionPayload);
+
+            // Emit to guest room (simplified)
+            this.io.to(guestRoom).emit('bulk_operation_complete', {
+                type: 'bulk_operation_complete',
+                eventId,
+                operationType: payload.operationType,
+                summary: {
+                    completed: payload.summary.completed,
+                    total: payload.summary.requested
+                },
+                success: completionPayload.success,
+                timestamp: completionPayload.timestamp
+            });
+
+            logger.info(`🏁 Bulk operation completed: ${eventId} - ${payload.operationType}`, {
+                summary: payload.summary,
+                duration: `${payload.summary.duration}ms`,
+                successRate: completionPayload.successRate + '%'
+            });
+
+        } catch (error: any) {
+            logger.error('❌ Failed to emit bulk operation complete:', {
+                error: error.message,
+                eventId: payload.eventId,
+                operation: payload.operationType
+            });
+            throw error;
+        }
+    }
+
+    // EXISTING methods (unchanged)
     public getSubscriptionCounts(): Record<string, number> {
         const counts: Record<string, number> = {};
 
@@ -391,7 +799,8 @@ class SimpleWebSocketService {
             activeEvents: this.eventSubscriptions.size,
             averageSubscriptionsPerClient: baseStats.totalConnections > 0
                 ? totalSubs / baseStats.totalConnections
-                : 0
+                : 0,
+            activeBulkOperations: this.activeBulkOperations.size // NEW
         };
     }
 
@@ -411,6 +820,26 @@ class SimpleWebSocketService {
         return Array.from(this.clientSubscriptions.get(socketId) || []);
     }
 
+    // NEW: Get active bulk operations
+    public getActiveBulkOperations(): Array<{
+        operationId: string;
+        operationType: string;
+        startTime: Date;
+        totalItems: number;
+        userId: string;
+        duration: number;
+    }> {
+        const operations: any[] = [];
+        this.activeBulkOperations.forEach((operation, operationId) => {
+            operations.push({
+                operationId,
+                ...operation,
+                duration: Date.now() - operation.startTime.getTime()
+            });
+        });
+        return operations;
+    }
+
     public async cleanup(): Promise<void> {
         logger.info('🧹 Cleaning up WebSocket service...');
 
@@ -426,6 +855,7 @@ class SimpleWebSocketService {
         this.connectedClients.clear();
         this.eventSubscriptions.clear();
         this.clientSubscriptions.clear();
+        this.activeBulkOperations.clear(); // NEW
         logger.info('✅ WebSocket service cleaned up');
     }
 }

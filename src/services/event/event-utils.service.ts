@@ -16,6 +16,7 @@ import type {
     VisibilityTransitionResult,
     StylingConfig
 } from './event.types';
+import { EventParticipant } from "@models/event-participants.model";
 
 export const generateUniqueSlug = async (baseSlug: string): Promise<string> => {
     let slug = baseSlug;
@@ -212,7 +213,7 @@ export const processStylingData = (stylingData: any): StylingConfig => {
         navigation,
         language
     };
-};  
+};
 
 export const processPermissionsData = (permissionsData: any): PermissionsData => {
     if (!permissionsData || typeof permissionsData !== 'object') {
@@ -302,37 +303,61 @@ export const addCreatorAsParticipant = async (
     session?: mongoose.ClientSession
 ): Promise<void> => {
     try {
-        await Event.updateOne(
-            { _id: new mongoose.Types.ObjectId(eventId) },
-            { $inc: { 'stats.participants': 1 } },
-            { session }
-        );
+        // This function is now redundant since createEventService handles it
+        // But keeping for backward compatibility
+        const participant = await EventParticipant.findOne({
+            user_id: new mongoose.Types.ObjectId(userId),
+            event_id: new mongoose.Types.ObjectId(eventId),
+            role: 'creator'
+        }).session(session);
+
+        if (!participant) {
+            // Create participant if not exists
+            await EventParticipant.create([{
+                user_id: new mongoose.Types.ObjectId(userId),
+                event_id: new mongoose.Types.ObjectId(eventId),
+                role: 'creator',
+                join_method: 'created_event',
+                status: 'active',
+                joined_at: new Date(),
+                last_activity_at: new Date()
+            }], { session });
+
+            // Update event stats
+            await Event.updateOne(
+                { _id: new mongoose.Types.ObjectId(eventId) },
+                {
+                    $inc: {
+                        'stats.total_participants': 1,
+                        'stats.creators_count': 1
+                    }
+                },
+                { session }
+            );
+        }
     } catch (error) {
         logger.error(`[addCreatorAsParticipant] Error: ${error.message}`);
         throw error;
     }
 };
 
-export const checkUpdatePermission = async (eventId: string, userId: string): Promise<boolean> => {
+export const checkUpdatePermission = async (
+    eventId: string,
+    userId: string
+): Promise<boolean> => {
     try {
-        const event = await Event.findById(eventId);
+        const participant = await EventParticipant.findOne({
+            user_id: new mongoose.Types.ObjectId(userId),
+            event_id: new mongoose.Types.ObjectId(eventId),
+            status: 'active'
+        });
 
-        if (!event) {
+        if (!participant) {
             return false;
         }
 
-        // Check if user is the event owner
-        if (event.created_by && event.created_by.toString() === userId) {
-            return true;
-        }
-
-        // Check if user is an approved co-host
-        const isCoHost = event.co_hosts.some(coHost =>
-            coHost.user_id.toString() === userId &&
-            coHost.status === 'approved'
-        );
-
-        return isCoHost;
+        // Check if user has edit permissions based on their role and permissions
+        return participant.permissions?.can_edit_event === true;
     } catch (error) {
         logger.error('Error checking update permission:', error);
         return false;
@@ -432,3 +457,57 @@ export const handleVisibilityTransition = async (
 
     return result;
 };
+
+// export const getUserEventRole = async (
+//     userId: string,
+//     eventId: string
+// ): Promise<{
+//     role?: string;
+//     permissions?: any;
+//     status?: string;
+//     participant?: any;
+// } | null> => {
+//     try {
+//         const participant = await EventParticipant.findOne({
+//             user_id: new mongoose.Types.ObjectId(userId),
+//             event_id: new mongoose.Types.ObjectId(eventId),
+//             status: 'active'
+//         });
+
+//         if (!participant) {
+//             return null;
+//         }
+
+//         return {
+//             role: participant.role,
+//             permissions: participant.effective_permissions, // Use virtual field
+//             status: participant.status,
+//             participant: participant
+//         };
+//     } catch (error) {
+//         logger.error('Error getting user event role:', error);
+//         return null;
+//     }
+// };
+
+// /**
+//  * NEW: Check if user has specific permission for an event
+//  */
+// export const checkEventPermission = async (
+//     userId: string,
+//     eventId: string,
+//     permission: string
+// ): Promise<boolean> => {
+//     try {
+//         const roleInfo = await getUserEventRole(userId, eventId);
+
+//         if (!roleInfo || !roleInfo.permissions) {
+//             return false;
+//         }
+
+//         return roleInfo.permissions[permission] === true;
+//     } catch (error) {
+//         logger.error('Error checking event permission:', error);
+//         return false;
+//     }
+// };

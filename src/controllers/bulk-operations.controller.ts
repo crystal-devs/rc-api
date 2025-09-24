@@ -4,11 +4,12 @@ import mongoose from 'mongoose';
 import { logger } from '@utils/logger';
 import { injectedRequest } from "types/injected-types";
 import { bulkUpdateMediaStatusService } from '@services/media';
+import { getWebSocketService } from '@services/websocket/websocket.service';
 
 export class BulkOperationsController {
 
     /**
-     * Bulk update media status
+     * Bulk update media status with WebSocket support
      */
     static bulkUpdateMediaStatus: RequestHandler = async (
         req: injectedRequest,
@@ -18,6 +19,7 @@ export class BulkOperationsController {
         try {
             const { event_id } = req.params;
             const userId = req.user._id.toString();
+            const userName = req.user.name || 'Admin'; // Get user name from request
             const { media_ids, status, reason, hide_reason } = req.body;
 
             // Validate event_id
@@ -102,14 +104,46 @@ export class BulkOperationsController {
                 hideReason: hide_reason
             });
 
+            // Send HTTP response first
+            res.status(response.code).json(response);
+
+            // Handle WebSocket updates asynchronously (non-blocking)
+            if (response.status && response.data) {
+                // Use setImmediate to ensure this runs after HTTP response is sent
+                setImmediate(async () => {
+                    try {
+                        await BulkOperationsController.broadcastBulkStatusUpdate({
+                            eventId: event_id,
+                            mediaIds: media_ids,
+                            newStatus: status,
+                            updatedBy: {
+                                id: userId,
+                                name: userName,
+                                type: 'admin' // Could be dynamic based on user role
+                            },
+                            reason,
+                            hideReason: hide_reason,
+                            updateResult: response.data,
+                            timestamp: new Date()
+                        });
+                    } catch (wsError: any) {
+                        logger.error('❌ Bulk WebSocket broadcast failed:', {
+                            error: wsError.message,
+                            eventId: event_id,
+                            mediaCount: media_ids.length,
+                            operation: 'bulk_websocket_broadcast'
+                        });
+                        // Don't fail the main operation if WebSocket fails
+                    }
+                });
+            }
+
             logger.info('Bulk media status update completed:', {
                 success: response.status,
                 modifiedCount: response.data?.modifiedCount,
                 requestedCount: response.data?.requestedCount,
                 operation: 'bulk_status_update'
             });
-
-            res.status(response.code).json(response);
 
         } catch (error: any) {
             logger.error('Error in bulkUpdateMediaStatus:', {
@@ -134,7 +168,127 @@ export class BulkOperationsController {
     };
 
     /**
-     * Bulk approve media - convenience endpoint
+     * Broadcast bulk status update via WebSocket
+     * Handles the WebSocket communication efficiently for bulk operations
+     */
+    private static async broadcastBulkStatusUpdate(params: {
+        eventId: string;
+        mediaIds: string[];
+        newStatus: string;
+        updatedBy: {
+            id: string;
+            name: string;
+            type: string;
+        };
+        reason?: string;
+        hideReason?: string;
+        updateResult: any;
+        timestamp: Date;
+    }): Promise<void> {
+        try {
+            const webSocketService = getWebSocketService();
+            const { 
+                eventId, 
+                mediaIds, 
+                newStatus, 
+                updatedBy, 
+                reason, 
+                hideReason, 
+                updateResult, 
+                timestamp 
+            } = params;
+
+            // Create bulk status update payload matching the enhanced service interface
+            const bulkStatusUpdatePayload = {
+                type: 'bulk_status_update' as const,
+                eventId,
+                operation: {
+                    mediaIds,
+                    newStatus,
+                    previousStatus: updateResult.previousStatus || 'mixed', // Could be mixed statuses
+                    updatedBy,
+                    reason,
+                    hideReason,
+                    timestamp,
+                    summary: {
+                        totalRequested: mediaIds.length,
+                        totalModified: updateResult.modifiedCount || 0,
+                        totalFailed: (mediaIds.length - (updateResult.modifiedCount || 0)),
+                        success: updateResult.modifiedCount > 0
+                    }
+                }
+            };
+
+            // Performance optimization: Use batched emission for large updates
+            if (mediaIds.length > 20) {
+                // For large bulk operations, send summary first
+                await webSocketService.emitBulkStatusUpdate(bulkStatusUpdatePayload);
+                
+                // Then send individual updates in batches to avoid overwhelming clients
+                const batchSize = 10;
+                const batches = [];
+                
+                for (let i = 0; i < mediaIds.length; i += batchSize) {
+                    batches.push(mediaIds.slice(i, i + batchSize));
+                }
+
+                // Process batches with small delays to prevent overwhelming
+                for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+                    const batch = batches[batchIndex];
+                    const batchPayload = {
+                        type: 'bulk_status_batch' as const,
+                        eventId,
+                        batchIndex,
+                        totalBatches: batches.length,
+                        mediaIds: batch,
+                        newStatus,
+                        updatedBy,
+                        timestamp: new Date()
+                    };
+
+                    await webSocketService.emitBulkStatusBatch(batchPayload);
+                    
+                    // Small delay between batches (only for very large operations)
+                    if (batchIndex < batches.length - 1 && mediaIds.length > 50) {
+                        await new Promise(resolve => setTimeout(resolve, 10));
+                    }
+                }
+            } else {
+                // For smaller bulk operations, send all at once
+                await webSocketService.emitBulkStatusUpdate(bulkStatusUpdatePayload);
+                
+                // Also send individual updates for better granular UI updates
+                const individualUpdates = mediaIds.map(mediaId => ({
+                    type: 'status_update' as const,
+                    mediaId,
+                    eventId,
+                    newStatus,
+                    previousStatus: 'unknown', // We don't track individual previous statuses in bulk
+                    updatedBy,
+                    timestamp,
+                    bulkOperation: true
+                }));
+
+                await webSocketService.emitBulkIndividualUpdates(individualUpdates);
+            }
+
+            logger.info('✅ Bulk status update broadcasted via WebSocket:', {
+                eventId,
+                mediaCount: mediaIds.length,
+                status: newStatus,
+                modifiedCount: updateResult.modifiedCount,
+                by: updatedBy.name,
+                operation: 'bulk_websocket_broadcast'
+            });
+
+        } catch (error: any) {
+            // Re-throw to be caught by caller
+            throw new Error(`WebSocket broadcast failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Bulk approve media - convenience endpoint with WebSocket
      */
     static bulkApproveMedia: RequestHandler = async (
         req: injectedRequest,
@@ -146,7 +300,7 @@ export class BulkOperationsController {
     };
 
     /**
-     * Bulk reject media - convenience endpoint
+     * Bulk reject media - convenience endpoint with WebSocket
      */
     static bulkRejectMedia: RequestHandler = async (
         req: injectedRequest,
@@ -158,7 +312,7 @@ export class BulkOperationsController {
     };
 
     /**
-     * Bulk hide media - convenience endpoint
+     * Bulk hide media - convenience endpoint with WebSocket
      */
     static bulkHideMedia: RequestHandler = async (
         req: injectedRequest,
@@ -180,6 +334,7 @@ export class BulkOperationsController {
         try {
             const { event_id } = req.params;
             const userId = req.user._id.toString();
+            const userName = req.user.name || 'Admin';
             const { media_ids, reason } = req.body;
 
             // Validate inputs (similar to status update)
@@ -237,6 +392,8 @@ export class BulkOperationsController {
                 error: { message: 'This feature will be available in a future update' },
                 other: null
             });
+
+            // When implemented, add WebSocket broadcast here similar to bulk status update
 
         } catch (error: any) {
             logger.error('Error in bulkDeleteMedia:', {
@@ -336,6 +493,7 @@ export class BulkOperationsController {
                 timestamp: new Date().toISOString(),
                 checks: {
                     database: 'connected',
+                    websocket: 'active',
                     rateLimit: 'active',
                     authentication: 'enabled'
                 }

@@ -5,21 +5,36 @@ import mongoose from "mongoose";
 import { sendResponse } from "@utils/express.util";
 import { logger } from "@utils/logger";
 import { Event } from "@models/event.model";
+import { EventParticipant } from "@models/event-participants.model";
 
 // Clean role types
-export type EventRole = 'owner' | 'co_host' | 'guest' | 'authenticated_guest';
+export type EventRole = 'creator' | 'co_host' | 'moderator' | 'guest' | 'viewer' | 'authenticated_guest';
 
-// Clean event access interface
+// FIXED: Updated EventAccess interface to match actual usage
 export interface EventAccess {
     eventId: string;
     role: EventRole;
+    participantId?: string; // Made optional since token access won't have this
     canView: boolean;
+    canUpload: boolean;
+    canDownload: boolean;
     canEdit: boolean;
     canDelete: boolean;
+    canManageParticipants: boolean;
+    canInviteOthers: boolean;
+    canModerateContent: boolean;
+    canApproveContent: boolean;
+    canExportData: boolean;
+    canManageSettings: boolean;
+    canViewAnalytics: boolean;
+    canTransferOwnership: boolean;
+    // Legacy aliases
     canManageGuests: boolean;
     canManageContent: boolean;
-    canUpload?: boolean;
-    canDownload?: boolean;
+    // Context - made optional for token access
+    joinMethod?: string;
+    joinedAt?: Date;
+    lastActivity?: Date;
 }
 
 /**
@@ -83,44 +98,89 @@ export const eventAccessMiddleware = async (
 
         console.log(`✅ [eventAccessMiddleware] Event found: ${event.title}`);
         console.log(`🔍 [eventAccessMiddleware] Event created_by: ${event.created_by.toString()}`);
-        console.log(`🔍 [eventAccessMiddleware] Co-hosts count: ${event.co_hosts ? event.co_hosts.length : 0}`);
 
-        // Determine user role in the event
-        const userRole = getUserRoleInEvent(event, userId);
+        // Get user's participant record
+        const participant = await EventParticipant.findOne({
+            user_id: new mongoose.Types.ObjectId(userId),
+            event_id: new mongoose.Types.ObjectId(event_id),
+            status: 'active'
+        }).lean();
 
-        if (!userRole) {
-            console.log(`❌ [eventAccessMiddleware] FINAL DENIAL: No role found for user ${userId} in event ${event_id}`);
+        console.log(`🔍 [eventAccessMiddleware] Participant record:`, participant ? {
+            role: participant.role,
+            status: participant.status,
+            permissions: participant.permissions
+        } : 'Not found');
+
+        // Check if user has access to this event
+        if (!participant) {
+            console.log(`❌ [eventAccessMiddleware] FINAL DENIAL: No active participant record found for user ${userId} in event ${event_id}`);
             console.log(`❌ [eventAccessMiddleware] Event owner: ${event.created_by.toString()}`);
             console.log(`❌ [eventAccessMiddleware] User ID: ${userId}`);
-            console.log(`❌ [eventAccessMiddleware] Co-hosts: ${JSON.stringify(event.co_hosts, null, 2)}`);
 
             return sendResponse(res, {
                 status: false,
                 code: 403,
                 message: "You don't have access to this event",
                 data: null,
-                error: { message: "Access denied" },
+                error: { message: "Access denied - not an active participant" },
                 other: null
             });
         }
 
-        // Get user permission details if they are a co-host
-        const userPermission = getUserPermissionDetails(event, userId);
+        // FIXED: Proper type handling for permissions
+        const effectivePermissions = participant.permissions || {};
 
-        // Add event access info to request
+        console.log(`🔍 [eventAccessMiddleware] Effective permissions:`, effectivePermissions);
+
+        // FIXED: Proper boolean conversion and type safety
         req.eventAccess = {
             eventId: event_id,
-            role: userRole,
-            canView: true,
-            canEdit: ['owner', 'co_host'].includes(userRole),
-            canDelete: userRole === 'owner',
-            canManageGuests: ['owner', 'co_host'].includes(userRole) && 
-                (!userPermission?.permissions || userPermission.permissions.manage_guests !== false),
-            canManageContent: ['owner', 'co_host'].includes(userRole) && 
-                (!userPermission?.permissions || userPermission.permissions.manage_content !== false)
-        };
+            role: participant.role as EventRole,
+            participantId: participant._id?.toString() || "",
 
-        console.log(`✅ [eventAccessMiddleware] ACCESS GRANTED: User ${userId} has role ${userRole} in event ${event_id}`);
+            // Basic access permissions - ensure boolean values
+            canView: Boolean(effectivePermissions.can_view),
+            canUpload: Boolean(effectivePermissions.can_upload),
+            canDownload: Boolean(effectivePermissions.can_download),
+
+            // Management permissions
+            canEdit: Boolean(effectivePermissions.can_edit_event),
+            canDelete: Boolean(effectivePermissions.can_delete_event),
+            canManageParticipants: Boolean(effectivePermissions.can_manage_participants),
+            canInviteOthers: Boolean(effectivePermissions.can_invite_others),
+
+            // Content permissions
+            canModerateContent: Boolean(effectivePermissions.can_moderate_content),
+            canApproveContent: Boolean(effectivePermissions.can_approve_content),
+            canExportData: Boolean(effectivePermissions.can_export_data),
+
+            // Settings and analytics
+            canManageSettings: Boolean(effectivePermissions.can_manage_settings),
+            canViewAnalytics: Boolean(effectivePermissions.can_view_analytics),
+            canTransferOwnership: Boolean(effectivePermissions.can_transfer_ownership),
+
+            // Legacy aliases for backward compatibility
+            canManageGuests: Boolean(effectivePermissions.can_manage_participants),
+            canManageContent: Boolean(effectivePermissions.can_moderate_content),
+
+            // FIXED: Proper date handling
+            joinMethod: typeof participant.join_method === 'string' ? participant.join_method : undefined,
+            joinedAt: participant.joined_at && typeof participant.joined_at === 'string'
+                ? new Date(participant.joined_at)
+                : participant.joined_at && typeof participant.joined_at === 'number'
+                    ? new Date(participant.joined_at)
+                    : participant.joined_at && participant.joined_at instanceof Date
+                        ? participant.joined_at
+                        : new Date(),
+            lastActivity: participant.last_activity_at && typeof participant.last_activity_at === 'string'
+                ? new Date(participant.last_activity_at)
+                : participant.last_activity_at && typeof participant.last_activity_at === 'number'
+                    ? new Date(participant.last_activity_at)
+                    : participant.last_activity_at && participant.last_activity_at instanceof Date
+                        ? participant.last_activity_at
+                        : new Date()
+        }
         next();
     } catch (error: any) {
         console.error(`💥 [eventAccessMiddleware] Error: ${error.message}`);
@@ -185,7 +245,7 @@ export const tokenAccessMiddleware = async (
 
         // Find event by share_token
         const event = await Event.findOne({ share_token: token_id })
-            .select('_id title visibility share_settings permissions created_by co_hosts')
+            .select('_id title visibility share_settings permissions created_by')
             .lean();
 
         if (!event) {
@@ -218,7 +278,7 @@ export const tokenAccessMiddleware = async (
         const userId = req.user?._id?.toString();
 
         console.log(`🔍 [tokenAccessMiddleware] Processing token ${token_id}`);
-        console.log(`🔍 [tokenAccessMiddleware] User authenticated: ${!!userId}`,  req.headers);
+        console.log(`🔍 [tokenAccessMiddleware] User authenticated: ${!!userId}`);
         console.log(`🔍 [tokenAccessMiddleware] Event visibility: ${event.visibility}`);
 
         // Handle visibility-based access with optional user
@@ -302,6 +362,7 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
     console.log(`🔍 [handleEventVisibility] Processing visibility: ${event.visibility}`);
     console.log(`🔍 [handleEventVisibility] User ID: ${userId || 'none'}`);
 
+    // FIXED: Complete EventAccess objects with all required properties
     switch (event.visibility) {
         case 'anyone_with_link':
             console.log('✅ [handleEventVisibility] Public access granted');
@@ -309,14 +370,22 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                 success: true,
                 eventAccess: {
                     eventId,
-                    role: 'guest',
+                    role: 'guest' as EventRole,
                     canView: true,
+                    canUpload: Boolean(event.permissions?.can_upload),
+                    canDownload: Boolean(event.permissions?.can_download),
                     canEdit: false,
                     canDelete: false,
+                    canManageParticipants: false,
+                    canInviteOthers: false,
+                    canModerateContent: false,
+                    canApproveContent: false,
+                    canExportData: false,
+                    canManageSettings: false,
+                    canViewAnalytics: false,
+                    canTransferOwnership: false,
                     canManageGuests: false,
                     canManageContent: false,
-                    canUpload: event.permissions?.can_upload || false,
-                    canDownload: event.permissions?.can_download || false,
                 }
             };
 
@@ -341,14 +410,22 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                 success: true,
                 eventAccess: {
                     eventId,
-                    role: 'authenticated_guest',
+                    role: 'authenticated_guest' as EventRole,
                     canView: true,
+                    canUpload: Boolean(event.permissions?.can_upload),
+                    canDownload: Boolean(event.permissions?.can_download),
                     canEdit: false,
                     canDelete: false,
+                    canManageParticipants: false,
+                    canInviteOthers: false,
+                    canModerateContent: false,
+                    canApproveContent: false,
+                    canExportData: false,
+                    canManageSettings: false,
+                    canViewAnalytics: false,
+                    canTransferOwnership: false,
                     canManageGuests: false,
                     canManageContent: false,
-                    canUpload: event.permissions?.can_upload || false,
-                    canDownload: event.permissions?.can_download || false,
                 }
             };
 
@@ -368,9 +445,18 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                 };
             }
 
-            // Check if user has access to private event
-            const userRole = getUserRoleInEvent(event, userId);
-            if (!userRole || !(['owner', 'co_host'] as EventRole[]).includes(userRole)) {
+            // For private events, check via EventParticipant model
+            const participant = await EventParticipant.findOne({
+                user_id: new mongoose.Types.ObjectId(userId),
+                event_id: new mongoose.Types.ObjectId(eventId),
+                status: 'active'
+            }).lean();
+
+            if (
+                !participant ||
+                typeof participant.role !== 'string' ||
+                !['creator', 'co_host'].includes(participant.role)
+            ) {
                 console.log(`❌ [handleEventVisibility] Private event - access denied for user ${userId}`);
                 return {
                     success: false,
@@ -385,19 +471,36 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                 };
             }
 
-            console.log(`✅ [handleEventVisibility] Private event access granted - role: ${userRole}`);
+            console.log(`✅ [handleEventVisibility] Private event access granted - role: ${participant.role}`);
             return {
                 success: true,
                 eventAccess: {
                     eventId,
-                    role: userRole,
+                    role: participant.role as EventRole,
+                    participantId: participant._id?.toString(),
                     canView: true,
-                    canEdit: true,
-                    canDelete: userRole === 'owner',
-                    canManageGuests: true,
-                    canManageContent: true,
                     canUpload: true,
                     canDownload: true,
+                    canEdit: Boolean(participant.permissions?.can_edit_event),
+                    canDelete: Boolean(participant.permissions?.can_delete_event),
+                    canManageParticipants: Boolean(participant.permissions?.can_manage_participants),
+                    canInviteOthers: Boolean(participant.permissions?.can_invite_others),
+                    canModerateContent: Boolean(participant.permissions?.can_moderate_content),
+                    canApproveContent: Boolean(participant.permissions?.can_approve_content),
+                    canExportData: Boolean(participant.permissions?.can_export_data),
+                    canManageSettings: Boolean(participant.permissions?.can_manage_settings),
+                    canViewAnalytics: Boolean(participant.permissions?.can_view_analytics),
+                    canTransferOwnership: Boolean(participant.permissions?.can_transfer_ownership),
+                    canManageGuests: Boolean(participant.permissions?.can_manage_participants),
+                    canManageContent: Boolean(participant.permissions?.can_moderate_content),
+                    joinMethod: typeof participant.join_method === 'string' ? participant.join_method : undefined,
+                    joinedAt: participant.joined_at && typeof participant.joined_at === 'string'
+                        ? new Date(participant.joined_at)
+                        : undefined,
+                    lastActivity: participant.last_activity_at && typeof participant.last_activity_at === 'string'
+                        ? new Date(participant.last_activity_at)
+                        : undefined,
+
                 }
             };
 
@@ -415,49 +518,6 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                 }
             };
     }
-}
-
-function getUserRoleInEvent(event: any, userId: string): EventRole | null {
-    // Check if user is the event creator
-    if (event.created_by && event.created_by.toString() === userId) {
-        return 'owner';
-    }
-
-    // Check if user is an approved co-host
-    if (event.co_hosts && event.co_hosts.length > 0) {
-        const coHost = event.co_hosts.find(
-            (coHost: any) => coHost.user_id.toString() === userId && coHost.status === 'approved'
-        );
-        if (coHost) return 'co_host';
-    }
-
-    return null;
-}
-
-function getUserPermissionDetails(event: any, userId: string): any {
-    // If user is owner, they have all permissions
-    if (event.created_by && event.created_by.toString() === userId) {
-        return {
-            permissions: {
-                manage_guests: true,
-                manage_content: true,
-                manage_settings: true,
-                approve_content: true
-            }
-        };
-    }
-
-    // Check if user is a co-host and get their specific permissions
-    if (event.co_hosts && event.co_hosts.length > 0) {
-        const coHost = event.co_hosts.find(
-            (coHost: any) => coHost.user_id.toString() === userId && coHost.status === 'approved'
-        );
-        if (coHost) {
-            return coHost;
-        }
-    }
-
-    return null;
 }
 
 // Update your injectedRequest type

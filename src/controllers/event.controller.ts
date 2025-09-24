@@ -127,7 +127,6 @@ export const createEventController = async (req: injectedRequest, res: Response,
             try {
                 await Promise.all([
                     createDefaultAlbumForEvent(response.data._id.toString(), req.user._id.toString()),
-                    addCreatorAsParticipant(response.data._id.toString(), req.user._id.toString()),
                 ]);
             } catch (albumError) {
                 console.error('Error creating default album:', albumError);
@@ -260,8 +259,8 @@ export const updateEventController = async (req: injectedRequest, res: Response,
         ];
 
         // Process and validate update data
-        const processedUpdateData = await processEventUpdateData(updateData, fieldsToProcess);
-
+        const currentEvent = await Event.findById(event_id);
+        const processedUpdateData = await processEventUpdateData(updateData, currentEvent);
         const response = await updateEventService(event_id, processedUpdateData, userId);
 
         if (response.status) {

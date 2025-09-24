@@ -7,6 +7,8 @@ import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
 import { Event } from '@models/event.model';
 import type { AuthData, WebSocketUser, ClientConnectionState } from '../websocket.types';
+import { EventParticipant } from '@models/event-participants.model';
+import mongoose from 'mongoose';
 
 export const authenticateConnection = async (
     socket: Socket,
@@ -219,40 +221,39 @@ export const handleUnsubscription = async (
 };
 
 // Helper function to validate admin/co-host access to event
-const validateAdminEventAccess = async (userId: string, eventId: string): Promise<boolean> => {
+export const validateAdminEventAccess = async (
+    userId: string,
+    eventId: string
+): Promise<boolean> => {
     try {
-        logger.info(`🔍 Validating admin access: userId=${userId}, eventId=${eventId}`);
+        logger.info(`Validating admin access: userId=${userId}, eventId=${eventId}`);
 
-        const event = await Event.findById(eventId)
-            .populate('created_by', '_id')
-            .populate('co_hosts.user_id', '_id');
+        const participant = await EventParticipant.findOne({
+            user_id: new mongoose.Types.ObjectId(userId),
+            event_id: new mongoose.Types.ObjectId(eventId),
+            status: 'active'
+        });
 
-        if (!event) {
-            logger.warn(`❌ Event not found: ${eventId}`);
+        if (!participant) {
+            logger.warn(`User ${userId} is not a participant in event ${eventId}`);
             return false;
         }
 
-        // Check if user is event creator
-        if (event.created_by._id.toString() === userId) {
-            logger.info(`✅ User ${userId} is creator of event ${eventId}`);
+        // Check if user has admin-level permissions
+        const hasAdminAccess = participant.role === 'creator' ||
+            participant.role === 'co_host' ||
+            participant.permissions?.can_manage_participants === true;
+
+        if (hasAdminAccess) {
+            logger.info(`User ${userId} has admin access to event ${eventId} (role: ${participant.role})`);
             return true;
         }
 
-        // Check if user is approved co-host
-        const isCoHost = event.co_hosts.some((ch: any) =>
-            ch.user_id._id.toString() === userId && ch.status === 'approved'
-        );
-
-        if (isCoHost) {
-            logger.info(`✅ User ${userId} is co-host of event ${eventId}`);
-            return true;
-        }
-
-        logger.info(`❌ User ${userId} has no access to event ${eventId}`);
+        logger.info(`User ${userId} has no admin access to event ${eventId}`);
         return false;
 
-    } catch (error: any) {
-        logger.error(`❌ Admin access validation error:`, error);
+    } catch (error) {
+        logger.error(`Admin access validation error:`, error);
         return false;
     }
 };
