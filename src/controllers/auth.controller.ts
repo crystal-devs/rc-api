@@ -2,6 +2,8 @@ import { Request, Response, NextFunction, RequestHandler } from "express";
 import * as authService from "@services/auth.service"
 import { trimObject } from "@utils/sanitizers.util";
 import { loginService } from "@services/auth";
+import { createGuestSessionService } from "@services/auth/guest.service";
+import { sendResponse } from "@utils/express.util";
 
 export const loginController: RequestHandler = async (req, res, next) => {
     try {
@@ -41,6 +43,16 @@ export const verifyUserController: RequestHandler = async (req, res, next) => {
             message: "User verified successfully",
         });
         return // the user will be verified by the middleware
+    } catch (err) {
+        next(err);
+    }
+}
+
+
+export const createGuestSessionController = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const response = await createGuestSessionService()
+        sendResponse(res, response)
     } catch (err) {
         next(err);
     }

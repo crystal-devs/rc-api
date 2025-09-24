@@ -19,7 +19,7 @@
     "dev": "cross-env NODE_ENV=development ts-node-dev --require tsconfig-paths/register src/index.ts",
     "build": "tsc && tsc-alias",
     "generate-test-data": "node scripts/generateTestData.js",
-    "start": "cross-env NODE_ENV=production node dist/index.js",
+    "start": "cross-env NODE_ENV=production node ./dist/index.js",
     "init-db": "node scripts/initializeDb.js"
   },
   "dependencies": {
@@ -48,6 +48,7 @@
     "sharp": "^0.34.3",
     "signale": "^1.4.0",
     "socket.io": "^4.8.1",
+    "uuid": "^13.0.0",
     "winston": "^3.17.0",
     "winston-mongodb": "^6.0.0"
   },

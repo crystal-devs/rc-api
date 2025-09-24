@@ -13,7 +13,7 @@ eventRouter.use(authMiddleware);
 
 // ============= CORE EVENT CRUD =============
 // Get user's events with advanced filtering
-eventRouter.get("/", eventController.getUserEventsController);
+eventRouter.get("/", authMiddleware, eventController.getUserEventsController);
 
 // Get specific event details
 eventRouter.get("/:event_id", eventAccessMiddleware, eventController.getEventController);

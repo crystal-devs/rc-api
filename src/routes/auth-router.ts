@@ -7,4 +7,6 @@ const authRouter = express.Router();
 authRouter.post("/login", authController.loginController);
 authRouter.get("/verify-clicky", authMiddleware, authController.verifyUserController);
 
+authRouter.post("/create-guest-session", authController.createGuestSessionController);
+
 export default authRouter;  
