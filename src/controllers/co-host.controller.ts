@@ -5,6 +5,7 @@ import * as cohostService from "@services/cohost.service";
 import { sendResponse } from "@utils/express.util";
 import mongoose from "mongoose";
 import { Event } from "@models/event.model";
+import { checkUpdatePermission } from "@services/event";
 
 export const generateCoHostInviteController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
@@ -22,7 +23,7 @@ export const generateCoHostInviteController = async (req: injectedRequest, res: 
             return;
         }
 
-        const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
+        const hasPermission = await checkUpdatePermission(event_id, userId);
         if (!hasPermission) {
             res.status(403).json({
                 status: false,
@@ -65,7 +66,7 @@ export const getCoHostInviteController = async (req: injectedRequest, res: Respo
             return;
         }
 
-        const hasPermission = await eventService.checkUpdatePermission(event_id, userId);
+        const hasPermission = await checkUpdatePermission(event_id, userId);
         if (!hasPermission) {
             res.status(403).json({
                 status: false,
@@ -170,7 +171,7 @@ export const manageCoHostController = async (req: injectedRequest, res: Response
             return;
         }
 
-        const hasPermission = await eventService.checkUpdatePermission(event_id, adminUserId);
+        const hasPermission = await checkUpdatePermission(event_id, adminUserId);
         if (!hasPermission) {
             res.status(403).json({
                 status: false,

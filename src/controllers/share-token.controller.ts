@@ -1,9 +1,8 @@
 import { Request, Response, NextFunction } from "express";
-import * as shareTokenService from "@services/share-token.service";
 import { sendResponse } from "@utils/express.util";
 import { trimObject } from "@utils/sanitizers.util";
-import mongoose from "mongoose";
 import { injectedRequest } from "types/injected-types";
+import { getShareTokenDetailsService } from "@services/event";
 
 export const getShareTokenDetailsController = async (
     req: injectedRequest,
@@ -19,7 +18,7 @@ export const getShareTokenDetailsController = async (
             throw new Error('Valid token ID is required');
         }
 
-        const response = await shareTokenService.getShareTokenDetailsService({
+        const response = await getShareTokenDetailsService({
             tokenId: token_id,
             requesterId: req.user?._id?.toString(),
         });

@@ -1,453 +1,329 @@
-// controllers/media.controller.ts
+// controllers/media.controller.ts - Cleaned up and improved
 
-import { getOrCreateDefaultAlbum } from "@services/album.service";
-import { uploadMediaService, uploadCoverImageService, getMediaByEventService, getMediaByAlbumService, deleteMediaService, updateMediaStatusService, bulkUpdateMediaStatusService, getGuestMediaService } from "@services/media.service";
-import { sendResponse } from "@utils/express.util";
-import { NextFunction, RequestHandler, Response } from "express";
-import { injectedRequest } from "types/injected-types";
+import { Request, Response, NextFunction, RequestHandler } from "express";
 import mongoose from "mongoose";
+import { logger } from "@utils/logger";
+import { sendResponse } from "@utils/express.util";
 import { Event } from "@models/event.model";
 import { Media } from "@models/media.model";
-import guestMediaUploadService from "@services/guest.service";
+import { bytesToMB, cleanupFile, getOptimizedImageUrlForItem } from "@utils/file.util";
+import { mediaNotificationService } from "@services/websocket/notifications";
+import { getWebSocketService } from "@services/websocket/websocket.service";
+import {
+    bulkUpdateMediaStatusService,
+    deleteMediaService,
+    getGuestMediaService,
+    getMediaByAlbumService,
+    getMediaByEventService,
+    MediaQueryOptions,
+    updateMediaStatusService,
+    uploadCoverImageService
+} from "@services/media";
+import { uploadGuestMedia } from "@services/guest";
 
-/**
- * Regular media upload controller
- */
-export const uploadMediaController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
-    try {
-        const file = req.file;
-        let { album_id, event_id } = req.body;
-        const user_id = req.user._id;
+// Enhanced interface for authenticated requests
+interface AuthenticatedRequest extends Request {
+    user?: {
+        _id: mongoose.Types.ObjectId | string;
+        role?: string;
+        subscription?: any;
+    };
+    sessionID?: string;
+}
 
-        console.log('Media upload request:', {
-            file: file ? `File present: ${file.originalname}` : 'No file',
-            album_id: album_id ? `Album ID: ${album_id}` : 'No album ID',
-            event_id: event_id ? `Event ID: ${event_id}` : 'No event ID',
-            user_id: user_id ? `User ID: ${user_id}` : 'No user ID',
-            body: JSON.stringify(req.body)
-        });
-        if (!file) {
-            res.status(400).json({
-                status: false,
-                message: "Missing file",
-                error: { message: "File is required" },
-            });
-            return;
-        }
-
-        if (!event_id) {
-            res.status(400).json({
-                status: false,
-                message: "Missing event_id",
-                error: { message: "event_id is required" },
-            });
-            return;
-        }
-
-        // If no album_id is provided, get or create a default album
-        if (!album_id) {
-            const defaultAlbumResponse = await getOrCreateDefaultAlbum(
-                event_id,
-                user_id.toString()
-            );
-
-            if (!defaultAlbumResponse.status || !defaultAlbumResponse.data) {
-                res.status(500).json({
-                    status: false,
-                    message: "Failed to get or create default album",
-                    error: { message: "Could not create or find default album" },
-                });
-                return;
-            }
-
-            album_id = defaultAlbumResponse.data._id.toString();
-        }
-
-        // Now proceed with the media upload
-        const response = await uploadMediaService(file, user_id.toString(), album_id, event_id);
-        sendResponse(res, response);
-    } catch (_err) {
-        next(_err);
-    }
-};
+// Interface for injected requests (with required user)
+interface InjectedRequest extends AuthenticatedRequest {
+    user: {
+        _id: mongoose.Types.ObjectId | string;
+        role?: string;
+        subscription?: any;
+    };
+}
 
 /**
  * Cover image upload controller
  */
-export const uploadCoverImageController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+export const uploadCoverImageController: RequestHandler = async (
+    req: InjectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
     try {
-        // Log the request for debugging
-        console.log('Cover image upload request:', {
-            file: req.file ? 'File present' : 'No file',
-            body: req.body
-        });
-
         const file = req.file;
-        // Get the folder parameter with 'covers' as default
         const { folder = 'covers' } = req.body;
 
         // Validate inputs
         if (!file) {
             res.status(400).json({
                 status: false,
-                message: "No file provided",
-                error: { message: "Image file is required" },
-            });
-            return;
-        }
-
-        // Upload cover image
-        const response = await uploadCoverImageService(file, folder);
-        sendResponse(res, response);
-    } catch (_err) {
-        console.error('Error in uploadCoverImageController:', _err);
-        next(_err);
-    }
-};
-
-/**
- * Get all media for a specific event
- */
-export const getMediaByEventController: RequestHandler = async (
-    req: injectedRequest,
-    res: Response,
-    next: NextFunction
-): Promise<void> => {
-    try {
-        const { event_id } = req.params;
-
-        // Validate event_id first
-        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
-            res.status(400).json({
-                status: false,
                 code: 400,
-                message: 'Invalid or missing event ID',
+                message: "No file provided",
                 data: null,
-                error: { message: 'A valid event ID is required' },
+                error: { message: "Image file is required" },
                 other: null
             });
             return;
         }
 
-        // Extract and validate query parameters
-        const {
-            include_processing,
-            include_pending,
-            page,
-            limit,
-            quality,
-            since,
-            // New parameters
-            status,
-            cursor,
-            scroll_type
-        } = req.query;
-
-        // Parse and validate query parameters with proper defaults
-        const options: {
-            includeProcessing?: boolean;
-            includePending?: boolean;
-            page?: number;
-            limit?: number;
-            quality?: 'thumbnail' | 'display' | 'full';
-            since?: string;
-            status?: 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved';
-            cursor?: string;
-            scrollType?: 'pagination' | 'infinite';
-        } = {};
-
-        // Handle boolean parameters - only set if explicitly provided
-        if (include_processing !== undefined) {
-            options.includeProcessing = include_processing === 'true';
-        }
-
-        if (include_pending !== undefined) {
-            options.includePending = include_pending === 'true';
-        }
-
-        // Handle scroll type parameter
-        if (scroll_type) {
-            const validScrollTypes = ['pagination', 'infinite'];
-            if (!validScrollTypes.includes(scroll_type as string)) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid scroll_type parameter',
-                    data: null,
-                    error: { message: 'scroll_type must be one of: pagination, infinite' },
-                    other: null
-                });
-                return;
-            }
-            options.scrollType = scroll_type as 'pagination' | 'infinite';
-        } else {
-            // Default to pagination for backward compatibility
-            options.scrollType = 'pagination';
-        }
-
-        // Handle status parameter for filtering
-        if (status) {
-            const validStatuses = ['approved', 'pending', 'rejected', 'hidden', 'auto_approved'];
-            if (!validStatuses.includes(status as string)) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid status parameter',
-                    data: null,
-                    error: {
-                        message: 'Status must be one of: approved, pending, rejected, hidden, auto_approved'
-                    },
-                    other: null
-                });
-                return;
-            }
-            options.status = status as 'approved' | 'pending' | 'rejected' | 'hidden' | 'auto_approved';
-        }
-
-        // Handle cursor parameter for infinite scroll
-        if (cursor) {
-            const cursorDate = new Date(cursor as string);
-            if (isNaN(cursorDate.getTime())) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid cursor format',
-                    data: null,
-                    error: { message: 'Cursor must be a valid ISO date string' },
-                    other: null
-                });
-                return;
-            }
-            options.cursor = cursor as string;
-        }
-
-        // Handle numeric parameters with validation
-        if (page && options.scrollType === 'pagination') {
-            const pageNum = parseInt(page as string, 10);
-            if (isNaN(pageNum) || pageNum < 1) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid page number',
-                    data: null,
-                    error: { message: 'Page must be a positive integer' },
-                    other: null
-                });
-                return;
-            }
-            options.page = pageNum;
-        }
-
-        if (limit) {
-            const limitNum = parseInt(limit as string, 10);
-            if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid limit',
-                    data: null,
-                    error: { message: 'Limit must be between 1 and 100' },
-                    other: null
-                });
-                return;
-            }
-            options.limit = limitNum;
-        }
-
-        // Handle quality parameter
-        if (quality) {
-            const validQualities = ['thumbnail', 'display', 'full'];
-            if (!validQualities.includes(quality as string)) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid quality parameter',
-                    data: null,
-                    error: { message: 'Quality must be one of: thumbnail, display, full' },
-                    other: null
-                });
-                return;
-            }
-            options.quality = quality as 'thumbnail' | 'display' | 'full';
-        }
-
-        // Handle since parameter
-        if (since) {
-            const sinceDate = new Date(since as string);
-            if (isNaN(sinceDate.getTime())) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid date format for since parameter',
-                    data: null,
-                    error: { message: 'Since parameter must be a valid ISO date string' },
-                    other: null
-                });
-                return;
-            }
-            options.since = since as string;
-        }
-
-        console.log('Controller: Fetching media for event:', {
-            event_id,
-            options,
+        logger.info('📸 Cover image upload started', {
+            filename: file.originalname,
+            size: file.size,
+            folder,
+            user_id: req.user._id.toString()
         });
 
-        // Call service
-        const response = await getMediaByEventService(event_id, options);
+        // Upload cover image
+        const response = await uploadCoverImageService(file, folder);
+        sendResponse(res, response);
+    } catch (error: any) {
+        logger.error('Error in uploadCoverImageController:', error);
+        next(error);
+    }
+};
 
-        console.log('Media fetched successfully:', {
-            dataCount: response.data?.length,
-            status: response.status,
-            scrollType: options.scrollType
+/**
+ * Get all media for a specific event with enhanced variant support
+ */
+export const getMediaByEventController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { eventId } = req.params;
+        const { page, limit, status, quality } = req.query;
+
+        if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid event ID',
+                data: null,
+                error: { message: 'A valid event ID is required' }
+            });
+            return;
+        }
+
+        const qualityValue = quality as string;
+        const validQualities: MediaQueryOptions['quality'][] = [
+            'display', 'small', 'medium', 'large', 'original', 'thumbnail', 'full'
+        ];
+        const validatedQuality: MediaQueryOptions['quality'] = validQualities.includes(qualityValue as any)
+            ? qualityValue as MediaQueryOptions['quality']
+            : 'display';
+
+        const options: MediaQueryOptions = {
+            page: parseInt(page as string) || 1,
+            limit: parseInt(limit as string) || 20,
+            status: status as string,
+            quality: validatedQuality
+        };
+
+        logger.info(`📱 Admin getting media for event ${eventId}`, {
+            userId: req.user?._id?.toString(),
+            options
         });
 
-        // Send response
+        const response = await getMediaByEventService(eventId, options);
         res.status(response.code).json(response);
 
-    } catch (err: any) {
-        console.error('Error in getMediaByEventController:', {
-            message: err.message,
-            stack: err.stack,
-            params: req.params,
-            query: req.query
-        });
-
+    } catch (error: any) {
+        logger.error('❌ Error in getMediaByEventController:', error);
         res.status(500).json({
             status: false,
             code: 500,
-            message: 'Internal server error',
+            message: 'Failed to get event media',
             data: null,
-            error: {
-                message: 'An unexpected error occurred',
-                details: process.env.NODE_ENV === 'development' ? err.message : undefined
-            },
-            other: null
+            error: { message: error.message }
         });
     }
 };
 
 /**
- * Get all media for a specific album
+ * Get media by album ID with enhanced variant support
  */
-export const getMediaByAlbumController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+export const getMediaByAlbumController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
     try {
-        const { album_id } = req.params;
+        const { albumId } = req.params;
+        const {
+            includeProcessing,
+            includePending,
+            page,
+            limit,
+            since,
+            status,
+            cursor,
+            scrollType,
+            quality,
+            format,
+            context
+        } = req.query;
 
-        // Validate album_id
-        if (!album_id || !mongoose.Types.ObjectId.isValid(album_id)) {
+        // Validate albumId
+        if (!albumId || !mongoose.Types.ObjectId.isValid(albumId)) {
             res.status(400).json({
                 status: false,
-                message: "Invalid album ID",
-                error: { message: "A valid album ID is required" },
+                code: 400,
+                message: 'Invalid album ID',
+                data: null,
+                error: { message: 'A valid album ID is required' },
+                other: null
             });
             return;
         }
 
-        // Fetch media for the album
-        const response = await getMediaByAlbumService(album_id);
-        sendResponse(res, response);
-    } catch (_err) {
-        console.error('Error in getMediaByAlbumController:', _err);
-        next(_err);
+        // Parse and validate options
+        const options = {
+            includeProcessing: includeProcessing === 'true',
+            includePending: includePending === 'true',
+            page: page ? parseInt(page as string) : undefined,
+            limit: limit ? parseInt(limit as string) : undefined,
+            since: since as string,
+            status: status as any,
+            cursor: cursor as string,
+            scrollType: scrollType as 'pagination' | 'infinite',
+            quality: quality as 'small' | 'medium' | 'large' | 'original' | 'thumbnail' | 'display' | 'full',
+            format: format as 'webp' | 'jpeg' | 'auto',
+            context: context as 'mobile' | 'desktop' | 'lightbox'
+        };
+
+        logger.info(`📁 Getting media for album ${albumId}`, {
+            user_id: req.user?._id?.toString(),
+            options
+        });
+
+        const userAgent = req.get('User-Agent');
+        const response = await getMediaByAlbumService(albumId, options, userAgent);
+
+        res.status(response.code).json(response);
+
+    } catch (error: any) {
+        logger.error('Error in getMediaByAlbumController:', error);
+        next(error);
     }
 };
 
+/**
+ * Update single media status
+ */
 export const updateMediaStatusController: RequestHandler = async (
-    req: injectedRequest,
+    req: AuthenticatedRequest,
     res: Response,
     next: NextFunction
 ): Promise<void> => {
     try {
         const { media_id } = req.params;
-        const userId = req.user?._id?.toString();
-        const { status, reason, hide_reason } = req.body;
+        const { status, reason } = req.body;
+        const userId = req.user?._id.toString();
+        const userName = 'Admin';
 
-        // Validate media_id
+        // Validate inputs
         if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
             res.status(400).json({
                 status: false,
                 code: 400,
-                message: 'Invalid or missing media ID',
+                message: 'Invalid media ID',
                 data: null,
-                error: { message: 'A valid media ID is required' },
-                other: null
+                error: { message: 'A valid media ID is required' }
             });
             return;
         }
 
-        // Validate required fields
         if (!status) {
             res.status(400).json({
                 status: false,
                 code: 400,
                 message: 'Status is required',
                 data: null,
-                error: { message: 'Status field is required in request body' },
-                other: null
+                error: { message: 'Status field is required' }
             });
             return;
         }
 
-        // Validate status value
+        // Updated valid statuses to match your system
         const validStatuses = ['approved', 'pending', 'rejected', 'hidden', 'auto_approved'];
         if (!validStatuses.includes(status)) {
             res.status(400).json({
                 status: false,
                 code: 400,
-                message: 'Invalid status value',
+                message: 'Invalid status',
                 data: null,
-                error: {
-                    message: 'Status must be one of: approved, pending, rejected, hidden, auto_approved'
-                },
-                other: null
+                error: { message: 'Status must be: approved, pending, rejected, hidden, auto_approved' }
             });
             return;
         }
 
-        // Validate reason for rejected status
-        // if (status === 'rejected' && !reason) {
-        //     res.status(400).json({
-        //         status: false,
-        //         code: 400,
-        //         message: 'Reason is required for rejected status',
-        //         data: null,
-        //         error: { message: 'Reason field is required when rejecting media' },
-        //         other: null
-        //     });
-        //     return;
-        // }
-
-        console.log('Controller: Updating media status:', {
+        logger.info('🔄 Updating media status:', {
             media_id,
             status,
             reason,
-            hide_reason,
-            userId
+            userId,
+            userName
         });
 
-        // Call service
+        // Update media status in database
         const response = await updateMediaStatusService(media_id, status, {
             adminId: userId,
-            reason,
-            hideReason: hide_reason
+            reason
         });
 
-        console.log('Media status updated:', {
-            success: response.status,
-            previousStatus: response.other?.previousStatus,
-            newStatus: response.other?.newStatus
-        });
-
-        // Send response
+        // Send HTTP response first
         res.status(response.code).json(response);
 
-    } catch (err: any) {
-        console.error('Error in updateMediaStatusController:', {
-            message: err.message,
-            stack: err.stack,
-            params: req.params,
-            body: req.body
+        // Then handle WebSocket updates (non-blocking)
+        if (response.status && response.data) {
+            try {
+                const webSocketService = getWebSocketService();
+
+                const statusUpdatePayload = {
+                    mediaId: media_id,
+                    eventId: response.data.event_id.toString(),
+                    previousStatus: response.other?.previousStatus || 'unknown',
+                    newStatus: status,
+                    updatedBy: {
+                        name: userName,
+                        type: 'admin' // You can determine this based on user role
+                    },
+                    timestamp: new Date(),
+                    mediaData: {
+                        url: response.data.url,
+                        thumbnail: response.data.thumbnail_url,
+                        filename: response.data.filename
+                    }
+                };
+
+                // Emit status update to appropriate rooms
+                webSocketService.emitStatusUpdate(statusUpdatePayload);
+
+                logger.info('✅ Status update broadcasted via WebSocket:', {
+                    mediaId: media_id,
+                    eventId: response.data.event_id,
+                    from: statusUpdatePayload.previousStatus,
+                    to: status,
+                    by: userName
+                });
+
+            } catch (wsError: any) {
+                logger.error('❌ WebSocket broadcast failed:', wsError.message);
+                // Don't fail the main operation if WebSocket fails
+            }
+        }
+
+        logger.info('✅ Media status updated:', {
+            mediaId: media_id,
+            success: response.status,
+            newStatus: status
+        });
+
+    } catch (error: any) {
+        logger.error('❌ Error in updateMediaStatusController:', {
+            error: error.message,
+            mediaId: req.params.media_id,
+            userId: req.user?._id?.toString()
         });
 
         res.status(500).json({
@@ -455,23 +331,22 @@ export const updateMediaStatusController: RequestHandler = async (
             code: 500,
             message: 'Internal server error',
             data: null,
-            error: {
-                message: 'An unexpected error occurred',
-                details: process.env.NODE_ENV === 'development' ? err.message : undefined
-            },
-            other: null
+            error: { message: 'Failed to update media status' }
         });
     }
 };
 
+/**
+ * Bulk update media status
+ */
 export const bulkUpdateMediaStatusController: RequestHandler = async (
-    req: injectedRequest,
+    req: InjectedRequest,
     res: Response,
     next: NextFunction
 ): Promise<void> => {
     try {
         const { event_id } = req.params;
-        const userId = req.user?._id?.toString();
+        const userId = req.user._id.toString();
         const { media_ids, status, reason, hide_reason } = req.body;
 
         // Validate event_id
@@ -541,7 +416,7 @@ export const bulkUpdateMediaStatusController: RequestHandler = async (
             return;
         }
 
-        console.log('Controller: Bulk updating media status:', {
+        logger.info('Bulk updating media status:', {
             event_id,
             mediaCount: media_ids.length,
             status,
@@ -555,19 +430,17 @@ export const bulkUpdateMediaStatusController: RequestHandler = async (
             hideReason: hide_reason
         });
 
-        console.log('Bulk media status update completed:', {
+        logger.info('Bulk media status update completed:', {
             success: response.status,
             modifiedCount: response.data?.modifiedCount,
             requestedCount: response.data?.requestedCount
         });
 
-        // Send response
         res.status(response.code).json(response);
 
-    } catch (err: any) {
-        console.error('Error in bulkUpdateMediaStatusController:', {
-            message: err.message,
-            stack: err.stack,
+    } catch (error: any) {
+        logger.error('Error in bulkUpdateMediaStatusController:', {
+            message: error.message,
             params: req.params,
             body: req.body
         });
@@ -579,22 +452,23 @@ export const bulkUpdateMediaStatusController: RequestHandler = async (
             data: null,
             error: {
                 message: 'An unexpected error occurred',
-                details: process.env.NODE_ENV === 'development' ? err.message : undefined
+                details: process.env.NODE_ENV === 'development' ? error.message : undefined
             },
             other: null
         });
     }
 };
 
-// Additional controller for getting media by ID (useful for status updates)
+/**
+ * Get media by ID
+ */
 export const getMediaByIdController: RequestHandler = async (
-    req: injectedRequest,
+    req: InjectedRequest,
     res: Response,
     next: NextFunction
 ): Promise<void> => {
     try {
         const { media_id } = req.params;
-        const userId = req.user?._id?.toString();
 
         // Validate media_id
         if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
@@ -633,9 +507,9 @@ export const getMediaByIdController: RequestHandler = async (
             other: null
         });
 
-    } catch (err: any) {
-        console.error('Error in getMediaByIdController:', {
-            message: err.message,
+    } catch (error: any) {
+        logger.error('Error in getMediaByIdController:', {
+            message: error.message,
             params: req.params
         });
 
@@ -646,7 +520,7 @@ export const getMediaByIdController: RequestHandler = async (
             data: null,
             error: {
                 message: 'An unexpected error occurred',
-                details: process.env.NODE_ENV === 'development' ? err.message : undefined
+                details: process.env.NODE_ENV === 'development' ? error.message : undefined
             },
             other: null
         });
@@ -656,7 +530,11 @@ export const getMediaByIdController: RequestHandler = async (
 /**
  * Delete a media item
  */
-export const deleteMediaController: RequestHandler = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
+export const deleteMediaController: RequestHandler = async (
+    req: InjectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
     try {
         const { media_id } = req.params;
         const user_id = req.user._id;
@@ -665,33 +543,45 @@ export const deleteMediaController: RequestHandler = async (req: injectedRequest
         if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
             res.status(400).json({
                 status: false,
+                code: 400,
                 message: "Invalid media ID",
+                data: null,
                 error: { message: "A valid media ID is required" },
+                other: null
             });
             return;
         }
 
+        logger.info('Deleting media:', {
+            media_id,
+            user_id: user_id.toString()
+        });
+
         // Delete the media
         const response = await deleteMediaService(media_id, user_id.toString());
         sendResponse(res, response);
-    } catch (_err) {
-        console.error('Error in deleteMediaController:', _err);
-        next(_err);
+    } catch (error: any) {
+        logger.error('Error in deleteMediaController:', error);
+        next(error);
     }
 };
 
-
+/**
+ * Guest upload media controller with enhanced error handling
+ */
 export const guestUploadMediaController: RequestHandler = async (
-    req: injectedRequest,
+    req: AuthenticatedRequest,
     res: Response,
     next: NextFunction
 ): Promise<void> => {
+    const startTime = Date.now();
+
     try {
         const { share_token } = req.params;
         const files = (req.files as Express.Multer.File[]) || (req.file ? [req.file] : []);
         const { guest_name, guest_email, guest_phone } = req.body;
 
-        console.log('🔍 Guest upload request:', {
+        logger.info('🔍 Guest upload request:', {
             shareToken: share_token,
             fileCount: files.length,
             guestName: guest_name || 'Anonymous',
@@ -700,22 +590,27 @@ export const guestUploadMediaController: RequestHandler = async (
             userId: req.user?._id?.toString()
         });
 
-        // Validate share token
+        // 🔧 FAST VALIDATION: Basic checks only (similar to admin)
         if (!share_token) {
             res.status(400).json({
                 status: false,
+                code: 400,
                 message: "Share token is required",
+                data: null,
                 error: { message: "Missing share token parameter" },
+                other: null
             });
             return;
         }
 
-        // Validate files
         if (!files || files.length === 0) {
             res.status(400).json({
                 status: false,
+                code: 400,
                 message: "No files provided",
+                data: null,
                 error: { message: "At least one file is required" },
+                other: null
             });
             return;
         }
@@ -723,294 +618,544 @@ export const guestUploadMediaController: RequestHandler = async (
         // Find event by share token
         const event = await Event.findOne({ share_token });
         if (!event) {
+            // Cleanup files before returning error
+            await cleanupFiles(files);
             res.status(404).json({
                 status: false,
+                code: 404,
                 message: "Event not found",
+                data: null,
                 error: { message: "Invalid share token" },
+                other: null
             });
             return;
         }
 
-        console.log('✅ Event found:', {
+        logger.info('✅ Event found:', {
             eventId: event._id.toString(),
             title: event.title,
-            canUpload: event.permissions.can_upload,
-            requireApproval: event.permissions.require_approval
+            canUpload: event.permissions?.can_upload,
+            requireApproval: event.permissions?.require_approval
         });
 
         // Check if event allows uploads
-        if (!event.permissions.can_upload) {
+        if (!event.permissions?.can_upload) {
+            await cleanupFiles(files);
             res.status(403).json({
                 status: false,
+                code: 403,
                 message: "Uploads not allowed",
+                data: null,
                 error: { message: "This event does not allow photo uploads" },
+                other: null
             });
             return;
         }
 
-        // Prepare guest information
+        // Prepare guest information to match your model structure
         const guestInfo = {
             name: guest_name || '',
             email: guest_email || '',
             phone: guest_phone || '',
             sessionId: req.sessionID || '',
-            deviceInfo: {
-                userAgent: req.get('User-Agent') || '',
-                ip: req.ip || '',
-                platform: req.get('X-Platform') || 'web'
-            },
-            ipAddress: req.ip || '',
-            userAgent: req.get('User-Agent') || '',
-            uploadMethod: 'web'
+            deviceFingerprint: req.ip + '_' + (req.get('User-Agent') || '').slice(0, 50),
+            uploadMethod: 'web',
+            platformInfo: {
+                source: 'web_upload',
+                referrer: req.get('Referer') || ''
+            }
         };
 
-        // Process uploads
-        const results = [];
-        const errors = [];
+        // 🚀 PARALLEL PROCESSING: Process all files concurrently (like admin)
+        const uploadPromises = files.map(file =>
+            processGuestFileUploadWithOptionalBroadcast(file, {
+                shareToken: share_token,
+                guestInfo,
+                authenticatedUserId: req.user?._id?.toString(),
+                eventId: event._id.toString()
+            })
+        );
 
-        for (const file of files) {
+        const results = await Promise.allSettled(uploadPromises);
+
+        // 🔧 SEPARATE SUCCESS/FAILURES (same pattern as admin)
+        const successful = results
+            .filter((result): result is PromiseFulfilledResult<any> => result.status === 'fulfilled')
+            .map(result => result.value);
+
+        const failed = results
+            .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+            .map((result, index) => ({
+                filename: files[index]?.originalname || 'unknown',
+                error: result.reason?.message || 'Upload failed'
+            }));
+
+        const processingTime = Date.now() - startTime;
+
+        // 🔧 Calculate summary FIRST (before any usage)
+        const successCount = successful.length;
+        const failCount = failed.length;
+
+        // 🚀 CORRECTED: Only notify ADMINS about guest uploads (not other guests)
+        if (successCount > 0) {
+            logger.info(`📡 Notifying admins about ${successCount} new guest uploads...`);
+
+            // Create uploader info for admin notifications
+            const uploaderInfo = {
+                id: req.user?._id?.toString() || 'guest_' + Date.now(),
+                name: guest_name || 'Anonymous Guest',
+                type: req.user ? 'authenticated_guest' : 'guest',
+                email: guest_email || '',
+                uploadTime: new Date()
+            };
+
+            // Notify admins about each successful upload for review/approval
             try {
-                console.log(`📁 Processing file: ${file.originalname}`);
+                if (successCount === 1) {
+                    // Single upload notification
+                    const uploadResult = successful[0];
+                    const originalFile = files[0];
 
-                const uploadResult = await guestMediaUploadService.uploadGuestMedia(
-                    share_token,
-                    file,
-                    guestInfo,
-                    req.user?._id?.toString() // Pass user ID if authenticated
-                );
+                    mediaNotificationService.notifyAdminsAboutGuestUpload({
+                        eventId: event._id.toString(),
+                        uploadedBy: uploaderInfo,
+                        mediaData: {
+                            mediaId: uploadResult.mediaId || uploadResult._id?.toString(),
+                            url: uploadResult.url || uploadResult.preview_url,
+                            filename: uploadResult.filename || originalFile?.originalname,
+                            type: uploadResult.type || 'image',
+                            size: uploadResult.size || originalFile?.size || 0,
+                            approvalStatus: uploadResult.approval_status || 'pending'
+                        },
+                        requiresApproval: event.permissions?.require_approval || false
+                    });
+                } else {
+                    // Bulk upload notification
+                    const mediaItems = successful.map((uploadResult, index) => ({
+                        mediaId: uploadResult.mediaId || uploadResult._id?.toString(),
+                        url: uploadResult.url || uploadResult.preview_url,
+                        filename: uploadResult.filename || files[index]?.originalname,
+                        type: uploadResult.type || 'image',
+                        size: uploadResult.size || files[index]?.size || 0,
+                        approvalStatus: uploadResult.approval_status || 'pending'
+                    }));
 
-                results.push({
-                    filename: file.originalname,
-                    ...uploadResult
+                    mediaNotificationService.notifyAdminsAboutBulkGuestUpload({
+                        eventId: event._id.toString(),
+                        uploadedBy: uploaderInfo,
+                        mediaItems,
+                        totalCount: successCount,
+                        requiresApproval: event.permissions?.require_approval || false
+                    });
+                }
+
+                logger.info('📤 Admin notifications sent successfully', {
+                    uploadCount: successCount,
+                    uploaderName: uploaderInfo.name,
+                    eventId: event._id.toString(),
+                    requiresApproval: event.permissions?.require_approval
                 });
 
-                console.log(`✅ Upload result for ${file.originalname}:`, uploadResult);
-
-            } catch (fileError: any) {
-                console.error(`❌ Error uploading ${file.originalname}:`, fileError);
-                errors.push({
-                    filename: file.originalname,
-                    error: fileError.message || 'Upload failed'
+            } catch (broadcastError) {
+                logger.error('❌ Failed to notify admins about guest uploads:', {
+                    error: broadcastError.message,
+                    uploadCount: successCount,
+                    eventId: event._id.toString()
                 });
+                // Don't fail the entire request for notification errors
+            }
+
+            // Update admin dashboard statistics (optional)
+            try {
+                // Simple room count update - no complex stats needed
+                const wsService = getWebSocketService();
+                const adminRoom = `admin_${event._id.toString()}`;
+                const adminCount = wsService.getRoomUserCounts()[adminRoom] || 0;
+
+                if (adminCount > 0) {
+                    wsService.io.to(adminRoom).emit('guest_upload_summary', {
+                        eventId: event._id.toString(),
+                        newUploadsCount: successCount,
+                        uploaderName: uploaderInfo.name,
+                        timestamp: new Date()
+                    });
+                }
+
+                logger.info('📊 Admin summary notification sent');
+            } catch (statsError) {
+                logger.error('❌ Failed to send admin summary:', statsError);
             }
         }
 
-        // Calculate summary
-        const successCount = results.filter(r => r.success).length;
-        const failCount = results.length - successCount;
-
-        console.log('📊 Upload summary:', {
+        logger.info(`📊 Guest upload completed in ${processingTime}ms:`, {
             total: files.length,
             success: successCount,
-            failed: failCount
+            failed: failCount,
+            adminNotificationsSent: successCount > 0,
+            requiresApproval: event.permissions?.require_approval
         });
 
-        // Send response
+        // 🚨 CRITICAL: Send response immediately (similar to admin pattern)
         const response = {
             status: successCount > 0,
             code: successCount > 0 ? 200 : 400,
-            message: failCount === 0 ?
-                `All ${successCount} file(s) uploaded successfully!` :
-                successCount > 0 ?
-                    `${successCount} file(s) uploaded, ${failCount} failed` :
-                    'All uploads failed',
+            message: generateGuestSuccessMessage(successCount, failCount, files.length, event.permissions?.require_approval),
             data: {
-                results,
-                errors: errors.length > 0 ? errors : undefined,
+                results: successful,
+                errors: failed.length > 0 ? failed : undefined,
                 summary: {
                     total: files.length,
                     success: successCount,
                     failed: failCount,
-                    pending_approval: results.filter(r => r.approval_status === 'pending').length
-                }
+                    processingTime: `${processingTime}ms`,
+                    pending_approval: successful.filter(r => r.approval_status === 'pending').length,
+                    admin_notifications_sent: successCount, // Track admin notifications
+                    requires_approval: event.permissions?.require_approval || false
+                },
+                note: event.permissions?.require_approval
+                    ? "Images uploaded successfully! They will appear after admin approval."
+                    : "Images uploaded successfully! High-quality versions processing in background..."
             },
-            error: errors.length > 0 ? { message: 'Some uploads failed', details: errors } : null,
+            error: failed.length > 0 ? { message: 'Some uploads failed', details: failed } : null,
             other: {
                 event_id: event._id.toString(),
-                requires_approval: event.permissions.require_approval,
-                uploader_type: req.user ? 'registered_user' : 'guest'
+                requires_approval: event.permissions?.require_approval,
+                uploader_type: req.user ? 'registered_user' : 'guest',
+                admin_review_required: event.permissions?.require_approval || false
             }
         };
 
         res.status(response.code).json(response);
 
     } catch (error: any) {
-        console.error('💥 Guest upload controller error:', {
+        logger.error('💥 Guest upload controller error:', {
             message: error.message,
             stack: error.stack,
             shareToken: req.params.share_token
         });
 
+        // Cleanup files on error
+        if (req.files) {
+            await cleanupFiles(req.files as Express.Multer.File[]);
+        }
+
         res.status(500).json({
             status: false,
             code: 500,
             message: 'Upload failed',
-            error: { message: 'Internal server error occurred' },
             data: null,
+            error: { message: 'Internal server error occurred' },
             other: null
         });
     }
 };
+
+// 🚀 UPDATED: Guest-friendly success messages considering approval workflow
+function generateGuestSuccessMessage(
+    successCount: number,
+    failCount: number,
+    totalCount: number,
+    requiresApproval: boolean = false
+): string {
+    const approvalText = requiresApproval
+        ? " They will appear in the gallery after admin approval."
+        : " They are now visible to everyone!";
+
+    if (failCount === 0) {
+        return `All ${successCount} photo${successCount > 1 ? 's' : ''} uploaded successfully!${approvalText}`;
+    } else if (successCount > 0) {
+        return `${successCount} photo${successCount > 1 ? 's' : ''} uploaded successfully, ${failCount} failed.${approvalText}`;
+    } else {
+        return `All ${totalCount} upload${totalCount > 1 ? 's' : ''} failed. Please try again.`;
+    }
+}
+/**
+ * 🚀 NEW: Process individual guest file upload with optional broadcast support
+ * Similar to admin's processFileUploadWithBroadcast but for guests
+ */
+const processGuestFileUploadWithOptionalBroadcast = async (
+    file: Express.Multer.File,
+    context: {
+        shareToken: string;
+        guestInfo: any;
+        authenticatedUserId?: string;
+        eventId: string;
+    }
+): Promise<any> => {
+    try {
+        logger.info(`📁 Processing guest file: ${file.originalname}`, {
+            size: `${bytesToMB(file.size)}MB`,
+            type: file.mimetype,
+            guestName: context.guestInfo.name || 'Anonymous'
+        });
+
+        const uploadResult = await uploadGuestMedia(
+            context.shareToken,
+            file,
+            context.guestInfo,
+            context.authenticatedUserId
+        );
+
+        // 🚀 PLACEHOLDER: WebSocket broadcast point
+        if (uploadResult.success && uploadResult.media_id) {
+            // TODO: Add WebSocket broadcast here when needed
+            // await broadcastGuestUploadSuccess(context.eventId, uploadResult);
+            logger.info(`📡 WebSocket placeholder - guest upload success: ${uploadResult.media_id}`);
+        }
+
+        return {
+            filename: file.originalname,
+            ...uploadResult
+        };
+
+    } catch (error: any) {
+        logger.error(`❌ Error processing guest file ${file.originalname}:`, error);
+
+        // Ensure file cleanup on error
+        await cleanupFile(file);
+
+        throw new Error(`Failed to process ${file.originalname}: ${error.message}`);
+    }
+};
+
+/**
+ * 🚀 NEW: Cleanup multiple files utility (if not already available)
+ */
+const cleanupFiles = async (files: Express.Multer.File[]): Promise<void> => {
+    const cleanupPromises = files.map(file => cleanupFile(file));
+    await Promise.allSettled(cleanupPromises);
+};
+
+/**
+ * Get guest media with enhanced variant support
+ */
 export const getGuestMediaController: RequestHandler = async (
-    req: injectedRequest,
+    req: Request,
     res: Response,
     next: NextFunction
 ): Promise<void> => {
     try {
-        const { share_token } = req.params;
+        const { shareToken } = req.params;
+        const { page, limit, quality } = req.query;
 
-        console.log(share_token, 'share_tokenshare_token')
-        if (!share_token) {
+        if (!shareToken) {
             res.status(400).json({
                 status: false,
                 code: 400,
-                message: "Share token is required",
+                message: 'Share token is required',
                 data: null,
-                error: { message: "Share token parameter is missing" },
+                error: { message: 'Share token parameter is required' }
+            });
+            return;
+        }
+
+        const options = {
+            page: parseInt(page as string) || 1,
+            limit: Math.min(parseInt(limit as string) || 20, 50), // Limit guests to 50
+            quality: quality as string || 'medium'
+        };
+
+        logger.info(`🔗 Guest accessing media:`, {
+            shareToken: shareToken.substring(0, 8) + '...',
+            options
+        });
+
+        const response = await getGuestMediaService(shareToken, '', '', options);
+        res.status(response.code).json(response);
+
+    } catch (error: any) {
+        logger.error('❌ Error in getGuestMediaController:', error);
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Failed to get guest media',
+            data: null,
+            error: { message: error.message }
+        });
+    }
+};
+
+
+
+/**
+ * Get media variants information
+ */
+export const getMediaVariantsController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { mediaId } = req.params;
+
+        if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid media ID',
+                data: null,
+                error: { message: 'A valid media ID is required' },
                 other: null
             });
             return;
         }
 
-        // Get auth info if available (from conditionalAuthMiddleware)
-        const authToken = req.headers.authorization?.replace('Bearer ', '') ||
-            req.headers['x-auth-token'] as string;
-        const userEmail = req.user?.email;
+        const media = await Media.findById(mediaId)
+            .select('image_variants processing type url')
+            .lean();
 
-        // Extract and validate query parameters
-        const {
-            page,
-            limit,
-            quality,
-            since,
-            cursor,
-            scroll_type
-        } = req.query;
-
-        const options: any = {};
-
-        // Handle scroll type
-        if (scroll_type) {
-            const validScrollTypes = ['pagination', 'infinite'];
-            if (!validScrollTypes.includes(scroll_type as string)) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid scroll_type parameter',
-                    data: null,
-                    error: { message: 'scroll_type must be one of: pagination, infinite' },
-                    other: null
-                });
-                return;
-            }
-            options.scrollType = scroll_type as 'pagination' | 'infinite';
-        } else {
-            options.scrollType = 'pagination';
+        if (!media) {
+            res.status(404).json({
+                status: false,
+                code: 404,
+                message: 'Media not found',
+                data: null,
+                error: { message: 'Media not found' },
+                other: null
+            });
+            return;
         }
 
-        // Handle cursor for infinite scroll
-        if (cursor) {
-            const cursorDate = new Date(cursor as string);
-            if (isNaN(cursorDate.getTime())) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid cursor format',
-                    data: null,
-                    error: { message: 'Cursor must be a valid ISO date string' },
-                    other: null
-                });
-                return;
-            }
-            options.cursor = cursor as string;
+        // Prepare variant information
+        const variantInfo = {
+            media_id: media._id,
+            type: media.type,
+            original_url: media.url,
+            has_variants: !!media.image_variants,
+            processing_status: media.processing?.status,
+            variants_generated: media.processing?.variants_generated,
+            variants: null as any
+        };
+
+        if (media.image_variants) {
+            variantInfo.variants = {
+                original: media.image_variants.original,
+                small: {
+                    webp: media.image_variants.small?.webp || null,
+                    jpeg: media.image_variants.small?.jpeg || null
+                },
+                medium: {
+                    webp: media.image_variants.medium?.webp || null,
+                    jpeg: media.image_variants.medium?.jpeg || null
+                },
+                large: {
+                    webp: media.image_variants.large?.webp || null,
+                    jpeg: media.image_variants.large?.jpeg || null
+                }
+            };
         }
 
-        // Handle pagination
-        if (page && options.scrollType === 'pagination') {
-            const pageNum = parseInt(page as string, 10);
-            if (isNaN(pageNum) || pageNum < 1) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid page number',
-                    data: null,
-                    error: { message: 'Page must be a positive integer' },
-                    other: null
-                });
-                return;
-            }
-            options.page = pageNum;
-        }
-
-        // Handle limit
-        if (limit) {
-            const limitNum = parseInt(limit as string, 10);
-            if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
-                res.status(400).json({
-                    status: false,
-                    code: 400,
-                    message: 'Invalid limit',
-                    data: null,
-                    error: { message: 'Limit must be between 1 and 100' },
-                    other: null
-                });
-                return;
-            }
-            options.limit = limitNum;
-        }
-
-        // Handle quality
-        if (quality) {
-            const validQualities = ['thumbnail', 'display', 'full'];
-            if (validQualities.includes(quality as string)) {
-                options.quality = quality as 'thumbnail' | 'display' | 'full';
-            }
-        }
-
-        // Handle since
-        if (since) {
-            const sinceDate = new Date(since as string);
-            if (!isNaN(sinceDate.getTime())) {
-                options.since = since as string;
-            }
-        }
-
-        console.log('Guest Controller: Processing request for share_token:', share_token, {
-            userEmail,
-            hasAuth: !!authToken,
-            options
-        });
-
-        // Call the guest media service
-        const response = await getGuestMediaService(share_token, userEmail, authToken, options);
-
-        console.log('Guest media response:', {
-            status: response.status,
-            code: response.code,
-            dataCount: response.data?.length,
-            requiresAuth: response.other?.requires_auth
-        });
-
-        res.status(response.code).json(response);
-
-    } catch (err: any) {
-        console.error('Error in getGuestMediaController:', {
-            message: err.message,
-            stack: err.stack,
-            share_token: req.params.share_token,
-            query: req.query
-        });
-
-        res.status(500).json({
-            status: false,
-            code: 500,
-            message: 'Internal server error',
-            data: null,
-            error: {
-                message: 'An unexpected error occurred',
-                details: process.env.NODE_ENV === 'development' ? err.message : undefined
-            },
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: 'Media variants retrieved successfully',
+            data: variantInfo,
+            error: null,
             other: null
         });
+
+    } catch (error: any) {
+        logger.error('Error in getMediaVariantsController:', error);
+        next(error);
     }
 };
+
+/**
+ * Batch get optimized URLs for multiple media items
+ */
+export const getBatchOptimizedUrlsController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { mediaIds, quality, format, context } = req.body;
+
+        if (!Array.isArray(mediaIds) || mediaIds.length === 0) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Media IDs array is required',
+                data: null,
+                error: { message: 'mediaIds must be a non-empty array' },
+                other: null
+            });
+            return;
+        }
+
+        if (mediaIds.length > 100) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Too many media IDs',
+                data: null,
+                error: { message: 'Maximum 100 media IDs allowed per request' },
+                other: null
+            });
+            return;
+        }
+
+        // Get media items
+        const mediaItems = await Media.find({
+            _id: { $in: mediaIds }
+        }).select('image_variants type url').lean();
+
+        const userAgent = req.get('User-Agent');
+        const qualityToUse = quality || 'medium';
+        const formatToUse = format || 'auto';
+        const contextToUse = context || 'desktop';
+
+        // Generate optimized URLs for each media item
+        const optimizedUrls = mediaItems.map(item => {
+            let optimizedUrl = item.url; // Default to original
+
+            if (item.image_variants && item.type === 'image') {
+                // Use the optimization utility function
+                optimizedUrl = getOptimizedImageUrlForItem(
+                    item,
+                    qualityToUse,
+                    formatToUse,
+                    contextToUse,
+                    userAgent
+                );
+            }
+
+            return {
+                media_id: item._id,
+                original_url: item.url,
+                optimized_url: optimizedUrl,
+                has_variants: !!item.image_variants
+            };
+        });
+
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: 'Optimized URLs generated successfully',
+            data: optimizedUrls,
+            error: null,
+            other: {
+                optimization_settings: {
+                    quality: qualityToUse,
+                    format: formatToUse,
+                    context: contextToUse,
+                    webp_supported: userAgent ?
+                        /Chrome|Firefox|Edge|Opera/.test(userAgent) && !/Safari/.test(userAgent) :
+                        true
+                }
+            }
+        });
+
+    } catch (error: any) {
+        logger.error('Error in getBatchOptimizedUrlsController:', error);
+        next(error);
+    }
+};
+
+// Helper function to detect context from user agent
+function detectContextFromUserAgent(userAgent?: string): 'mobile' | 'desktop' | 'lightbox' {
+    if (!userAgent) return 'desktop';
+
+    const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
+    return mobileRegex.test(userAgent) ? 'mobile' : 'desktop';
+}

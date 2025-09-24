@@ -57,6 +57,9 @@ export const corsOptions: CorsOptions = {
       callback(null, true);
     } else {
       // ❌ Not allowed
+      console.log(origin)
+      console.log(keys.corsOrigins)
+      console.log(Array.isArray(keys.corsOrigins))
       callback(new Error("❌ Not allowed by CORS"));
     }
   },

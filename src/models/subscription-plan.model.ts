@@ -116,5 +116,4 @@ export const createDefaultPlans = async () => {
     
     // Log how many plans are in the database
     const planCount = await SubscriptionPlan.countDocuments();
-    console.log(`Default subscription plans created or updated. Total plans: ${planCount}`);
 };
