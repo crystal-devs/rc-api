@@ -2,9 +2,12 @@
 import express, { RequestHandler } from "express";
 import * as eventController from "@controllers/event.controller";
 import * as cohostController from "@controllers/co-host.controller"
+import * as participantController from "@controllers/participant.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import { checkEventLimitMiddleware } from "@middlewares/subscription-limit.middleware";
 import { eventAccessMiddleware } from "@middlewares/event-access.middleware";
+import { getEventParticipantsController } from "@controllers/participant.controller";
+import { requireInviteAccess, requireParticipantManagementAccess } from "@middlewares/participant-access.middleware";
 
 const eventRouter = express.Router();
 
@@ -60,35 +63,47 @@ eventRouter.get("/:event_id/activity",
 );
 
 // ============= PARTICIPANT MANAGEMENT =============
-// Get event participants
-// eventRouter.get("/:event_id/participants",
-//     eventAccessMiddleware,
-//     participantController.getEventParticipantsController
-// );
+// Get event participants with filtering and pagination
+eventRouter.get("/:event_id/participants",
+    eventAccessMiddleware,
+    requireParticipantManagementAccess,
+    participantController.getEventParticipantsController
+);
 
-// // Invite participants (bulk support)
-// eventRouter.post("/:event_id/participants/invite",
-//     eventAccessMiddleware,
-//     participantController.inviteParticipantsController
-// );
+// Invite participants (bulk support)
+eventRouter.post("/:event_id/participants/invite",
+    eventAccessMiddleware,
+    requireInviteAccess,
+    participantController.inviteParticipantsController
+);
 
-// // Update participant permissions
-// eventRouter.patch("/:event_id/participants/:participant_id",
-//     eventAccessMiddleware,
-//     participantController.updateParticipantController
-// );
+// Update participant permissions/role
+eventRouter.patch("/:event_id/participants/:participant_id",
+    eventAccessMiddleware,
+    requireParticipantManagementAccess,
+    participantController.updateParticipantController
+);
 
-// // Remove participant
-// eventRouter.delete("/:event_id/participants/:participant_id",
-//     eventAccessMiddleware,
-//     participantController.removeParticipantController
-// );
+// Remove participant
+eventRouter.delete("/:event_id/participants/:participant_id",
+    eventAccessMiddleware,
+    requireParticipantManagementAccess,
+    participantController.removeParticipantController
+);
 
-// // Get participant activity logs
-// eventRouter.get("/:event_id/participants/:participant_id/activity",
-//     eventAccessMiddleware,
-//     participantController.getParticipantActivityController
-// );
+// Get participant activity logs
+eventRouter.get("/:event_id/participants/:participant_id/activity",
+    eventAccessMiddleware,
+    requireParticipantManagementAccess,
+    participantController.getParticipantActivityController
+);
+
+// Get participant statistics
+eventRouter.get("/:event_id/participants/:participant_id/stats",
+    eventAccessMiddleware,
+    requireParticipantManagementAccess,
+    participantController.getParticipantStatsController
+);
 
 // ============= EVENT ALBUMS MANAGEMENT =============
 // Get event albums

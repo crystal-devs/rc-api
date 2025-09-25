@@ -114,10 +114,6 @@ export const eventAccessMiddleware = async (
 
         // Check if user has access to this event
         if (!participant) {
-            console.log(`❌ [eventAccessMiddleware] FINAL DENIAL: No active participant record found for user ${userId} in event ${event_id}`);
-            console.log(`❌ [eventAccessMiddleware] Event owner: ${event.created_by.toString()}`);
-            console.log(`❌ [eventAccessMiddleware] User ID: ${userId}`);
-
             return sendResponse(res, {
                 status: false,
                 code: 403,

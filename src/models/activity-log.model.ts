@@ -6,10 +6,10 @@ const activityLogSchema = new mongoose.Schema({
     resource_id: { type: mongoose.Schema.Types.ObjectId, required: true },
     resource_type: { type: String, enum: ["album", "page", "media", "event"], required: true },
     user_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: true },
-    action: { 
+    action: {
         type: String,
-        enum: ["viewed", "edited", "deleted", "created", "added", "removed", "permission_changed", "co_host_joined"], 
-        required: true 
+        enum: ["viewed", "edited", "deleted", "created", "added", "removed", "permission_changed", "co_host_joined", "co_host_block", "co_host_unblock"],
+        required: true
     },
     details: { type: mongoose.Schema.Types.Mixed, default: null },
     timestamp: { type: Date, default: Date.now } // Add explicit timestamp for TTL
