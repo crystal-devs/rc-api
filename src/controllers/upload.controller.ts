@@ -13,6 +13,7 @@ import { uploadPreviewImage } from '@services/upload/core/upload-variants.servic
 import { EventParticipant } from '@models/event-participants.model';
 import { photoCacheService } from '@services/cache/photo-cache.service';
 import { eventCacheService } from '@services/cache/event-cache.service';
+import { Event } from '@models/event.model';
 
 interface AuthenticatedRequest extends Request {
     user: {
@@ -188,14 +189,14 @@ async function processFileUploadWithProgress(
         // ✅ STEP 1.5: Update participant stats
         try {
             await EventParticipant.updateOne(
-                { 
+                {
                     user_id: new mongoose.Types.ObjectId(context.userId),
                     event_id: new mongoose.Types.ObjectId(context.eventId)
                 },
-                { 
-                    $inc: { 
+                {
+                    $inc: {
                         'stats.uploads_count': 1,
-                        'stats.total_file_size_mb': fileSizeMB 
+                        'stats.total_file_size_mb': fileSizeMB
                     },
                     $set: {
                         'stats.last_upload_at': new Date(),
@@ -206,6 +207,25 @@ async function processFileUploadWithProgress(
         } catch (statsError) {
             logger.warn('Failed to update participant stats:', statsError);
             // Don't fail the upload if stats update fails
+        }
+
+        // ✅ STEP 1.6: Update Event photo count (NEWLY ADDED)
+        try {
+            await Event.updateOne(
+                { _id: new mongoose.Types.ObjectId(context.eventId) },
+                {
+                    $inc: {
+                        'stats.photos': 1,
+                        'stats.total_size_mb': fileSizeMB
+                    },
+                    $set: {
+                        'updated_at': new Date()
+                    }
+                }
+            );
+        } catch (counterError) {
+            logger.warn('Failed to update event photo count:', counterError);
+            // Don't fail the upload if counter update fails
         }
 
         // ✅ STEP 2: Send initial progress update
@@ -294,7 +314,7 @@ async function processFileUploadWithProgress(
                     );
                 }
 
-                logger.info(`✅ Job queued: ${job.id} for ${file.originalname}`);
+                logger.info(`Job queued: ${job.id} for ${file.originalname}`);
 
             } catch (queueError) {
                 logger.error('Queue error:', queueError);
@@ -325,8 +345,8 @@ async function processFileUploadWithProgress(
 
             // Add to event photo list for quick retrieval
             await photoCacheService.addPhotoToEventList(context.eventId, mediaId.toString(), new Date());
-            
-            logger.debug(`✅ Cached photo metadata for ${mediaId.toString()}`);
+
+            logger.debug(`Cached photo metadata for ${mediaId.toString()}`);
         } catch (cacheError) {
             logger.warn('Failed to cache photo metadata:', cacheError);
             // Don't fail the upload if caching fails
@@ -358,7 +378,6 @@ async function processFileUploadWithProgress(
         throw error;
     }
 }
-
 // ✅ Get progress for multiple uploads - REMOVED REFERENCE TO simpleProgressService
 export const getBatchUploadProgressController = async (
     req: Request,
