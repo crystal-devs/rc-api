@@ -11,6 +11,7 @@ import { bytesToMB, cleanupFile } from '@utils/file.util';
 import { createInstantPreview, getBasicImageMetadata, getFileExtension, getEstimatedProcessingTime } from '../shared/image-processing.service';
 import { getOrCreateDefaultAlbum } from '@services/album';
 import { queueImageProcessing } from '@services/guest';
+import { EventParticipant } from '@models/event-participants.model';
 
 export interface AdminUploadResult {
     success: boolean;
@@ -139,6 +140,29 @@ const processAdminImageUpload = async (
         await media.save();
         logger.info(`✅ Admin media record created: ${mediaId}`);
 
+        // Update participant stats
+        try {
+            await EventParticipant.updateOne(
+                { 
+                    user_id: new mongoose.Types.ObjectId(options.userId),
+                    event_id: new mongoose.Types.ObjectId(options.eventId)
+                },
+                { 
+                    $inc: { 
+                        'stats.uploads_count': 1,
+                        'stats.total_file_size_mb': fileSizeMB 
+                    },
+                    $set: {
+                        'stats.last_upload_at': new Date(),
+                        'last_activity_at': new Date()
+                    }
+                }
+            );
+        } catch (statsError) {
+            logger.warn('Failed to update admin participant stats:', statsError);
+            // Don't fail the upload if stats update fails
+        }
+
         // Queue for processing with higher priority
         let jobId: string | null = null;
         try {
@@ -210,6 +234,29 @@ const processAdminVideoUpload = async (
         });
 
         await media.save();
+
+        // Update participant stats
+        try {
+            await EventParticipant.updateOne(
+                { 
+                    user_id: new mongoose.Types.ObjectId(options.userId),
+                    event_id: new mongoose.Types.ObjectId(options.eventId)
+                },
+                { 
+                    $inc: { 
+                        'stats.uploads_count': 1,
+                        'stats.total_file_size_mb': fileSizeMB 
+                    },
+                    $set: {
+                        'stats.last_upload_at': new Date(),
+                        'last_activity_at': new Date()
+                    }
+                }
+            );
+        } catch (statsError) {
+            logger.warn('Failed to update admin video participant stats:', statsError);
+            // Don't fail the upload if stats update fails
+        }
 
         return {
             success: true,

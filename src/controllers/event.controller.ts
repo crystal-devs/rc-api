@@ -18,6 +18,7 @@ import {
     updateEventService
 } from "@services/event";
 import { createDefaultAlbumForEvent } from "@services/album";
+import { eventCacheService } from "@services/cache/event-cache.service";
 
 interface InjectedRequest extends Request {
     user: {
@@ -264,6 +265,15 @@ export const updateEventController = async (req: injectedRequest, res: Response,
         const response = await updateEventService(event_id, processedUpdateData, userId);
 
         if (response.status) {
+            // Invalidate caches related to this event and user
+            try {
+                await Promise.all([
+                    eventCacheService.invalidateEventCaches(event_id),
+                    eventCacheService.invalidateUserCaches(userId)
+                ]);
+            } catch (e) {
+                console.warn('Cache invalidation failed after update:', e);
+            }
             res.status(200).json(response);
         } else {
             res.status(response.code).json(response);
@@ -289,6 +299,15 @@ export const deleteEventController = async (req: injectedRequest, res: Response,
         }
 
         const response = await deleteEventService(event_id, userId);
+        // Invalidate caches regardless of response status to be safe
+        try {
+            await Promise.all([
+                eventCacheService.invalidateEventCaches(event_id),
+                eventCacheService.invalidateUserCaches(userId)
+            ]);
+        } catch (e) {
+            console.warn('Cache invalidation failed after delete:', e);
+        }
         sendResponse(res, response);
     } catch (error) {
         next(error);

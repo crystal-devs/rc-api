@@ -15,6 +15,7 @@ import { validateGuestFile, validateShareToken } from './guest-validation.servic
 import type { GuestUploadResult, GuestUploadInfo } from './guest.types';
 import { getEstimatedProcessingTime } from '@services/upload/shared/image-processing.service';
 import { getOrCreateDefaultAlbum } from '@services/album';
+import { EventParticipant } from '@models/event-participants.model';
 
 export const uploadGuestMedia = async (
     shareToken: string,
@@ -171,6 +172,31 @@ const processGuestImageUpload = async (
         await media.save();
         logger.info(`✅ Guest media record created: ${mediaId}`);
 
+        // Update participant stats for authenticated users
+        if (authenticatedUserId) {
+            try {
+                await EventParticipant.updateOne(
+                    { 
+                        user_id: new mongoose.Types.ObjectId(authenticatedUserId),
+                        event_id: new mongoose.Types.ObjectId(eventId)
+                    },
+                    { 
+                        $inc: { 
+                            'stats.uploads_count': 1,
+                            'stats.total_file_size_mb': fileSizeMB 
+                        },
+                        $set: {
+                            'stats.last_upload_at': new Date(),
+                            'last_activity_at': new Date()
+                        }
+                    }
+                );
+            } catch (statsError) {
+                logger.warn('Failed to update guest participant stats:', statsError);
+                // Don't fail the upload if stats update fails
+            }
+        }
+
         // Queue for background processing
         let jobId: string | null = null;
         try {
@@ -247,6 +273,31 @@ const processGuestVideoUpload = async (
         });
 
         await media.save();
+
+        // Update participant stats for authenticated users
+        if (authenticatedUserId) {
+            try {
+                await EventParticipant.updateOne(
+                    { 
+                        user_id: new mongoose.Types.ObjectId(authenticatedUserId),
+                        event_id: new mongoose.Types.ObjectId(eventId)
+                    },
+                    { 
+                        $inc: { 
+                            'stats.uploads_count': 1,
+                            'stats.total_file_size_mb': fileSizeMB 
+                        },
+                        $set: {
+                            'stats.last_upload_at': new Date(),
+                            'last_activity_at': new Date()
+                        }
+                    }
+                );
+            } catch (statsError) {
+                logger.warn('Failed to update guest video participant stats:', statsError);
+                // Don't fail the upload if stats update fails
+            }
+        }
 
         logger.info(`✅ Guest video upload completed`, {
             mediaId: media._id.toString(),

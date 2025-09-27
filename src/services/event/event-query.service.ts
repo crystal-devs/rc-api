@@ -1,5 +1,5 @@
 // 3. services/event/event-query.service.ts
-// Updated to use EventParticipant collection
+// Updated to use EventParticipant collection with Redis caching
 // ====================================
 
 import { Event } from "@models/event.model";
@@ -10,12 +10,27 @@ import mongoose from "mongoose";
 import type { EventFilters, EventType, EventWithExtras } from './event.types';
 import { ServiceResponse } from "@services/media";
 import { getUserEventStats, recordEventActivity } from "./event-utils.service";
+import { eventCacheService } from "@services/cache/event-cache.service";
 
 export const getUserEventsService = async (
     filters: EventFilters
 ): Promise<ServiceResponse<{ events: EventType[]; pagination: any; stats: any }>> => {
     try {
         const { userId, page, limit, sort, status, privacy, template, search, tags } = filters;
+
+        // Try to get from cache first
+        const cachedResult = await eventCacheService.getUserEvents(userId, filters);
+        if (cachedResult) {
+            logger.debug(`Cache HIT: getUserEventsService for user ${userId}`);
+            return {
+                status: true,
+                code: 200,
+                message: "Events fetched successfully (cached)",
+                data: cachedResult,
+                error: null,
+                other: null
+            };
+        }
 
         // Build aggregation pipeline starting from EventParticipant collection
         const pipeline: any[] = [
@@ -91,7 +106,7 @@ export const getUserEventsService = async (
         // Get user's event stats
         const stats = await getUserEventStats(userId);
 
-        return {
+        const response: ServiceResponse<{ events: EventType[]; pagination: any; stats: any }> = {
             status: true,
             code: 200,
             message: "Events fetched successfully",
@@ -110,6 +125,15 @@ export const getUserEventsService = async (
             error: null,
             other: null
         };
+
+        // Cache the result (short TTL handled by service)
+        try {
+            await eventCacheService.setUserEvents(userId, filters, response.data);
+        } catch (e) {
+            logger.debug('Failed to cache user events result:', e);
+        }
+
+        return response;
     } catch (error) {
         logger.error(`[getUserEventsService] Error: ${error.message}`);
         return {
@@ -144,6 +168,25 @@ export const getEventDetailService = async (
             };
         }
 
+        // Optional cache read when identifier is event ObjectId
+        if (mongoose.Types.ObjectId.isValid(identifier)) {
+            try {
+                const cached = await eventCacheService.getEventDetail(identifier, userId);
+                if (cached) {
+                    return {
+                        status: true,
+                        code: 200,
+                        message: 'Event details fetched successfully (cached)',
+                        data: cached,
+                        error: null,
+                        other: null,
+                    };
+                }
+            } catch (e) {
+                logger.debug('Cache read failed for event detail:', e);
+            }
+        }
+
         // Build match condition based on identifier type
         const matchCondition = buildIdentifierMatchCondition(identifier, tokenType);
 
@@ -165,7 +208,7 @@ export const getEventDetailService = async (
         // Record view activity
         await recordEventActivity(event._id.toString(), userId, 'viewed');
 
-        return {
+        const response: ServiceResponse<EventWithExtras> = {
             status: true,
             code: 200,
             message: 'Event details fetched successfully',
@@ -173,6 +216,17 @@ export const getEventDetailService = async (
             error: null,
             other: null,
         };
+
+        // Optional cache write when identifier is ObjectId
+        if (mongoose.Types.ObjectId.isValid(identifier)) {
+            try {
+                await eventCacheService.setEventDetail(identifier, userId, event);
+            } catch (e) {
+                logger.debug('Cache write failed for event detail:', e);
+            }
+        }
+
+        return response;
     } catch (error) {
         logger.error(`[getEventDetailService] Error: ${(error as Error).message}`);
         return {

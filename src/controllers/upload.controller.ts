@@ -2,7 +2,7 @@
 
 import { Request, Response, NextFunction } from 'express';
 import fs from 'fs/promises';
-import mongoose from 'mongoose';
+import mongoose, { Document } from 'mongoose';
 import { logger } from '@utils/logger';
 import { Media, MediaDocument, ProcessingStage } from '@models/media.model'; // ✅ Import the stage type
 import { getImageQueue } from 'queues/imageQueue';
@@ -10,6 +10,9 @@ import sharp from 'sharp';
 import { mediaNotificationService } from '@services/websocket/notifications';
 import { progressIntegrationService } from '@services/websocket/progress-integration.service';
 import { uploadPreviewImage } from '@services/upload/core/upload-variants.service';
+import { EventParticipant } from '@models/event-participants.model';
+import { photoCacheService } from '@services/cache/photo-cache.service';
+import { eventCacheService } from '@services/cache/event-cache.service';
 
 interface AuthenticatedRequest extends Request {
     user: {
@@ -182,6 +185,29 @@ async function processFileUploadWithProgress(
 
         await media.save();
 
+        // ✅ STEP 1.5: Update participant stats
+        try {
+            await EventParticipant.updateOne(
+                { 
+                    user_id: new mongoose.Types.ObjectId(context.userId),
+                    event_id: new mongoose.Types.ObjectId(context.eventId)
+                },
+                { 
+                    $inc: { 
+                        'stats.uploads_count': 1,
+                        'stats.total_file_size_mb': fileSizeMB 
+                    },
+                    $set: {
+                        'stats.last_upload_at': new Date(),
+                        'last_activity_at': new Date()
+                    }
+                }
+            );
+        } catch (statsError) {
+            logger.warn('Failed to update participant stats:', statsError);
+            // Don't fail the upload if stats update fails
+        }
+
         // ✅ STEP 2: Send initial progress update
         await progressIntegrationService.sendUploadStarted(
             mediaId.toString(),
@@ -280,6 +306,37 @@ async function processFileUploadWithProgress(
             }
         } else {
             logger.warn('No image queue available');
+        }
+
+        // ✅ STEP 6: Cache photo metadata for frequent access
+        try {
+            await photoCacheService.setPhotoMetadata(mediaId.toString(), {
+                id: mediaId.toString(),
+                filename: file.originalname,
+                url: previewUrl,
+                size: file.size,
+                format: getFileExtension(file),
+                uploadedBy: context.userId,
+                uploadedAt: new Date(),
+                eventId: context.eventId,
+                albumId: context.albumId,
+                processingStatus: 'processing'
+            });
+
+            // Add to event photo list for quick retrieval
+            await photoCacheService.addPhotoToEventList(context.eventId, mediaId.toString(), new Date());
+            
+            logger.debug(`✅ Cached photo metadata for ${mediaId.toString()}`);
+        } catch (cacheError) {
+            logger.warn('Failed to cache photo metadata:', cacheError);
+            // Don't fail the upload if caching fails
+        }
+
+        // ✅ STEP 7: Warm event cache after upload
+        try {
+            await eventCacheService.warmCacheAfterMediaUpload(context.eventId, context.userId, 1);
+        } catch (warmError) {
+            logger.debug('Failed to warm cache after upload:', warmError);
         }
 
         return {
