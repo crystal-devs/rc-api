@@ -1,99 +1,80 @@
-// 1. services/upload/core/imagekit.service.ts (SHARED CORE)
-// ====================================
+// services/upload/core/imagekit.service.ts - FIXED VERSION
 
-import ImageKit from 'imagekit';
+import { imagekit } from '@configs/imagekit.config';
 import { logger } from '@utils/logger';
 
-// ImageKit configuration
-const imagekit = new ImageKit({
-    publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
-    privateKey: process.env.IMAGE_KIT_PRIVATE_KEY!,
-    urlEndpoint: "https://ik.imagekit.io/roseclick",
-});
-
 export interface ImageKitUploadOptions {
-    fileName: string;
-    folder: string;
-    format: string;
-    quality: number;
-    eventId?: string;
-    mediaId?: string;
-    variantType?: 'original' | 'small' | 'medium' | 'large' | 'preview';
-    tags?: string[];
-}
-
-export interface ImageKitUploadResult {
-    url: string;
-    fileId: string;
-    size?: number;
+  fileName: string;
+  folder: string; // This will be overridden by our path generation
+  format: string;
+  quality: number;
+  eventId: string;
+  mediaId: string;
+  variantType: 'original' | 'small' | 'medium' | 'large' | 'preview';
+  tags?: string[];
 }
 
 /**
- * 🚀 CORE IMAGEKIT UPLOAD FUNCTION (SHARED)
+ * Generate correct ImageKit folder path based on variant type
+ */
+function generateImageKitPath(eventId: string, variantType: string): string {
+  switch (variantType) {
+    case 'original':
+      return `events/${eventId}/originals`;
+    case 'preview':
+      return `events/${eventId}/previews`;
+    case 'small':
+    case 'medium':
+    case 'large':
+      return `events/${eventId}/variants/${variantType}`;
+    default:
+      return `events/${eventId}/misc`;
+  }
+}
+
+/**
+ * Upload buffer to ImageKit with correct path structure
  */
 export const uploadToImageKit = async (
-    buffer: Buffer,
-    options: ImageKitUploadOptions
+  buffer: Buffer,
+  options: ImageKitUploadOptions
 ): Promise<string> => {
-    try {
-        logger.info(`📤 Uploading ${options.fileName}`, {
-            folder: buildFolderPath(options),
-            variant: options.variantType,
-            size: `${(buffer.length / 1024 / 1024).toFixed(2)}MB`
-        });
-
-        const uploadResult = await imagekit.upload({
-            file: buffer,
-            fileName: options.fileName,
-            folder: buildFolderPath(options),
-            useUniqueFileName: false,
-            overwriteFile: true,
-            tags: buildUploadTags(options),
-            transformation: {
-                pre: 'q_auto,f_auto'
-            }
-        });
-
-        logger.info(`✅ Upload successful: ${uploadResult.url}`);
-        return uploadResult.url;
-
-    } catch (error: any) {
-        logger.error('❌ ImageKit upload failed:', error);
-        throw new Error(`ImageKit upload failed: ${error.message}`);
-    }
-};
-
-/**
- * 🔧 BUILD FOLDER PATH
- */
-const buildFolderPath = (options: ImageKitUploadOptions): string => {
-    if (!options.eventId) {
-        return options.folder;
-    }
-
-    switch (options.variantType) {
-        case 'original':
-            return `/events/${options.eventId}/originals`;
-        case 'preview':
-            return `/events/${options.eventId}/previews`;
-        case 'small':
-        case 'medium':
-        case 'large':
-            return `/events/${options.eventId}/variants/${options.variantType}`;
-        default:
-            return options.folder;
-    }
-};
-
-/**
- * 🔧 BUILD UPLOAD TAGS
- */
-const buildUploadTags = (options: ImageKitUploadOptions): string[] => {
-    const baseTags = [
-        options.variantType || 'unknown',
-        options.format,
-        options.eventId || 'no-event'
-    ];
+  try {
+    // Generate correct folder path
+    const folderPath = generateImageKitPath(options.eventId, options.variantType);
     
-    return [...baseTags, ...(options.tags || [])];
+    logger.info(`Uploading to ImageKit: ${folderPath}/${options.fileName}`);
+
+    const uploadResponse = await imagekit.upload({
+      file: buffer,
+      fileName: options.fileName,
+      folder: folderPath, // Use generated path
+      tags: [
+        'event',
+        options.eventId,
+        options.mediaId,
+        options.variantType,
+        ...(options.tags || [])
+      ],
+      useUniqueFileName: false, // We control the filename
+      responseFields: ['fileId', 'url', 'name', 'size', 'filePath']
+    });
+
+    logger.info(`Upload successful: ${uploadResponse.url}`, {
+      fileId: uploadResponse.fileId,
+      filePath: uploadResponse.filePath,
+      size: uploadResponse.size
+    });
+
+    return uploadResponse.url;
+
+  } catch (error: any) {
+    logger.error(`ImageKit upload failed for ${options.fileName}:`, {
+      error: error.message,
+      eventId: options.eventId,
+      variantType: options.variantType,
+      folderPath: generateImageKitPath(options.eventId, options.variantType)
+    });
+    throw new Error(`ImageKit upload failed: ${error.message}`);
+  }
 };

@@ -8,6 +8,7 @@ import fs from 'fs/promises';
 import { mediaNotificationService } from '@services/websocket/notifications';
 import { uploadOriginalImage, uploadVariantImage } from '@services/upload/core/upload-variants.service';
 import { simpleProgressService } from '@services/websocket/simple-progress.service'; // Add this import
+import { getBullMQRedisConfig } from '@utils/redis.util';
 
 // Types
 interface ImageProcessingJobData {
@@ -56,16 +57,16 @@ let imageWorkerInstance: Worker | null = null;
 
 export const initializeImageWorker = async (): Promise<Worker> => {
   try {
-    const redisConfig = {
-      host: getRedisHost(),
-      port: getRedisPort(),
-      password: getRedisPassword(),
-      maxRetriesPerRequest: 3,
-      retryDelayOnFailover: 100,
-      lazyConnect: true,
-      keepAlive: 30000,
-      family: 4 as const,
-    };
+    // const redisConfig = {
+    //   host: getRedisHost(),
+    //   port: getRedisPort(),
+    //   password: getRedisPassword(),
+    //   maxRetriesPerRequest: 3,
+    //   retryDelayOnFailover: 100,
+    //   lazyConnect: true,
+    //   keepAlive: 30000,
+    //   family: 4 as const,  
+    // };
 
     imageWorkerInstance = new Worker(
       'image-processing',
@@ -241,7 +242,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
         }
       },
       {
-        connection: redisConfig,
+        connection: getBullMQRedisConfig(),
         concurrency: getConcurrencyLevel(),
       }
     );
@@ -515,45 +516,6 @@ function calculateTotalVariantsSize(variants: any): number {
   });
 
   return Math.round(total * 100) / 100;
-}
-
-function getRedisHost(): string {
-  const redisUrl = keys.redisUrl as string;
-  if (redisUrl?.startsWith('redis://')) {
-    try {
-      const url = new URL(redisUrl);
-      return url.hostname || 'localhost';
-    } catch {
-      return 'localhost';
-    }
-  }
-  return process.env.REDIS_HOST || 'localhost';
-}
-
-function getRedisPort(): number {
-  const redisUrl = keys.redisUrl as string;
-  if (redisUrl?.startsWith('redis://')) {
-    try {
-      const url = new URL(redisUrl);
-      return parseInt(url.port) || 6379;
-    } catch {
-      return 6379;
-    }
-  }
-  return parseInt(process.env.REDIS_PORT || '6379');
-}
-
-function getRedisPassword(): string | undefined {
-  const redisUrl = keys.redisUrl as string;
-  if (redisUrl?.startsWith('redis://')) {
-    try {
-      const url = new URL(redisUrl);
-      return url.password || undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  return process.env.REDIS_PASSWORD || undefined;
 }
 
 export const getImageWorker = (): Worker | null => {

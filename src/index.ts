@@ -1,8 +1,8 @@
 // index.ts - UPDATED to include bulk operations router
 import { keys } from "@configs/dotenv.config";
-import { 
-  corsOptions, 
-  rateLimiter, 
+import {
+  corsOptions,
+  rateLimiter,
   securityHeaders
 } from "@configs/security.config";
 import { gracefulShutdown } from "@configs/shutdown.config";
@@ -116,7 +116,8 @@ async function initializeApplication() {
     if (redisConnected) {
       await InitializationService.initializeImageProcessing();
       await InitializationService.initializeBulkDownload();
-      
+      await InitializationService.initializeImageStorageCleaup();
+
       // Initialize cleanup jobs
       CleanupService.initializeBulkDownloadCleanupJobs();
     }

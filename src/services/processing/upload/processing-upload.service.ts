@@ -1,17 +1,10 @@
 // 4. services/processing/upload/processing-upload.service.ts
 // ====================================
 
-import ImageKit from 'imagekit';
 import path from 'path';
 import { logger } from '@utils/logger';
 import type { ImageProcessingJobData, ProcessedImageVariant } from '../processing.types';
-
-// 🚀 IMAGEKIT: Reuse connection
-const imagekit = new ImageKit({
-    publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
-    privateKey: process.env.IMAGE_KIT_PRIVATE_KEY!,
-    urlEndpoint: "https://ik.imagekit.io/roseclick",
-});
+import { imagekit } from '@configs/imagekit.config';
 
 export class ProcessingUploadService {
     /**

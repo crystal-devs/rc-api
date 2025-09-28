@@ -6,20 +6,13 @@ import { createWriteStream } from 'fs';
 import { promises as fs } from 'fs';
 import path from 'path';
 import axios from 'axios';
-import ImageKit from 'imagekit';
 import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
 import { Event } from '@models/event.model';
 import { Media } from '@models/media.model';
 import { BulkDownload, BulkDownloadDocument } from '@models/bulk-download.model';
 import { redisConnection } from '@configs/redis.config';
-
-// Initialize ImageKit
-const imagekit = new ImageKit({
-    publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
-    privateKey: process.env.IMAGE_KIT_PRIVATE_KEY!,
-    urlEndpoint: "https://ik.imagekit.io/roseclick",
-});
+import { imagekit } from '@configs/imagekit.config';
 
 // Define the allowed stage types
 type CurrentStage = 'initializing' | 'fetching_media' | 'downloading_files' | 'creating_archive' | 'uploading_archive' | 'generating_link' | 'notifying_user' | 'completed';

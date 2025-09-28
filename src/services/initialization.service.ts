@@ -6,6 +6,7 @@ import { logger } from '@utils/logger';
 import { initializeImageQueue } from 'queues/imageQueue';
 import { initializeImageWorker } from 'workers/imageWorker';
 import { BulkDownloadService } from './media/bulk-download.service';
+import { initializeStorageCleanupWorker } from 'workers/storageCleanupWorker';
 
 export class InitializationService {
 
@@ -43,6 +44,21 @@ export class InitializationService {
         } catch (error) {
             logger.error('Failed to initialize image processing:', error);
             logger.warn('Continuing without image processing queue - uploads will fail');
+            return false;
+        }
+    }
+
+    static async initializeImageStorageCleaup() {
+        try {
+            logger.info('Initializing Image cleanup worker system...');
+
+            await initializeStorageCleanupWorker();
+
+            logger.info('Image cleanup worker system initialized (WebSocket bridge disabled)');
+            return true;
+        } catch (error) {
+            logger.error('Failed to initialize Image cleanup worker system:', error);
+            logger.warn('Continuing without Image cleanup worker system queue - uploads will fail');
             return false;
         }
     }

@@ -1,11 +1,10 @@
-// 2. services/upload/core/upload-variants.service.ts (SHARED)
-// ====================================
+// services/upload/core/upload-variants.service.ts - UPDATED with proper folder paths
 
 import { uploadToImageKit } from './imagekit.service';
 import type { ImageKitUploadOptions } from './imagekit.service';
 
 /**
- * 🚀 UPLOAD ORIGINAL IMAGE
+ * Upload original image with proper folder structure
  */
 export const uploadOriginalImage = async (
     buffer: Buffer,
@@ -18,18 +17,18 @@ export const uploadOriginalImage = async (
 
     return uploadToImageKit(buffer, {
         fileName,
-        folder: '',
+        folder: '', // Will be overridden by imagekit.service.ts
         format: originalFormat,
         quality: 100,
         eventId,
         mediaId,
-        variantType: 'original',
+        variantType: 'original', // This determines the folder path
         tags: additionalTags
     });
 };
 
 /**
- * 🚀 UPLOAD VARIANT IMAGE
+ * Upload variant image with proper folder structure
  */
 export const uploadVariantImage = async (
     buffer: Buffer,
@@ -44,18 +43,18 @@ export const uploadVariantImage = async (
 
     return uploadToImageKit(buffer, {
         fileName,
-        folder: '',
+        folder: '', // Will be overridden by imagekit.service.ts
         format,
         quality,
         eventId,
         mediaId,
-        variantType: size,
+        variantType: size, // This determines the folder path: events/{eventId}/variants/{size}
         tags: additionalTags
     });
 };
 
 /**
- * 🚀 UPLOAD PREVIEW IMAGE
+ * Upload preview image with proper folder structure
  */
 export const uploadPreviewImage = async (
     buffer: Buffer,
@@ -67,18 +66,18 @@ export const uploadPreviewImage = async (
 
     return uploadToImageKit(buffer, {
         fileName,
-        folder: '',
+        folder: '', // Will be overridden by imagekit.service.ts
         format: 'jpeg',
         quality: 85,
         eventId,
         mediaId,
-        variantType: 'preview',
+        variantType: 'preview', // This determines the folder path: events/{eventId}/previews
         tags: additionalTags
     });
 };
 
 /**
- * 🚀 BATCH UPLOAD VARIANTS
+ * Batch upload variants with proper folder structure
  */
 export const uploadMultipleVariants = async (
     variants: Array<{
