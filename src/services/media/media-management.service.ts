@@ -11,7 +11,8 @@ import type { ServiceResponse, StatusUpdateOptions } from './media.types';
 import { getPhotoWallWebSocketService } from '@services/photoWallWebSocketService';
 import { imagekit } from '@configs/imagekit.config';
 import { FileObject } from 'imagekit/dist/libs/interfaces';
-import { queueStorageCleanup } from 'workers/storageCleanupWorker';
+// import { queueStorageCleanup } from 'workers/storageCleanupWorker';
+import { queueStorageCleanup } from 'workers/batchStorageCleanupWorker';
 import { validateAndCleanUrls } from '@utils/file.util';
 
 export const updateMediaStatusService = async (

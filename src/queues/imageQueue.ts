@@ -1,160 +1,314 @@
-// queues/imageQueue.ts - Fixed TypeScript errors
+// queues/imageQueue.ts - FIXED REDIS TIMEOUT ISSUES
 
-import { Queue, Job } from 'bullmq';
+import { Queue, Job, Worker } from 'bullmq';
 import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
+import { processOptimisticImage } from './optimisticImageProcessor';
 
 let imageQueue: Queue | null = null;
+let imageWorker: Worker | null = null;
 
 export const initializeImageQueue = async (): Promise<Queue> => {
   try {
-    // 🚀 OPTIMIZED REDIS CONFIG: Performance-focused settings
-    const redisConfig = {
+    // FIXED: Optimized Redis config with proper timeout settings
+    const redisConfig: any = {
       host: getRedisHost(),
       port: getRedisPort(),
       password: getRedisPassword(),
       
-      // 🔧 PERFORMANCE: Connection optimizations
-      maxRetriesPerRequest: 3,
-      retryDelayOnFailover: 100,
-      lazyConnect: true,
-      keepAlive: 30000,
-      family: 4, // IPv4 for better performance
+      // CRITICAL FIXES for timeout issues
+      maxRetriesPerRequest: null as any, // CHANGED: null allows unlimited retries per request
+      enableReadyCheck: false,     // ADDED: Disable ready check to prevent blocking
+      enableOfflineQueue: true,    // ADDED: Queue commands when disconnected
       
-      // 🔧 MEMORY: Optimize memory usage
-      maxLoadingTimeout: 5000,
-      connectTimeout: 10000,
-      commandTimeout: 5000,
+      // Connection optimizations
+      connectTimeout: 30000,       // INCREASED: 30s for initial connection
+      commandTimeout: 30000,       // INCREASED: 30s for commands (was 5s - too short!)
+      keepAlive: 30000,
+      family: 4,
+      
+      // Retry strategy - IMPORTANT for handling network issues
+      retryStrategy: (times: number) => {
+        const delay = Math.min(times * 50, 2000);
+        logger.warn(`Redis retry attempt ${times}, waiting ${delay}ms`);
+        return delay;
+      },
+      
+      // Reconnect on error
+      reconnectOnError: (err: Error) => {
+        const targetError = 'READONLY';
+        if (err.message.includes(targetError)) {
+          return true; // Reconnect on READONLY errors
+        }
+        return false;
+      },
+      
+      // Additional stability settings
+      lazyConnect: false, // CHANGED: Connect immediately, not lazily
+      autoResubscribe: true,
+      autoResendUnfulfilledCommands: true,
     };
 
-    // 🚀 OPTIMIZED QUEUE: High-performance settings
+    // Log connection attempt
+    logger.info('Connecting to Redis with config:', {
+      host: redisConfig.host,
+      port: redisConfig.port,
+      hasPassword: !!redisConfig.password
+    });
+
+    // Create queue with fixed configuration
     imageQueue = new Queue('image-processing', {
       connection: redisConfig,
       
       defaultJobOptions: {
-        // 🔧 CLEANUP: Keep queues clean
-        removeOnComplete: 20,  // Keep more completed jobs for debugging
-        removeOnFail: 10,     // Keep fewer failed jobs
+        removeOnComplete: {
+          count: 50,  // Keep last 50 completed jobs
+          age: 24 * 3600 // Remove after 24 hours
+        },
+        removeOnFail: {
+          count: 20,   // Keep last 20 failed jobs
+          age: 7 * 24 * 3600 // Remove after 7 days
+        },
         
-        // 🔧 RETRY: Smart retry strategy
+        // Retry strategy
         attempts: 3,
         backoff: {
           type: 'exponential',
-          delay: 1000, // Start with 1 second
+          delay: 2000, // Start with 2 seconds (was 1s)
         },
         
-        // 🔧 PRIORITY: Default priority
         priority: 5,
       }
     });
 
-    // 🔧 CONNECTION: Wait for Redis connection
+    // IMPORTANT: Wait for queue to be ready before proceeding
     await imageQueue.waitUntilReady();
+    logger.info('Image queue connected and ready');
 
-    // 🚀 MONITORING: Essential event handlers (simplified for compatibility)
-    imageQueue.on('error', (error: Error) => {
-      logger.error('❌ Image queue error:', error);
+    // Test Redis connection
+    await testRedisConnection(imageQueue);
+
+    // Initialize worker with same fixed config
+    imageWorker = new Worker('image-processing', async (job: Job) => {
+      const { name, data } = job;
+      
+      logger.info(`Processing job ${job.id}: ${name}`, {
+        mediaId: data.mediaId?.substring(0, 8) + '...',
+        filename: data.originalFilename,
+        isOptimistic: data.isOptimistic || false
+      });
+
+      // Handle different job types
+      switch (name) {
+        case 'process-image':
+        case 'process-optimistic-image':
+          return await processOptimisticImage(job);
+        
+        case 'process-image-variants':
+          return await processOptimisticImage(job);
+        
+        default:
+          throw new Error(`Unknown job type: ${name}`);
+      }
+    }, {
+      connection: {
+        ...redisConfig,
+        // Worker can have slightly different settings
+        maxRetriesPerRequest: null as any,
+        enableReadyCheck: false,
+      },
+      concurrency: process.env.NODE_ENV === 'production' ? 5 : 2,
+      maxStalledCount: 3,        // INCREASED: Allow more stall recoveries
+      stalledInterval: 30000,    // 30 seconds
+      lockDuration: 300000,      // ADDED: 5 min lock duration (matches job timeout)
+      
+      // Auto-run: Start processing immediately
+      autorun: true,
     });
 
-    // 🔧 NOTE: Some events may not be available depending on BullMQ version
-    // Only add event listeners that are guaranteed to exist
-    try {
-      imageQueue.on('waiting', (job: Job) => {
-        logger.debug(`⏳ Job ${job.id} waiting in queue`);
-      });
-    } catch (e) {
-      logger.debug('Waiting event not available in this BullMQ version');
-    }
+    // Wait for worker to be ready
+    await imageWorker.waitUntilReady();
+    logger.info('Image worker connected and ready');
 
-    logger.info('✅ Image processing queue initialized with optimized settings');
+    // Setup monitoring
+    setupOptimisticQueueMonitoring();
+
+    logger.info('Enhanced image processing queue initialized successfully');
     return imageQueue;
     
   } catch (error) {
-    logger.error('❌ Failed to initialize image queue:', error);
+    logger.error('Failed to initialize image queue:', error);
     throw error;
   }
 };
+
+/**
+ * Test Redis connection health
+ */
+async function testRedisConnection(queue: Queue): Promise<void> {
+  try {
+    // Try to get queue stats as a connection test
+    const jobCounts = await queue.getJobCounts();
+    logger.info('Redis connection test successful:', jobCounts);
+  } catch (error) {
+    logger.error('Redis connection test failed:', error);
+    throw new Error('Redis connection unhealthy');
+  }
+}
+
+/**
+ * Enhanced queue monitoring for optimistic uploads
+ */
+function setupOptimisticQueueMonitoring(): void {
+  if (!imageQueue || !imageWorker) return;
+
+  // Queue events
+  imageQueue.on('error', (error: Error) => {
+    logger.error('Image queue error:', error);
+  });
+
+  imageQueue.on('waiting', (jobId: string) => {
+    logger.debug(`Job ${jobId} waiting in queue`);
+  });
+
+  // Worker events - Enhanced for optimistic processing
+  imageWorker.on('completed', (job: Job, result: any) => {
+    const processingTime = Date.now() - (job.timestamp || Date.now());
+    const isOptimistic = job.data?.isOptimistic || false;
+    const jobType = isOptimistic ? 'optimistic' : 'regular';
+    
+    if (processingTime > 30000) {
+      logger.warn(`Slow ${jobType} job completed: ${job.id} took ${processingTime}ms`, {
+        filename: job.data?.originalFilename,
+        mediaId: job.data?.mediaId?.substring(0, 8) + '...'
+      });
+    } else {
+      logger.info(`${jobType.charAt(0).toUpperCase() + jobType.slice(1)} job completed: ${job.id} in ${processingTime}ms`, {
+        filename: job.data?.originalFilename,
+        mediaId: job.data?.mediaId?.substring(0, 8) + '...'
+      });
+    }
+  });
+
+  imageWorker.on('failed', (job: Job | undefined, err: Error) => {
+    const isOptimistic = job?.data?.isOptimistic || false;
+    const jobType = isOptimistic ? 'optimistic' : 'regular';
+    
+    logger.error(`${jobType.charAt(0).toUpperCase() + jobType.slice(1)} job failed: ${job?.id}`, {
+      error: err.message,
+      stack: err.stack,
+      filename: job?.data?.originalFilename,
+      mediaId: job?.data?.mediaId?.substring(0, 8) + '...',
+      attempts: job?.attemptsMade || 0
+    });
+  });
+
+  imageWorker.on('stalled', (jobId: string) => {
+    logger.warn(`Job ${jobId} stalled - will be retried`);
+  });
+
+  imageWorker.on('progress', (job: Job, progress: number | object) => {
+    const isOptimistic = job.data?.isOptimistic || false;
+    
+    if (isOptimistic) {
+      logger.debug(`Optimistic job progress: ${job.id} - ${JSON.stringify(progress)}`, {
+        filename: job.data?.originalFilename,
+        mediaId: job.data?.mediaId?.substring(0, 8) + '...'
+      });
+    }
+  });
+
+  // ADDED: Worker error events
+  imageWorker.on('error', (error: Error) => {
+    logger.error('Worker error:', error);
+  });
+
+  logger.info('Enhanced queue monitoring setup completed');
+}
 
 export const getImageQueue = (): Queue | null => {
   return imageQueue;
 };
 
 /**
- * 🚀 OPTIONAL: Setup queue monitoring (call this after queue is initialized)
- * This handles the event listener compatibility issues
+ * Add optimistic job with higher priority
  */
-export const setupQueueMonitoring = (): void => {
+export const addOptimisticJob = async (
+  jobName: string,
+  jobData: any,
+  options: any = {}
+): Promise<Job | null> => {
   if (!imageQueue) {
-    logger.warn('Cannot setup monitoring - queue not initialized');
-    return;
+    logger.warn('Image queue not initialized, cannot add optimistic job');
+    return null;
   }
 
   try {
-    // Try to add monitoring events with error handling
-    const queueEvents = imageQueue as any;
-    
-    if (typeof queueEvents.on === 'function') {
-      // These events might not exist in all BullMQ versions
-      try {
-        queueEvents.on('completed', (job: any, result: any) => {
-          const processingTime = Date.now() - (job.timestamp || Date.now());
-          if (processingTime > 30000) {
-            logger.warn(`🐌 Slow job completed: ${job.id} took ${processingTime}ms`);
-          } else {
-            logger.info(`✅ Job ${job.id} completed in ${processingTime}ms`);
-          }
-        });
-      } catch (e) {
-        logger.debug('Completed event not available');
-      }
-
-      try {
-        queueEvents.on('failed', (job: any, err: any) => {
-          logger.error(`❌ Job ${job?.id} failed:`, err?.message || err);
-        });
-      } catch (e) {
-        logger.debug('Failed event not available');
-      }
-
-      try {
-        queueEvents.on('stalled', (jobId: string) => {
-          logger.warn(`⚠️ Job ${jobId} stalled - will be retried`);
-        });
-      } catch (e) {
-        logger.debug('Stalled event not available');
-      }
+    // ADDED: Wait for queue to be ready
+    try {
+      await imageQueue.waitUntilReady();
+    } catch (waitError) {
+      logger.warn('Queue may not be fully ready, proceeding anyway');
     }
 
-    logger.info('✅ Queue monitoring setup completed');
-  } catch (error) {
-    logger.warn('Could not setup queue monitoring:', error);
-  }
-};
+    const job = await imageQueue.add(jobName, {
+      ...jobData,
+      isOptimistic: true
+    }, {
+      priority: 10,
+      delay: 0,
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 2000 },
+      ...options
+    });
 
-/**
- * 🚀 UTILITY: Add multiple jobs at once for better performance
- */
-export const addBulkJobs = async (jobs: Array<{
-  name: string;
-  data: any;
-  opts?: any;
-}>): Promise<void> => {
-  if (!imageQueue) {
-    logger.warn('Image queue not initialized, cannot add bulk jobs');
-    return;
-  }
-
-  try {
-    await imageQueue.addBulk(jobs);
-    logger.info(`✅ Added ${jobs.length} jobs to queue in bulk`);
+    logger.info(`Added optimistic job: ${job.id} for ${jobData.originalFilename}`);
+    return job;
   } catch (error) {
-    logger.error('❌ Failed to add bulk jobs:', error);
+    logger.error('Failed to add optimistic job:', error);
     throw error;
   }
 };
 
 /**
- * 🚀 MONITORING: Get queue statistics
+ * Add multiple optimistic jobs at once for better performance
+ */
+export const addBulkOptimisticJobs = async (jobs: Array<{
+  name: string;
+  data: any;
+  opts?: any;
+}>): Promise<void> => {
+  if (!imageQueue) {
+    logger.warn('Image queue not initialized, cannot add bulk optimistic jobs');
+    return;
+  }
+
+  try {
+    const optimisticJobs = jobs.map(job => ({
+      ...job,
+      data: {
+        ...job.data,
+        isOptimistic: true
+      },
+      opts: {
+        priority: 8,
+        delay: 0,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+        ...job.opts
+      }
+    }));
+
+    await imageQueue.addBulk(optimisticJobs);
+    logger.info(`Added ${jobs.length} optimistic jobs to queue in bulk`);
+  } catch (error) {
+    logger.error('Failed to add bulk optimistic jobs:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get enhanced queue statistics
  */
 export const getQueueStats = async () => {
   if (!imageQueue) return null;
@@ -168,41 +322,77 @@ export const getQueueStats = async () => {
       imageQueue.getDelayed(),
     ]);
 
+    const optimisticWaiting = waiting.filter(job => job.data?.isOptimistic);
+    const regularWaiting = waiting.filter(job => !job.data?.isOptimistic);
+    
+    const optimisticActive = active.filter(job => job.data?.isOptimistic);
+    const regularActive = active.filter(job => !job.data?.isOptimistic);
+
     return {
       waiting: waiting.length,
       active: active.length,
       completed: completed.length,
       failed: failed.length,
       delayed: delayed.length,
-      total: waiting.length + active.length + completed.length + failed.length + delayed.length
+      total: waiting.length + active.length + completed.length + failed.length + delayed.length,
+      breakdown: {
+        optimistic: {
+          waiting: optimisticWaiting.length,
+          active: optimisticActive.length
+        },
+        regular: {
+          waiting: regularWaiting.length,
+          active: regularActive.length
+        }
+      }
     };
   } catch (error) {
-    logger.error('❌ Failed to get queue stats:', error);
+    logger.error('Failed to get enhanced queue stats:', error);
     return null;
   }
 };
 
 /**
- * 🚀 MAINTENANCE: Clean up old jobs periodically
+ * Enhanced cleanup for old jobs
  */
 export const cleanupOldJobs = async (): Promise<void> => {
   if (!imageQueue) return;
 
   try {
-    // Clean jobs older than 24 hours
     const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
     
     await imageQueue.clean(oneDayAgo, 100, 'completed');
     await imageQueue.clean(oneDayAgo, 50, 'failed');
     
-    logger.info('🧹 Cleaned up old jobs from queue');
+    logger.info('Cleaned up old jobs from enhanced queue');
   } catch (error) {
-    logger.error('❌ Failed to cleanup old jobs:', error);
+    logger.error('Failed to cleanup old jobs from enhanced queue:', error);
   }
 };
 
 /**
- * 🛠️ HELPER FUNCTIONS: Parse Redis connection
+ * Graceful shutdown of queue and worker
+ */
+export const shutdownImageQueue = async (): Promise<void> => {
+  try {
+    logger.info('Shutting down image processing system...');
+    
+    if (imageWorker) {
+      await imageWorker.close();
+      logger.info('Image worker closed');
+    }
+    
+    if (imageQueue) {
+      await imageQueue.close();
+      logger.info('Image queue closed');
+    }
+  } catch (error) {
+    logger.error('Error during queue shutdown:', error);
+  }
+};
+
+/**
+ * HELPER FUNCTIONS: Parse Redis connection
  */
 function getRedisHost(): string {
   const redisUrl = keys.redisUrl as string;
@@ -243,9 +433,13 @@ function getRedisPassword(): string | undefined {
   return process.env.REDIS_PASSWORD || undefined;
 }
 
-// 🚀 STARTUP: Auto-cleanup on queue initialization (optional)
+// AUTO-CLEANUP: Enhanced cleanup on queue initialization
 if (process.env.NODE_ENV === 'production') {
   setInterval(async () => {
     await cleanupOldJobs();
   }, 60 * 60 * 1000); // Clean every hour
 }
+
+// Graceful shutdown handling
+process.on('SIGTERM', shutdownImageQueue);
+process.on('SIGINT', shutdownImageQueue);

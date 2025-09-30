@@ -21,15 +21,15 @@ const imageVariantsSchema = new mongoose.Schema({
         format: { type: String, required: true }
     },
     small: {
-        webp: { type: imageVariantSchema, required: true },
+        webp: { type: imageVariantSchema, required: false },
         jpeg: { type: imageVariantSchema, required: true }
     },
     medium: {
-        webp: { type: imageVariantSchema, required: true },
+        webp: { type: imageVariantSchema, required: false },
         jpeg: { type: imageVariantSchema, required: true }
     },
     large: {
-        webp: { type: imageVariantSchema, required: true },
+        webp: { type: imageVariantSchema, required: false },
         jpeg: { type: imageVariantSchema, required: true }
     }
 }, { _id: false });
@@ -94,7 +94,7 @@ const processingSchema = new mongoose.Schema({
 
     current_stage: {
         type: String,
-        enum: ['uploading', 'preview_creating', 'processing', 'variants_creating', 'completed', 'failed'],
+        enum: ['uploading', 'queued', 'preview_creating', 'processing', 'variants_creating', 'completed', 'failed'],
         default: 'uploading'
     },
     progress_percentage: { type: Number, default: 0, min: 0, max: 100 },
@@ -386,7 +386,7 @@ export type MediaType = InferSchemaType<typeof mediaSchema>;
 export type MediaCreationType = Omit<MediaType, '_id'>;
 
 // ✅ NEW: Export stage types for type safety
-export type ProcessingStage = 'uploading' | 'preview_creating' | 'processing' | 'variants_creating' | 'completed' | 'failed';
+export type ProcessingStage = 'uploading' | 'preview_creating' | 'processing' | 'variants_creating' | 'completed' | 'failed' | 'queued';
 export type ProcessingStatus = 'pending' | 'processing' | 'completed' | 'failed';
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'auto_approved' | 'hidden';
 

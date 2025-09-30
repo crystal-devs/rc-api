@@ -15,7 +15,7 @@ import {
     getMediaVariantsController,
     getBatchOptimizedUrlsController
 } from "@controllers/media.controller";
-import { getBatchUploadStatusController, getUploadStatusController, uploadMediaController, } from "@controllers/upload.controller";
+import { optimisticUploadController } from "@controllers/upload.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import {
     checkStorageLimitMiddleware,
@@ -53,22 +53,15 @@ mediaRouter.post(
     checkFileSizeLimitMiddleware as RequestHandler,
     checkStorageLimitMiddleware as RequestHandler,
     checkEventPhotoLimitMiddleware as RequestHandler,
-    uploadMediaController as RequestHandler // Uses optimized controller
+    optimisticUploadController as RequestHandler,
+    // uploadMediaController as RequestHandler // Uses optimized controller
 );
 
-// Add status endpoints
-mediaRouter.get("/status/:mediaId", getUploadStatusController as RequestHandler);
-mediaRouter.post("/status/batch", getBatchUploadStatusController as RequestHandler); // 🆕 Add this
+// mediaRouter.get('/temp-image/:mediaId', serveTempImageController);
 
-// mediaRouter.post(
-//     "/upload/multiple",
-//     authMiddleware,
-//     upload.array('images', 10), // Allow up to 10 files with field name 'images'
-//     checkFileSizeLimitMiddleware as RequestHandler,
-//     checkStorageLimitMiddleware as RequestHandler,
-//     checkEventPhotoLimitMiddleware as RequestHandler,
-//     uploadMultipleMediaController // New controller
-// );
+// Add status endpoints
+// mediaRouter.get("/status/:mediaId", getUploadStatusController as RequestHandler);
+// mediaRouter.post("/status/batch", getBatchUploadStatusController as RequestHandler);
 
 // Cover image upload (always requires auth)
 mediaRouter.post(
