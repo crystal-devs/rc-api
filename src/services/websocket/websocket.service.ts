@@ -7,7 +7,7 @@ import { logger } from '@utils/logger';
 import { websocketAuthMiddleware, websocketRateLimit, websocketLogger } from '@middlewares/websocket-auth.middleware';
 
 // Import our management services
-import { authenticateConnection, handleSubscription, handleUnsubscription } from './management/websocket-auth.service';
+import { authenticateConnection, handleSubscription } from './management/websocket-auth.service';
 import { WebSocketHealthService } from './management/websocket-health.service';
 
 import type {

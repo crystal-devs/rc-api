@@ -3,7 +3,7 @@
 import { Queue, Job, Worker } from 'bullmq';
 import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
-import { processOptimisticImage } from './optimisticImageProcessor';
+import { mediaProcessingService } from '@services/media';
 
 let imageQueue: Queue | null = null;
 let imageWorker: Worker | null = null;
@@ -15,25 +15,25 @@ export const initializeImageQueue = async (): Promise<Queue> => {
       host: getRedisHost(),
       port: getRedisPort(),
       password: getRedisPassword(),
-      
+
       // CRITICAL FIXES for timeout issues
       maxRetriesPerRequest: null as any, // CHANGED: null allows unlimited retries per request
       enableReadyCheck: false,     // ADDED: Disable ready check to prevent blocking
       enableOfflineQueue: true,    // ADDED: Queue commands when disconnected
-      
+
       // Connection optimizations
       connectTimeout: 30000,       // INCREASED: 30s for initial connection
       commandTimeout: 30000,       // INCREASED: 30s for commands (was 5s - too short!)
       keepAlive: 30000,
       family: 4,
-      
+
       // Retry strategy - IMPORTANT for handling network issues
       retryStrategy: (times: number) => {
         const delay = Math.min(times * 50, 2000);
         logger.warn(`Redis retry attempt ${times}, waiting ${delay}ms`);
         return delay;
       },
-      
+
       // Reconnect on error
       reconnectOnError: (err: Error) => {
         const targetError = 'READONLY';
@@ -42,7 +42,7 @@ export const initializeImageQueue = async (): Promise<Queue> => {
         }
         return false;
       },
-      
+
       // Additional stability settings
       lazyConnect: false, // CHANGED: Connect immediately, not lazily
       autoResubscribe: true,
@@ -59,7 +59,7 @@ export const initializeImageQueue = async (): Promise<Queue> => {
     // Create queue with fixed configuration
     imageQueue = new Queue('image-processing', {
       connection: redisConfig,
-      
+
       defaultJobOptions: {
         removeOnComplete: {
           count: 50,  // Keep last 50 completed jobs
@@ -69,14 +69,14 @@ export const initializeImageQueue = async (): Promise<Queue> => {
           count: 20,   // Keep last 20 failed jobs
           age: 7 * 24 * 3600 // Remove after 7 days
         },
-        
+
         // Retry strategy
         attempts: 3,
         backoff: {
           type: 'exponential',
           delay: 2000, // Start with 2 seconds (was 1s)
         },
-        
+
         priority: 5,
       }
     });
@@ -91,22 +91,20 @@ export const initializeImageQueue = async (): Promise<Queue> => {
     // Initialize worker with same fixed config
     imageWorker = new Worker('image-processing', async (job: Job) => {
       const { name, data } = job;
-      
+
       logger.info(`Processing job ${job.id}: ${name}`, {
         mediaId: data.mediaId?.substring(0, 8) + '...',
         filename: data.originalFilename,
         isOptimistic: data.isOptimistic || false
       });
 
-      // Handle different job types
+      // Use the new media processing service
       switch (name) {
         case 'process-image':
         case 'process-optimistic-image':
-          return await processOptimisticImage(job);
-        
         case 'process-image-variants':
-          return await processOptimisticImage(job);
-        
+          return await mediaProcessingService.processBackgroundJob(data);
+
         default:
           throw new Error(`Unknown job type: ${name}`);
       }
@@ -121,7 +119,7 @@ export const initializeImageQueue = async (): Promise<Queue> => {
       maxStalledCount: 3,        // INCREASED: Allow more stall recoveries
       stalledInterval: 30000,    // 30 seconds
       lockDuration: 300000,      // ADDED: 5 min lock duration (matches job timeout)
-      
+
       // Auto-run: Start processing immediately
       autorun: true,
     });
@@ -135,7 +133,7 @@ export const initializeImageQueue = async (): Promise<Queue> => {
 
     logger.info('Enhanced image processing queue initialized successfully');
     return imageQueue;
-    
+
   } catch (error) {
     logger.error('Failed to initialize image queue:', error);
     throw error;
@@ -176,7 +174,7 @@ function setupOptimisticQueueMonitoring(): void {
     const processingTime = Date.now() - (job.timestamp || Date.now());
     const isOptimistic = job.data?.isOptimistic || false;
     const jobType = isOptimistic ? 'optimistic' : 'regular';
-    
+
     if (processingTime > 30000) {
       logger.warn(`Slow ${jobType} job completed: ${job.id} took ${processingTime}ms`, {
         filename: job.data?.originalFilename,
@@ -193,7 +191,7 @@ function setupOptimisticQueueMonitoring(): void {
   imageWorker.on('failed', (job: Job | undefined, err: Error) => {
     const isOptimistic = job?.data?.isOptimistic || false;
     const jobType = isOptimistic ? 'optimistic' : 'regular';
-    
+
     logger.error(`${jobType.charAt(0).toUpperCase() + jobType.slice(1)} job failed: ${job?.id}`, {
       error: err.message,
       stack: err.stack,
@@ -209,7 +207,7 @@ function setupOptimisticQueueMonitoring(): void {
 
   imageWorker.on('progress', (job: Job, progress: number | object) => {
     const isOptimistic = job.data?.isOptimistic || false;
-    
+
     if (isOptimistic) {
       logger.debug(`Optimistic job progress: ${job.id} - ${JSON.stringify(progress)}`, {
         filename: job.data?.originalFilename,
@@ -324,7 +322,7 @@ export const getQueueStats = async () => {
 
     const optimisticWaiting = waiting.filter(job => job.data?.isOptimistic);
     const regularWaiting = waiting.filter(job => !job.data?.isOptimistic);
-    
+
     const optimisticActive = active.filter(job => job.data?.isOptimistic);
     const regularActive = active.filter(job => !job.data?.isOptimistic);
 
@@ -360,10 +358,10 @@ export const cleanupOldJobs = async (): Promise<void> => {
 
   try {
     const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
-    
+
     await imageQueue.clean(oneDayAgo, 100, 'completed');
     await imageQueue.clean(oneDayAgo, 50, 'failed');
-    
+
     logger.info('Cleaned up old jobs from enhanced queue');
   } catch (error) {
     logger.error('Failed to cleanup old jobs from enhanced queue:', error);
@@ -376,12 +374,12 @@ export const cleanupOldJobs = async (): Promise<void> => {
 export const shutdownImageQueue = async (): Promise<void> => {
   try {
     logger.info('Shutting down image processing system...');
-    
+
     if (imageWorker) {
       await imageWorker.close();
       logger.info('Image worker closed');
     }
-    
+
     if (imageQueue) {
       await imageQueue.close();
       logger.info('Image queue closed');

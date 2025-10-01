@@ -2,24 +2,9 @@ import mongoose from "mongoose";
 import { MODEL_NAMES } from "./names";
 
 // Guest Session Schema - Track anonymous users before they log in
-const guestSessionSchema = new mongoose.Schema({
     _id: {
         type: mongoose.Schema.Types.ObjectId,
         default: () => new mongoose.Types.ObjectId()
-    },
-
-    // Unique session identifier (stored in browser localStorage/cookie)
-    session_id: {
-        type: String,
-        required: true,
-        unique: true,
-        index: true
-    },
-
-    // Event they're participating in
-    event_id: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: MODEL_NAMES.EVENT,
         required: true
     },
 

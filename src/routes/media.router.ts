@@ -13,7 +13,10 @@ import {
     getGuestMediaController,
     getMediaByIdController,
     getMediaVariantsController,
-    getBatchOptimizedUrlsController
+    getBatchOptimizedUrlsController,
+    getUploadStatusController,
+    getBatchUploadStatusController,
+    retryUploadController
 } from "@controllers/media.controller";
 import { optimisticUploadController } from "@controllers/upload.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
@@ -143,6 +146,28 @@ mediaRouter.post(
     "/batch/optimized-urls",
     authMiddleware,
     getBatchOptimizedUrlsController
+);
+
+// === UPLOAD STATUS ENDPOINTS ===
+// Get upload progress status for a single media item
+mediaRouter.get(
+    "/upload/:mediaId/status",
+    authMiddleware,
+    getUploadStatusController
+);
+
+// Batch get upload status for multiple media items
+mediaRouter.post(
+    "/upload/batch-status",
+    authMiddleware,
+    getBatchUploadStatusController
+);
+
+// Retry failed upload processing
+mediaRouter.post(
+    "/upload/:mediaId/retry",
+    authMiddleware,
+    retryUploadController
 );
 
 export default mediaRouter;

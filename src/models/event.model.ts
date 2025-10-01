@@ -76,7 +76,7 @@ const eventSchema = new mongoose.Schema({
     created_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: [true, 'Created by is required'] },
 
     // Share token for general event access
-    share_token: { type: String, unique: true, sparse: true },
+    share_token: { type: String, sparse: true },
     share_settings: { type: shareSettingsSchema, default: () => ({}) },
 
     // Permissions for users with the share token

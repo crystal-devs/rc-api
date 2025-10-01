@@ -7,7 +7,6 @@ import sharp from 'sharp';
 import fs from 'fs/promises';
 import { mediaNotificationService } from '@services/websocket/notifications';
 import { uploadOriginalImage, uploadVariantImage } from '@services/upload/core/upload-variants.service';
-import { simpleProgressService } from '@services/websocket/simple-progress.service'; // Add this import
 import { getBullMQRedisConfig } from '@utils/redis.util';
 
 // Types
@@ -57,71 +56,104 @@ let imageWorkerInstance: Worker | null = null;
 
 export const initializeImageWorker = async (): Promise<Worker> => {
   try {
-    // const redisConfig = {
-    //   host: getRedisHost(),
-    //   port: getRedisPort(),
-    //   password: getRedisPassword(),
-    //   maxRetriesPerRequest: 3,
-    //   retryDelayOnFailover: 100,
-    //   lazyConnect: true,
-    //   keepAlive: 30000,
-    //   family: 4 as const,  
-    // };
-
     imageWorkerInstance = new Worker(
       'image-processing',
       async (job: Job<ImageProcessingJobData>): Promise<ProcessingResult> => {
         const startTime = Date.now();
-        const { mediaId, originalFilename, filePath, eventId, userName, isGuestUpload } = job.data;
+        const { mediaId, originalFilename, filePath, eventId, userName, userId, isGuestUpload } = job.data;
 
         logger.info(`🔄 Processing variants: ${originalFilename} (${mediaId}) - ${isGuestUpload ? 'Guest' : 'Admin'} upload`);
 
         try {
-          // STEP 1: Update status to processing - USING SIMPLE PROGRESS SERVICE ONLY
+          // STEP 1: Update status to processing
           await Media.findByIdAndUpdate(mediaId, {
             'processing.status': 'processing',
+            'processing.current_stage': 'processing',
+            'processing.progress_percentage': 30,
             'processing.started_at': new Date(),
           });
 
-          // Use SimpleProgressService instead of job.updateProgress
-          await simpleProgressService.updateProgress({
-            mediaId,
+          // Broadcast progress via WebSocket
+          mediaNotificationService.broadcastOptimisticMediaUpdate({
+            type: 'processing_progress',
             eventId,
-            stage: 'processing',
-            percentage: 5,
-            message: 'Starting image processing...',
-            jobId: job.id
+            mediaData: {
+              id: mediaId,
+              filename: originalFilename,
+              status: 'processing',
+              processingStage: 'processing',
+              progressPercentage: 30,
+              uploadedBy: {
+                id: userId,
+                name: userName || 'User',
+                type: isGuestUpload ? 'guest' : 'admin'
+              }
+            },
+            timestamp: new Date(),
+            allUsersCanSee: true
           });
 
-          // STEP 2: Generate all variants (10-90%)
+          // STEP 2: Generate all variants
           const variants = await generateImageVariants(filePath, mediaId, eventId, async (progress) => {
-            // Use SimpleProgressService for all progress updates
-            await simpleProgressService.updateProgress({
-              mediaId,
+            const percentage = 30 + Math.round(progress * 0.5); // 30-80%
+
+            // Update database
+            await Media.findByIdAndUpdate(mediaId, {
+              'processing.current_stage': 'variants_creating',
+              'processing.progress_percentage': percentage
+            });
+
+            // Broadcast progress
+            mediaNotificationService.broadcastOptimisticMediaUpdate({
+              type: 'processing_progress',
               eventId,
-              stage: 'variants_creating',
-              percentage: 10 + (progress * 0.8),
-              message: `Creating variants... ${Math.round(10 + (progress * 0.8))}%`,
-              jobId: job.id
+              mediaData: {
+                id: mediaId,
+                filename: originalFilename,
+                status: 'processing',
+                processingStage: 'optimizing',
+                progressPercentage: percentage,
+                uploadedBy: {
+                  id: userId,
+                  name: userName || 'User',
+                  type: isGuestUpload ? 'guest' : 'admin'
+                }
+              },
+              timestamp: new Date(),
+              allUsersCanSee: true
             });
           });
 
-          await simpleProgressService.updateProgress({
-            mediaId,
-            eventId,
-            stage: 'variants_creating',
-            percentage: 90,
-            message: 'Finalizing variants...',
-            jobId: job.id
+          // STEP 3: Finalizing (80-95%)
+          await Media.findByIdAndUpdate(mediaId, {
+            'processing.current_stage': 'finalizing',
+            'processing.progress_percentage': 85
           });
 
-          // STEP 3: Get original metadata
-          const originalMetadata = await getOriginalImageMetadata(filePath);
+          mediaNotificationService.broadcastOptimisticMediaUpdate({
+            type: 'processing_progress',
+            eventId,
+            mediaData: {
+              id: mediaId,
+              filename: originalFilename,
+              status: 'processing',
+              processingStage: 'finalizing',
+              progressPercentage: 85,
+              uploadedBy: {
+                id: userId,
+                name: userName || 'User',
+                type: isGuestUpload ? 'guest' : 'admin'
+              }
+            },
+            timestamp: new Date(),
+            allUsersCanSee: true
+          });
 
-          // STEP 4: Upload original to permanent storage
+          // STEP 4: Get original metadata and upload
+          const originalMetadata = await getOriginalImageMetadata(filePath);
           const originalUrl = await uploadOriginal(filePath, mediaId, eventId);
 
-          // STEP 5: Update database with everything (95%)
+          // STEP 5: Update database with everything
           const processingTime = Date.now() - startTime;
 
           const updateData = {
@@ -132,6 +164,8 @@ export const initializeImageWorker = async (): Promise<Worker> => {
             'metadata.color_profile': originalMetadata.colorProfile,
             'metadata.has_transparency': originalMetadata.hasTransparency,
             'processing.status': 'completed',
+            'processing.current_stage': 'completed',
+            'processing.progress_percentage': 100,
             'processing.completed_at': new Date(),
             'processing.processing_time_ms': processingTime,
             'processing.variants_generated': true,
@@ -153,27 +187,20 @@ export const initializeImageWorker = async (): Promise<Worker> => {
 
           await Media.findByIdAndUpdate(mediaId, updateData);
 
-          // Handle WebSocket differently for guest vs admin uploads
-          if (!isGuestUpload) {
-            const bestGuestUrl = variants.medium?.webp?.url || variants.medium?.jpeg?.url || originalUrl;
+          // Broadcast completion
+          const bestGuestUrl = variants.medium?.webp?.url || variants.medium?.jpeg?.url || originalUrl;
 
-            mediaNotificationService.broadcastProcessingComplete({
-              mediaId,
-              eventId,
-              newUrl: bestGuestUrl,
-              variants: {
-                thumbnail: variants.small?.jpeg?.url || bestGuestUrl,
-                display: bestGuestUrl,
-                full: variants.large?.jpeg?.url || bestGuestUrl
-              },
-              processingTimeMs: processingTime
-            });
-          } else {
-            logger.info(`✅ Guest upload processed: ${mediaId} - Admin can review`);
-          }
-
-          // Final completion update - USING SIMPLE PROGRESS SERVICE
-          await simpleProgressService.markCompleted(mediaId, eventId);
+          mediaNotificationService.broadcastProcessingComplete({
+            mediaId,
+            eventId,
+            newUrl: bestGuestUrl,
+            variants: {
+              thumbnail: variants.small?.jpeg?.url || bestGuestUrl,
+              display: bestGuestUrl,
+              full: variants.large?.jpeg?.url || bestGuestUrl
+            },
+            processingTimeMs: processingTime
+          });
 
           // Cleanup: Remove local file
           try {
@@ -191,7 +218,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
             processingTime,
             variants: calculateVariantsCount(variants),
             originalUrl,
-            bestGuestUrl: variants.medium?.webp?.url || variants.medium?.jpeg?.url || originalUrl,
+            bestGuestUrl,
             variantUrls: {
               small_webp: variants.small?.webp?.url,
               small_jpeg: variants.small?.jpeg?.url,
@@ -211,23 +238,20 @@ export const initializeImageWorker = async (): Promise<Worker> => {
           // Update failure status
           await Media.findByIdAndUpdate(mediaId, {
             'processing.status': 'failed',
+            'processing.current_stage': 'failed',
+            'processing.progress_percentage': 0,
             'processing.completed_at': new Date(),
             'processing.processing_time_ms': processingTime,
             'processing.error_message': error.message || 'Unknown processing error',
             'processing.retry_count': job.attemptsMade || 0,
           });
 
-          // Mark as failed - USING SIMPLE PROGRESS SERVICE
-          await simpleProgressService.markFailed(mediaId, eventId, error.message || 'Processing failed');
-
-          // Handle failure notifications differently for guest vs admin
-          if (!isGuestUpload) {
-            mediaNotificationService.broadcastProcessingFailed({
-              mediaId,
-              eventId,
-              errorMessage: error.message || 'Processing failed'
-            });
-          }
+          // Broadcast failure
+          mediaNotificationService.broadcastProcessingFailed({
+            mediaId,
+            eventId,
+            errorMessage: error.message || 'Processing failed'
+          });
 
           // Cleanup on failure
           try {
@@ -247,49 +271,24 @@ export const initializeImageWorker = async (): Promise<Worker> => {
       }
     );
 
-    // Event handlers - REMOVED PROGRESS LOGGING TO PREVENT SPAM
+    // Event handlers
     imageWorkerInstance.on('completed', (job: Job<ImageProcessingJobData>, result: ProcessingResult) => {
       const processingTime = Date.now() - job.timestamp;
-      const uploadType = job.data.isGuestUpload ? 'Guest' : 'Admin';
-
-      logger.info(`✅ Worker completed job ${job.id} in ${processingTime}ms - ${uploadType} upload`);
+      logger.info(`✅ Worker completed job ${job.id} in ${processingTime}ms`);
 
       if (processingTime > 60000) {
         logger.warn(`🐌 Very slow job: ${job.id} took ${(processingTime / 1000).toFixed(1)}s`);
       }
-
-      if (result.success && job.data.eventId) {
-        if (!job.data.isGuestUpload) {
-          mediaNotificationService.broadcastMediaStats(job.data.eventId);
-        }
-      }
     });
 
     imageWorkerInstance.on('failed', (job: Job<ImageProcessingJobData> | undefined, err: Error) => {
-      const uploadType = job?.data.isGuestUpload ? 'Guest' : 'Admin';
-
-      logger.error(`❌ Worker failed job ${job?.id} (${uploadType}):`, {
+      logger.error(`❌ Worker failed job ${job?.id}:`, {
         error: err.message,
         attempts: job?.attemptsMade,
-        data: job?.data?.originalFilename,
-        eventId: job?.data?.eventId,
-        isGuestUpload: job?.data.isGuestUpload
+        filename: job?.data?.originalFilename,
+        eventId: job?.data?.eventId
       });
-
-      if (job && job.attemptsMade >= 3 && job.data?.eventId && job.data?.mediaId) {
-        logger.warn(`❌ Final failure for ${job.data.mediaId} (${uploadType})`);
-
-        if (!job.data.isGuestUpload) {
-          mediaNotificationService.broadcastProcessingFailed({
-            mediaId: job.data.mediaId,
-            eventId: job.data.eventId,
-            errorMessage: 'Processing failed after multiple attempts'
-          });
-        }
-      }
     });
-
-    // REMOVED progress event handler to prevent spam logging
 
     logger.info(`✅ Image worker initialized with concurrency: ${getConcurrencyLevel()}`);
     return imageWorkerInstance;

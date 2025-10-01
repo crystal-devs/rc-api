@@ -117,7 +117,6 @@ const eventParticipantSchema = new mongoose.Schema({
     // Access token for guest users (if needed)
     access_token: {
         type: String,
-        unique: true,
         sparse: true
     },
 
