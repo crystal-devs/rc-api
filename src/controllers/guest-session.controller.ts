@@ -91,29 +91,3 @@ export const claimGuestContentController: RequestHandler = async (
         });
     }
 };
-
-// // routes/guestSessionRoutes.ts
-// import express from 'express';
-// import { authMiddleware } from '../middleware/authMiddleware';
-// import {
-//     getClaimableSummaryController,
-//     claimGuestContentController
-// } from '../controllers/guestSessionController';
-
-// const router = express.Router();
-
-// // Get claimable content summary (requires auth)
-// router.get(
-//     '/claimable/:eventId',
-//     authMiddleware,
-//     getClaimableSummaryController
-// );
-
-// // Claim guest content (requires auth)
-// router.post(
-//     '/claim/:eventId',
-//     authMiddleware,
-//     claimGuestContentController
-// );
-
-// export default router;
