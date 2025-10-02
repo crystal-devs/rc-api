@@ -18,7 +18,7 @@ export function getFileType(file: Express.Multer.File): 'image' | 'video' | null
 export function isValidImageFormat(file: Express.Multer.File): boolean {
     const validImageTypes = [
         'image/jpeg',
-        'image/jpg', 
+        'image/jpg',
         'image/png',
         'image/webp',
         'image/heic',
@@ -63,7 +63,7 @@ export async function cleanupFile(file: Express.Multer.File): Promise<void> {
  */
 export function calculateTotalVariantsSize(variants: any): number {
     if (!variants) return 0;
-    
+
     let total = 0;
     try {
         Object.values(variants).forEach((sizeVariants: any) => {
@@ -86,7 +86,7 @@ export function calculateTotalVariantsSize(variants: any): number {
  */
 export function calculateVariantsCount(variants: any): number {
     if (!variants) return 0;
-    
+
     let count = 0;
     try {
         Object.values(variants).forEach((sizeVariants: any) => {
@@ -121,7 +121,7 @@ export function mbToBytes(mb: number): number {
  */
 export function detectContextFromUserAgent(userAgent?: string): 'mobile' | 'desktop' | 'lightbox' {
     if (!userAgent) return 'desktop';
-    
+
     const mobileRegex = /Mobile|Android|iPhone|iPad|iPod|BlackBerry|Windows Phone/i;
     return mobileRegex.test(userAgent) ? 'mobile' : 'desktop';
 }
@@ -131,7 +131,7 @@ export function detectContextFromUserAgent(userAgent?: string): 'mobile' | 'desk
  */
 export function supportsWebP(userAgent?: string): boolean {
     if (!userAgent) return true; // Default to true for modern browsers
-    
+
     // WebP is supported by Chrome, Firefox, Edge, Opera, and Android browsers
     // But not by Safari on iOS/macOS (yet)
     return /Chrome|Firefox|Edge|Opera|Android/.test(userAgent) && !/Safari|iPhone|iPad/.test(userAgent);
@@ -153,7 +153,7 @@ export function getOptimizedImageUrlForItem(
     }
 
     const variants = mediaItem.image_variants;
-    
+
     // Map quality options for backward compatibility
     let targetVariant;
     switch (quality) {
@@ -194,7 +194,7 @@ export function getOptimizedImageUrlForItem(
     } else if (format === 'auto') {
         // Auto-detect WebP support from User-Agent
         const webpSupported = supportsWebP(userAgent);
-        
+
         if (webpSupported && targetVariant.webp?.url) {
             return targetVariant.webp.url;
         } else if (targetVariant.jpeg?.url) {
@@ -211,7 +211,7 @@ export function getOptimizedImageUrlForItem(
  */
 export function hasImageVariants(mediaItem: any): boolean {
     return !!(
-        mediaItem?.image_variants && 
+        mediaItem?.image_variants &&
         mediaItem.type === 'image' &&
         mediaItem.processing?.status === 'completed' &&
         mediaItem.processing?.variants_generated === true
@@ -272,13 +272,13 @@ interface MediaMetadata {
  */
 export function getMediaMetadata(mediaItem: any, userAgent?: string): MediaMetadata {
     const hasVariants = hasImageVariants(mediaItem);
-    
+
     return {
         _id: mediaItem._id,
         type: mediaItem.type,
         url: mediaItem.url, // Original URL
-        optimized_url: hasVariants ? 
-            getOptimizedImageUrlForItem(mediaItem, 'medium', 'auto', 'desktop', userAgent) : 
+        optimized_url: hasVariants ?
+            getOptimizedImageUrlForItem(mediaItem, 'medium', 'auto', 'desktop', userAgent) :
             mediaItem.url,
         has_variants: hasVariants,
         processing_status: mediaItem.processing?.status || 'unknown',
@@ -328,7 +328,7 @@ export function getResponsiveImageUrls(
     preferred: string;
 } {
     const context = detectContextFromUserAgent(userAgent);
-    
+
     return {
         thumbnail: getOptimizedImageUrlForItem(mediaItem, 'small', 'auto', 'mobile', userAgent),
         medium: getOptimizedImageUrlForItem(mediaItem, 'medium', 'auto', 'desktop', userAgent),
@@ -353,7 +353,7 @@ export function transformMediaForResponse(
 ): any[] {
     return mediaItems.map(item => {
         const transformed: MediaMetadata = getMediaMetadata(item, userAgent);
-        
+
         // Add variant information if requested
         if (options.includeVariants && hasImageVariants(item)) {
             transformed.responsive_urls = getResponsiveImageUrls(item, userAgent);
@@ -372,7 +372,7 @@ export function transformMediaForResponse(
                 }
             };
         }
-        
+
         // Add specific optimized URL if quality/format/context specified
         if (options.quality || options.format || options.context) {
             transformed.requested_optimized_url = getOptimizedImageUrlForItem(
@@ -383,7 +383,161 @@ export function transformMediaForResponse(
                 userAgent
             );
         }
-        
+
         return transformed;
     });
 }
+
+export const extractImageKitFileId = (url: string): string | null => {
+    try {
+        if (!url || !url.includes('imagekit.io')) {
+            return null;
+        }
+
+        // Your ImageKit URL format: 
+        // https://ik.imagekit.io/roseclick/events/{eventId}/originals/original_{mediaId}.jpg
+        // We need everything after 'roseclick': events/{eventId}/originals/original_{mediaId}.jpg
+
+        const urlObj = new URL(url);
+        const pathParts = urlObj.pathname.split('/').filter(part => part !== '');
+
+        // pathParts = ['roseclick', 'events', '68d2ac7c...', 'originals', 'original_68d2aca...jpg']
+        // Remove 'roseclick' (your ImageKit ID) and join the rest
+        if (pathParts.length > 1 && pathParts[0] === 'roseclick') {
+            pathParts.shift(); // Remove 'roseclick'
+            const filePath = pathParts.join('/');
+
+            logger.debug('Extracted ImageKit file path:', {
+                originalUrl: url,
+                extractedPath: filePath
+            });
+
+            return filePath;
+        }
+
+        // Fallback: try regex approach
+        const match = url.match(/imagekit\.io\/[^\/]+\/(.+)$/);
+        if (match && match[1]) {
+            logger.debug('Extracted ImageKit file path (regex):', {
+                originalUrl: url,
+                extractedPath: match[1]
+            });
+            return match[1];
+        }
+
+        logger.warn('Could not extract file path from URL:', url);
+        return null;
+    } catch (error) {
+        logger.error('Failed to extract ImageKit file path:', error);
+        return null;
+    }
+};
+
+/**
+ * NEW: Extract file directory from ImageKit URL
+ * Useful for batch operations
+ */
+export const extractImageKitDirectory = (url: string): string | null => {
+    const filePath = extractImageKitFileId(url);
+    if (!filePath) return null;
+    
+    const parts = filePath.split('/');
+    parts.pop(); // Remove filename
+    return parts.join('/');
+};
+
+/**
+ * NEW: Extract event ID from ImageKit URL
+ */
+export const extractEventIdFromImageKitUrl = (url: string): string | null => {
+    const filePath = extractImageKitFileId(url);
+    if (!filePath) return null;
+    
+    // Path format: events/{eventId}/originals/file.jpg
+    const parts = filePath.split('/');
+    if (parts.length >= 2 && parts[0] === 'events') {
+        return parts[1];
+    }
+    
+    return null;
+};
+
+/**
+ * NEW: Validate ImageKit URL format
+ */
+export const isValidImageKitUrl = (url: string): boolean => {
+    if (!url || typeof url !== 'string') return false;
+    
+    try {
+        const urlObj = new URL(url);
+        return urlObj.hostname.includes('imagekit.io');
+    } catch {
+        return false;
+    }
+};
+
+/**
+ * NEW: Get file type from ImageKit URL
+ */
+export const getFileTypeFromImageKitUrl = (url: string): 'original' | 'variant' | 'unknown' => {
+    const filePath = extractImageKitFileId(url);
+    if (!filePath) return 'unknown';
+    
+    if (filePath.includes('/originals/')) return 'original';
+    if (filePath.includes('/variants/')) return 'variant';
+    
+    return 'unknown';
+};
+
+/**
+ * NEW: Group URLs by event ID for batch processing
+ */
+export const groupUrlsByEvent = (urls: string[]): Map<string, string[]> => {
+    const grouped = new Map<string, string[]>();
+    
+    urls.forEach(url => {
+        const eventId = extractEventIdFromImageKitUrl(url);
+        if (eventId) {
+            if (!grouped.has(eventId)) {
+                grouped.set(eventId, []);
+            }
+            grouped.get(eventId)!.push(url);
+        } else {
+            logger.warn('Could not extract event ID from URL:', url);
+        }
+    });
+    
+    return grouped;
+};
+
+/**
+ * NEW: Validate and clean URLs before deletion
+ */
+export const validateAndCleanUrls = (urls: string[]): {
+    validUrls: string[];
+    invalidUrls: string[];
+} => {
+    const validUrls: string[] = [];
+    const invalidUrls: string[] = [];
+    
+    urls.forEach(url => {
+        if (isValidImageKitUrl(url)) {
+            validUrls.push(url);
+        } else {
+            invalidUrls.push(url);
+        }
+    });
+    
+    if (invalidUrls.length > 0) {
+        logger.warn(`Found ${invalidUrls.length} invalid ImageKit URLs`, {
+            sample: invalidUrls.slice(0, 3)
+        });
+    }
+    
+    return { validUrls, invalidUrls };
+};
+/**
+ * Legacy function name - keeping for backward compatibility
+ * @deprecated Use extractImageKitFileId instead
+ */
+export const getImageKitFileId = extractImageKitFileId;

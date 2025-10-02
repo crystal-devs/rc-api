@@ -2,13 +2,51 @@
 // ====================================
 
 import { Event } from "@models/event.model";
+import { EventParticipant } from "@models/event-participants.model";
 import { ActivityLog } from "@models/activity-log.model";
 import { updateUsageForEventCreation, updateUsageForEventDeletion } from "@models/user-usage.model";
 import { logger } from "@utils/logger";
 import mongoose from "mongoose";
 import { ServiceResponse } from "@services/media";
 import { EventType } from "./event.types";
-import { PhotoWall } from "@models/photowall.model";
+import { getPhotoWallWebSocketService } from "@services/photoWallWebSocketService";
+
+// Role permissions template
+const ROLE_PERMISSIONS = {
+    creator: {
+        can_view: true,
+        can_upload: true,
+        can_download: true,
+        can_invite_others: true,
+        can_moderate_content: true,
+        can_manage_participants: true,
+        can_edit_event: true,
+        can_delete_event: true,
+        can_transfer_ownership: true
+    },
+    co_host: {
+        can_view: true,
+        can_upload: true,
+        can_download: true,
+        can_invite_others: true,
+        can_moderate_content: true,
+        can_manage_participants: true,
+        can_edit_event: true,
+        can_delete_event: false,
+        can_transfer_ownership: false
+    },
+    guest: {
+        can_view: true,
+        can_upload: false,
+        can_download: false,
+        can_invite_others: false,
+        can_moderate_content: false,
+        can_manage_participants: false,
+        can_edit_event: false,
+        can_delete_event: false,
+        can_transfer_ownership: false
+    }
+};
 
 export const createEventService = async (
     eventData: Partial<EventType>
@@ -25,9 +63,7 @@ export const createEventService = async (
             throw new Error('created_by is required');
         }
 
-        logger.info(`[createEventService] eventData.created_by = ${eventData.created_by.toString()}`);
-
-        // Create the event
+        // Create event
         const event = await Event.create([eventData], { session });
         if (!event[0]?._id) {
             throw new Error('Invalid event creation result');
@@ -35,71 +71,60 @@ export const createEventService = async (
 
         const eventId = event[0]._id;
         const creatorId = eventData.created_by;
-        const shareToken = event[0].share_token; // This should be generated in your Event model
+        const shareToken = event[0].share_token;
 
-        // 🎯 NEW: Create Photo Wall for the event
-        try {
-            const photoWall = await PhotoWall.create([{
-                _id: `wall_${shareToken}`,
-                eventId: eventId,
-                shareToken: shareToken,
-                settings: {
-                    isEnabled: true,
-                    displayMode: 'slideshow',
-                    transitionDuration: 5000,
-                    showUploaderNames: false,
-                    autoAdvance: true,
-                    newImageInsertion: 'after_current'
-                },
-                stats: {
-                    activeViewers: 0,
-                    totalViews: 0,
-                    lastViewedAt: null
-                },
-                isActive: true
-            }], { session });
+        await EventParticipant.create([{
+            user_id: creatorId,
+            event_id: eventId,
+            role: 'creator',
+            join_method: 'created_event',
+            status: 'active',
+            permissions: ROLE_PERMISSIONS.creator,
+            joined_at: new Date(),
+            last_activity_at: new Date()
+        }], { session });
 
-            logger.info(`[createEventService] 📺 Created photo wall: ${photoWall[0]._id} for event: ${eventId}`);
-        } catch (photoWallError) {
-            logger.error(`[createEventService] ❌ Failed to create photo wall:`, photoWallError);
-            // Don't fail the entire event creation if photo wall fails
-            // Just log the error and continue
-        }
-
-        // Create activity log
-        await ActivityLog.create(
-            [
-                {
-                    user_id: creatorId,
-                    resource_id: eventId,
-                    resource_type: 'event',
-                    action: 'created',
-                    details: {
-                        event_title: eventData.title,
-                        template: eventData.template,
-                        visibility: event[0].visibility,
-                        photo_wall_created: true, // New field
-                    },
-                },
-            ],
+        // Update event stats to reflect the creator
+        await Event.findByIdAndUpdate(
+            eventId,
+            {
+                $inc: {
+                    'stats.total_participants': 1,
+                    'stats.creators_count': 1
+                }
+            },
             { session }
         );
+
+        // Create activity log
+        await ActivityLog.create([{
+            user_id: creatorId,
+            resource_id: eventId,
+            resource_type: 'event',
+            action: 'created',
+            details: {
+                event_title: eventData.title,
+                template: eventData.template,
+                visibility: event[0].visibility,
+                photowall_enabled: event[0].photowall_settings?.isEnabled || true,
+            },
+        }], { session });
 
         // Update user usage statistics
         await updateUsageForEventCreation(creatorId.toString(), eventId.toString(), session);
 
         await session.commitTransaction();
-        logger.info(`[createEventService] Successfully created event with photo wall: ${eventId}`);
+        logger.info(`[createEventService] Successfully created event: ${eventId}`);
 
         return {
             status: true,
             code: 201,
-            message: 'Event and photo wall created successfully',
+            message: 'Event created successfully',
             data: event[0] as EventType,
             error: null,
             other: {
-                photoWallCreated: true,
-                photoWallUrl: `/wall/${shareToken}` // Frontend can use this
+                photoWallUrl: `/wall/${shareToken}`,
+                photowallSettings: event[0].photowall_settings
             },
         };
     } catch (error) {
@@ -132,7 +157,7 @@ export const deleteEventService = async (
     try {
         logger.info(`[deleteEventService] Starting deletion for event: ${eventId} by user: ${userId}`);
 
-        // Check if event exists
+        // Check if event exists and user has permission to delete
         const event = await Event.findById(eventId).session(session);
         if (!event) {
             await session.abortTransaction();
@@ -146,10 +171,30 @@ export const deleteEventService = async (
             };
         }
 
-        // Delete event and related data
-        await Promise.all([
-            Event.findOneAndDelete({ _id: new mongoose.Types.ObjectId(eventId) }, { session }),
-        ]);
+        // Check if user has permission to delete (creator or co-host with delete permission)
+        const userParticipant = await EventParticipant.findOne({
+            user_id: new mongoose.Types.ObjectId(userId),
+            event_id: new mongoose.Types.ObjectId(eventId),
+            status: 'active'
+        }).session(session);
+
+        if (!userParticipant || !userParticipant.permissions.can_delete_event) {
+            await session.abortTransaction();
+            return {
+                status: false,
+                code: 403,
+                message: "Insufficient permissions to delete this event",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Delete all event participants first
+        await EventParticipant.deleteMany({ event_id: new mongoose.Types.ObjectId(eventId) }, { session });
+
+        // Delete event
+        await Event.findOneAndDelete({ _id: new mongoose.Types.ObjectId(eventId) }, { session });
 
         // Log deletion activity
         await ActivityLog.create([{
@@ -159,7 +204,8 @@ export const deleteEventService = async (
             action: "deleted",
             details: {
                 event_title: event.title,
-                deleted_at: new Date()
+                deleted_at: new Date(),
+                deleted_by_role: userParticipant.role
             }
         }], { session });
 
@@ -206,6 +252,44 @@ export const updateEventService = async (
     session.startTransaction();
 
     try {
+        // Check if user has permission to edit the event
+        const userParticipant = await EventParticipant.findOne({
+            user_id: new mongoose.Types.ObjectId(userId),
+            event_id: new mongoose.Types.ObjectId(eventId),
+            status: 'active'
+        }).session(session);
+
+        if (!userParticipant || !userParticipant.permissions.can_edit_event) {
+            await session.abortTransaction();
+            return {
+                status: false,
+                code: 403,
+                message: 'Insufficient permissions to edit this event',
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        // Process PhotoWall settings if included
+        if (updateData.photowall_settings) {
+            const allowedPhotowallFields = [
+                'isEnabled', 'displayMode', 'transitionDuration',
+                'showUploaderNames', 'autoAdvance', 'newImageInsertion'
+            ];
+
+            const filteredPhotowallSettings: any = {};
+            Object.keys(updateData.photowall_settings).forEach(key => {
+                if (allowedPhotowallFields.includes(key)) {
+                    filteredPhotowallSettings[`photowall_settings.${key}`] = updateData.photowall_settings[key];
+                }
+            });
+
+            // Replace photowall_settings with filtered nested updates
+            delete updateData.photowall_settings;
+            Object.assign(updateData, filteredPhotowallSettings);
+        }
+
         const updatedEvent = await Event.findByIdAndUpdate(
             eventId,
             { $set: updateData },
@@ -214,8 +298,7 @@ export const updateEventService = async (
                 runValidators: true,
                 session
             }
-        ).populate('created_by', 'name email avatar')
-            .populate('co_hosts.user_id', 'name email avatar');
+        ).populate('created_by', 'name email avatar');
 
         if (!updatedEvent) {
             await session.abortTransaction();
@@ -227,6 +310,27 @@ export const updateEventService = async (
                 error: null,
                 other: null
             };
+        }
+
+        // Update participant's last activity
+        await EventParticipant.findOneAndUpdate(
+            {
+                user_id: new mongoose.Types.ObjectId(userId),
+                event_id: new mongoose.Types.ObjectId(eventId)
+            },
+            { last_activity_at: new Date() },
+            { session }
+        );
+
+        // If photowall settings were updated, notify WebSocket clients
+        if ('photowall_settings' in updateData) {
+            const wsService = getPhotoWallWebSocketService();
+            if (wsService && updatedEvent.share_token) {
+                wsService.broadcastSettingsUpdate(
+                    updatedEvent.share_token,
+                    updatedEvent.photowall_settings
+                );
+            }
         }
 
         await session.commitTransaction();
@@ -256,5 +360,138 @@ export const updateEventService = async (
         };
     } finally {
         await session.endSession();
+    }
+};
+
+// Helper function to get user's role in an event
+export const getUserEventRole = async (
+    userId: string,
+    eventId: string
+): Promise<ServiceResponse<{ role: string; permissions: any }>> => {
+    try {
+        const participant = await EventParticipant.findOne({
+            user_id: new mongoose.Types.ObjectId(userId),
+            event_id: new mongoose.Types.ObjectId(eventId),
+            status: 'active'
+        });
+
+        if (!participant) {
+            return {
+                status: false,
+                code: 404,
+                message: "User is not a participant in this event",
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        return {
+            status: true,
+            code: 200,
+            message: "User role retrieved successfully",
+            data: {
+                role: String(participant.role),
+                permissions: participant.permissions
+            },
+            error: null,
+            other: {
+                join_method: participant.join_method,
+                joined_at: participant.joined_at,
+                last_activity_at: participant.last_activity_at
+            }
+        };
+    } catch (error: any) {
+        logger.error('Error in getUserEventRole:', error);
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to get user role",
+            data: null,
+            error: {
+                message: error.message,
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            },
+            other: null
+        };
+    }
+};
+
+// Helper function to get all events for a user with their roles
+export const getUserEventsService = async (
+    userId: string,
+    filters?: {
+        role?: 'creator' | 'co_host' | 'guest';
+        status?: 'active' | 'pending' | 'blocked' | 'removed';
+        archived?: boolean;
+    }
+): Promise<ServiceResponse<EventType[]>> => {
+    try {
+        const matchConditions: any = {
+            user_id: new mongoose.Types.ObjectId(userId)
+        };
+
+        if (filters?.role) {
+            matchConditions.role = filters.role;
+        }
+
+        if (filters?.status) {
+            matchConditions.status = filters.status;
+        } else {
+            matchConditions.status = 'active'; // Default to active
+        }
+
+        const pipeline: any[] = [
+            { $match: matchConditions },
+            {
+                $lookup: {
+                    from: 'events',
+                    localField: 'event_id',
+                    foreignField: '_id',
+                    as: 'event'
+                }
+            },
+            { $unwind: '$event' },
+            {
+                $match: {
+                    'event.archived_at': filters?.archived ? { $ne: null } : null
+                }
+            },
+            {
+                $addFields: {
+                    'event.user_role': '$role',
+                    'event.user_permissions': '$permissions'
+                }
+            },
+            { $replaceRoot: { newRoot: '$event' } },
+            { $sort: { updated_at: -1 } }
+        ];
+
+        const events = await EventParticipant.aggregate(pipeline);
+
+        return {
+            status: true,
+            code: 200,
+            message: "Events retrieved successfully",
+            data: events,
+            error: null,
+            other: {
+                total_count: events.length,
+                filters_applied: filters
+            }
+        };
+    } catch (error: any) {
+        logger.error('Error in getUserEventsService:', error);
+        return {
+            status: false,
+            code: 500,
+            message: "Failed to get user events",
+            data: null,
+            error: {
+                message: error.message,
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            },
+            other: null
+        };
     }
 };

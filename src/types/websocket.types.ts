@@ -187,6 +187,8 @@ export const WEBSOCKET_EVENTS = {
     MEDIA_PROCESSING_UPDATE: 'media_processing_update',
     MEDIA_PROCESSING_COMPLETE: 'media_processing_complete',
     MEDIA_UPLOAD_FAILED: 'media_upload_failed',
+    BULK_UPLOAD_STARTED: 'bulk_upload_started',
+    ADMIN_BULK_UPLOAD_NOTIFICATION: 'admin_bulk_upload_notification',
 
     // Bulk operations
     BULK_MEDIA_UPDATE: 'bulk_media_update',

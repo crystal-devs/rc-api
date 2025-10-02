@@ -13,9 +13,12 @@ import {
     getGuestMediaController,
     getMediaByIdController,
     getMediaVariantsController,
-    getBatchOptimizedUrlsController
+    getBatchOptimizedUrlsController,
+    getUploadStatusController,
+    getBatchUploadStatusController,
+    retryUploadController
 } from "@controllers/media.controller";
-import { getBatchUploadStatusController, getUploadStatusController, uploadMediaController, } from "@controllers/upload.controller";
+import { optimisticUploadController } from "@controllers/upload.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import {
     checkStorageLimitMiddleware,
@@ -53,22 +56,15 @@ mediaRouter.post(
     checkFileSizeLimitMiddleware as RequestHandler,
     checkStorageLimitMiddleware as RequestHandler,
     checkEventPhotoLimitMiddleware as RequestHandler,
-    uploadMediaController as RequestHandler // Uses optimized controller
+    optimisticUploadController as RequestHandler,
+    // uploadMediaController as RequestHandler // Uses optimized controller
 );
 
-// Add status endpoints
-mediaRouter.get("/status/:mediaId", getUploadStatusController as RequestHandler);
-mediaRouter.post("/status/batch", getBatchUploadStatusController as RequestHandler); // 🆕 Add this
+// mediaRouter.get('/temp-image/:mediaId', serveTempImageController);
 
-// mediaRouter.post(
-//     "/upload/multiple",
-//     authMiddleware,
-//     upload.array('images', 10), // Allow up to 10 files with field name 'images'
-//     checkFileSizeLimitMiddleware as RequestHandler,
-//     checkStorageLimitMiddleware as RequestHandler,
-//     checkEventPhotoLimitMiddleware as RequestHandler,
-//     uploadMultipleMediaController // New controller
-// );
+// Add status endpoints
+// mediaRouter.get("/status/:mediaId", getUploadStatusController as RequestHandler);
+// mediaRouter.post("/status/batch", getBatchUploadStatusController as RequestHandler);
 
 // Cover image upload (always requires auth)
 mediaRouter.post(
@@ -150,6 +146,28 @@ mediaRouter.post(
     "/batch/optimized-urls",
     authMiddleware,
     getBatchOptimizedUrlsController
+);
+
+// === UPLOAD STATUS ENDPOINTS ===
+// Get upload progress status for a single media item
+mediaRouter.get(
+    "/upload/:mediaId/status",
+    authMiddleware,
+    getUploadStatusController
+);
+
+// Batch get upload status for multiple media items
+mediaRouter.post(
+    "/upload/batch-status",
+    authMiddleware,
+    getBatchUploadStatusController
+);
+
+// Retry failed upload processing
+mediaRouter.post(
+    "/upload/:mediaId/retry",
+    authMiddleware,
+    retryUploadController
 );
 
 export default mediaRouter;

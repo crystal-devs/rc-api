@@ -1,13 +1,10 @@
-// Helper functions for event role checking
+import { EventParticipant } from '@models/event-participants.model';
 import { Event } from '@models/event.model';
 import mongoose from 'mongoose';
 
 export interface UserEventRole {
-    isEventCreator: boolean;
-    isCoHost: boolean;
-    isGuest: boolean;
+    role: 'creator' | 'co_host' | 'moderator' | 'guest' | 'viewer' | null;
     canAutoApprove: boolean;
-    role: 'creator' | 'co-host' | 'guest';
 }
 
 /**
@@ -18,25 +15,30 @@ export const getUserEventRole = async (
     userId: string
 ): Promise<UserEventRole | null> => {
     try {
-        const event = await Event.findById(eventId);
-        if (!event) {
-            return null;
+        const participant = await EventParticipant.findOne({
+            user_id: new mongoose.Types.ObjectId(userId),
+            event_id: new mongoose.Types.ObjectId(eventId),
+            status: 'active'
+        }).lean();
+
+        if (!participant) {
+            return {
+                role: null,
+                canAutoApprove: false
+            };
         }
 
-        const isEventCreator = event.created_by.toString() === userId;
-        const coHost = event.co_hosts.find(cohost => 
-            cohost.user_id.toString() === userId && 
-            cohost.status === 'approved'
-        );
-        const isCoHost = !!coHost;
-        const isGuest = !isEventCreator && !isCoHost;
+        // Auto-approve based on role or specific permission
+        const canAutoApprove =
+            (typeof participant.role === 'string' && ['creator', 'co_host'].includes(participant.role)) ||
+            Boolean(participant.permissions && (participant.permissions as any).can_approve_content);
 
         return {
-            isEventCreator,
-            isCoHost,
-            isGuest,
-            canAutoApprove: isEventCreator || isCoHost,
-            role: isEventCreator ? 'creator' : isCoHost ? 'co-host' : 'guest'
+            role: typeof participant.role === 'string' &&
+                  ['creator', 'co_host', 'moderator', 'guest', 'viewer'].includes(participant.role)
+                ? participant.role as UserEventRole['role']
+                : null,
+            canAutoApprove
         };
     } catch (error) {
         console.error('Error checking user event role:', error);
@@ -68,9 +70,9 @@ export const determineApprovalStatus = async (
         };
     }
 
-    // Auto-approve for event creator and co-hosts
+    // Auto-approve for creators, co-hosts, and users with approval permission
     if (userRole.canAutoApprove) {
-        const approvalReason = userRole.isEventCreator ? 'host_setting' : 'authenticated_user';
+        const approvalReason = userRole.role === 'creator' ? 'host_setting' : 'authenticated_user';
         return {
             status: 'auto_approved',
             autoApprovalReason: approvalReason,
@@ -80,7 +82,7 @@ export const determineApprovalStatus = async (
     }
 
     // For guests, check event permissions
-    if (!event.permissions.require_approval) {
+    if (!event.permissions?.require_approval) {
         return {
             status: 'auto_approved',
             autoApprovalReason: 'host_setting',

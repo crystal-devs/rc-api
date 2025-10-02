@@ -2,7 +2,7 @@
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import { logger } from '@utils/logger';
-import { PhotoWall } from '@models/photowall.model';
+import { Event } from '@models/event.model'; // 🚀 Use Event instead of PhotoWall
 
 // Helper function to get optimized image URL
 function getOptimizedImageUrlForItem(imageVariants: any, quality: string = 'large'): string {
@@ -42,6 +42,15 @@ interface WallRoom {
   viewers: Map<string, WallSession>;
   isPlaying: boolean;
   lastUpdate: Date;
+  // 🚀 Store event settings locally for quick access
+  settings: {
+    isEnabled: boolean;
+    displayMode: string;
+    showUploaderNames: boolean;
+    newImageInsertion: string;
+    autoAdvance: boolean;
+    transitionDuration: number;
+  } | null;
 }
 
 export class PhotoWallWebSocketService {
@@ -92,49 +101,70 @@ export class PhotoWallWebSocketService {
     });
   }
 
-  private handleJoinWall(socket: Socket, data: any): void {
+  private async handleJoinWall(socket: Socket, data: any): Promise<void> {
     const { shareToken, currentIndex = 0, sessionId, lastFetchTime } = data;
-    socket.join(`wall_${shareToken}`);
+    
+    try {
+      // 🚀 Get event and photowall settings
+      const event = await Event.findOne({ share_token: shareToken })
+        .select('_id photowall_settings share_settings')
+        .lean();
 
-    if (!this.rooms.has(shareToken)) {
-      this.rooms.set(shareToken, {
-        shareToken,
-        viewers: new Map(),
-        isPlaying: true,
-        lastUpdate: new Date()
+      if (!event || !event.share_settings?.is_active || !event.photowall_settings?.isEnabled) {
+        socket.emit('wall-error', {
+          message: 'Photo wall not available or disabled'
+        });
+        return;
+      }
+
+      socket.join(`wall_${shareToken}`);
+
+      // Create or get room
+      if (!this.rooms.has(shareToken)) {
+        this.rooms.set(shareToken, {
+          shareToken,
+          viewers: new Map(),
+          isPlaying: event.photowall_settings.autoAdvance || true,
+          lastUpdate: new Date(),
+          settings: event.photowall_settings
+        });
+      }
+
+      const room = this.rooms.get(shareToken)!;
+      
+      // Update room settings if they've changed
+      if (event.photowall_settings) {
+        room.settings = event.photowall_settings;
+        room.isPlaying = event.photowall_settings.autoAdvance;
+      }
+
+      const session: WallSession = {
+        sessionId: sessionId || `session_${Date.now()}_${socket.id}`,
+        currentIndex,
+        lastFetchTime: lastFetchTime ? new Date(lastFetchTime) : new Date()
+      };
+      
+      room.viewers.set(socket.id, session);
+
+      socket.emit('wall-joined', {
+        sessionId: session.sessionId,
+        currentIndex: session.currentIndex,
+        isPlaying: room.isPlaying,
+        totalViewers: room.viewers.size,
+        settings: room.settings
+      });
+
+      socket.to(`wall_${shareToken}`).emit('viewer-update', {
+        totalViewers: room.viewers.size
+      });
+
+      logger.info(`📺 Viewer joined wall ${shareToken}: ${room.viewers.size} total`);
+    } catch (error) {
+      logger.error('❌ Error in handleJoinWall:', error);
+      socket.emit('wall-error', {
+        message: 'Failed to join photo wall'
       });
     }
-
-    const room = this.rooms.get(shareToken)!;
-    const session: WallSession = {
-      sessionId: sessionId || `session_${Date.now()}_${socket.id}`,
-      currentIndex,
-      lastFetchTime: lastFetchTime ? new Date(lastFetchTime) : new Date()
-    };
-    
-    room.viewers.set(socket.id, session);
-
-    // Update database stats
-    PhotoWall.findOneAndUpdate(
-      { shareToken, isActive: true },
-      { 
-        $set: { 'stats.activeViewers': room.viewers.size },
-        $inc: { 'stats.totalViews': 1 }
-      }
-    ).exec();
-
-    socket.emit('wall-joined', {
-      sessionId: session.sessionId,
-      currentIndex: session.currentIndex,
-      isPlaying: room.isPlaying,
-      totalViewers: room.viewers.size
-    });
-
-    socket.to(`wall_${shareToken}`).emit('viewer-update', {
-      totalViewers: room.viewers.size
-    });
-
-    logger.info(`📺 Viewer joined wall ${shareToken}: ${room.viewers.size} total`);
   }
 
   private handleSyncPosition(socket: Socket, data: any): void {
@@ -153,84 +183,161 @@ export class PhotoWallWebSocketService {
     const room = this.rooms.get(shareToken);
     if (!room) return;
 
+    // Update room state based on control action
+    if (action === 'play') room.isPlaying = true;
+    if (action === 'pause') room.isPlaying = false;
+    if (action === 'toggle') room.isPlaying = !room.isPlaying;
+
     // Broadcast control action to all viewers
     this.io.to(`wall_${shareToken}`).emit('wall-control', {
       action,
       payload,
+      isPlaying: room.isPlaying,
       timestamp: new Date().toISOString()
     });
   }
 
   private handleDisconnect(socket: Socket): void {
-    // Fix: Use Array.from() to avoid iterator issue
     const roomEntries = Array.from(this.rooms.entries());
     
     for (const [shareToken, room] of roomEntries) {
       if (room.viewers.has(socket.id)) {
         room.viewers.delete(socket.id);
 
-        PhotoWall.findOneAndUpdate(
-          { shareToken, isActive: true },
-          { $set: { 'stats.activeViewers': room.viewers.size } }
-        ).exec();
-
         socket.to(`wall_${shareToken}`).emit('viewer-update', {
           totalViewers: room.viewers.size
         });
 
+        logger.info(`📺 Viewer left wall ${shareToken}: ${room.viewers.size} remaining`);
+
+        // Clean up empty rooms
         if (room.viewers.size === 0) {
           this.rooms.delete(shareToken);
+          logger.info(`📺 Cleaned up empty wall room: ${shareToken}`);
         }
         break;
       }
     }
   }
 
-  // Called when new media is uploaded
-  public async notifyNewMediaUpload(eventId: string, mediaItem: any): Promise<void> {
+  // 🚀 UPDATED: Called when new media is uploaded
+  public async notifyNewMediaUpload(shareToken: string, mediaItem: any): Promise<void> {
     try {
-      const walls = await PhotoWall.find({ eventId, isActive: true }).lean();
+      // Get event settings directly
+      const event = await Event.findOne({ share_token: shareToken })
+        .select('photowall_settings')
+        .lean();
 
-      for (const wall of walls) {
-        const room = this.rooms.get(wall.shareToken);
-        if (!room || room.viewers.size === 0) continue;
-
-        const newItemData = {
-          id: mediaItem._id.toString(),
-          imageUrl: getOptimizedImageUrlForItem(mediaItem.image_variants, 'large'),
-          uploaderName: wall.settings.showUploaderNames ? getUploaderName(mediaItem) : null,
-          timestamp: mediaItem.created_at,
-          isNew: true,
-          insertedAt: new Date(),
-          insertionStrategy: wall.settings.newImageInsertion || 'after_current'
-        };
-
-        this.io.to(`wall_${wall.shareToken}`).emit('new-media-inserted', {
-          newItem: newItemData,
-          strategy: wall.settings.newImageInsertion || 'after_current',
-          timestamp: new Date().toISOString(),
-          insertionHint: { position: 'after_current', bufferImages: 3 }
-        });
-
-        logger.info(`📺 Notified wall ${wall.shareToken} about new media: ${mediaItem._id}`);
+      if (!event?.photowall_settings?.isEnabled) {
+        return; // Photo wall disabled, no notification needed
       }
+
+      const room = this.rooms.get(shareToken);
+      if (!room || room.viewers.size === 0) {
+        logger.debug(`📺 No active viewers for wall ${shareToken}, skipping notification`);
+        return;
+      }
+
+      const newItemData = {
+        id: mediaItem._id.toString(),
+        imageUrl: getOptimizedImageUrlForItem(mediaItem.image_variants, 'large'),
+        uploaderName: event.photowall_settings.showUploaderNames ? getUploaderName(mediaItem) : null,
+        timestamp: mediaItem.created_at,
+        isNew: true,
+        insertedAt: new Date(),
+        insertionStrategy: event.photowall_settings.newImageInsertion || 'after_current'
+      };
+
+      this.io.to(`wall_${shareToken}`).emit('new-media-inserted', {
+        newItem: newItemData,
+        strategy: event.photowall_settings.newImageInsertion || 'after_current',
+        timestamp: new Date().toISOString(),
+        insertionHint: { position: 'after_current', bufferImages: 3 }
+      });
+
+      logger.info(`📺 Notified wall ${shareToken} about new media: ${mediaItem._id} (${room.viewers.size} viewers)`);
     } catch (error) {
       logger.error('❌ Error notifying walls about new media:', error);
     }
   }
 
-  public broadcastSettingsUpdate(shareToken: string, newSettings: any): void {
-    this.io.to(`wall_${shareToken}`).emit('settings-updated', {
-      settings: newSettings,
-      timestamp: new Date().toISOString()
-    });
+  // 🚀 UPDATED: Called when media is removed
+  public async notifyMediaRemoved(shareToken: string, mediaId: string, reason?: string): Promise<void> {
+    try {
+      const room = this.rooms.get(shareToken);
+      if (!room || room.viewers.size === 0) {
+        return; // No viewers to notify
+      }
+
+      this.io.to(`wall_${shareToken}`).emit('media-removed', {
+        mediaId,
+        reason: reason || 'Content removed',
+        timestamp: new Date().toISOString()
+      });
+
+      logger.info(`📺 Notified wall ${shareToken} about removed media: ${mediaId}`);
+    } catch (error) {
+      logger.error('❌ Error notifying about removed media:', error);
+    }
+  }
+
+  // 🚀 UPDATED: Broadcast settings update
+  public async broadcastSettingsUpdate(shareToken: string, newSettings: any): Promise<void> {
+    try {
+      // Update local room cache
+      const room = this.rooms.get(shareToken);
+      if (room) {
+        room.settings = newSettings;
+        room.isPlaying = newSettings.autoAdvance || room.isPlaying;
+      }
+
+      this.io.to(`wall_${shareToken}`).emit('settings-updated', {
+        settings: newSettings,
+        timestamp: new Date().toISOString()
+      });
+
+      logger.info(`📺 Broadcasted settings update to wall ${shareToken}`);
+    } catch (error) {
+      logger.error('❌ Error broadcasting settings update:', error);
+    }
+  }
+
+  // 🚀 NEW: Get wall status for a specific share token
+  public getWallStatus(shareToken: string): any {
+    const room = this.rooms.get(shareToken);
+    if (!room) {
+      return {
+        isActive: false,
+        totalViewers: 0,
+        isPlaying: false,
+        settings: null
+      };
+    }
+
+    return {
+      isActive: true,
+      totalViewers: room.viewers.size,
+      isPlaying: room.isPlaying,
+      settings: room.settings,
+      lastUpdate: room.lastUpdate
+    };
   }
 
   public getConnectionStats(): any {
     const roomValues = Array.from(this.rooms.values());
+    const totalConnections = roomValues.reduce((sum, room) => sum + room.viewers.size, 0);
+    const activeWalls = roomValues.filter(room => room.viewers.size > 0).length;
+
     return {
       totalActiveWalls: this.rooms.size,
-      totalConnections: roomValues.reduce((sum, room) => sum + room.viewers.size, 0)
+      wallsWithViewers: activeWalls,
+      totalConnections,
+      rooms: roomValues.map(room => ({
+        shareToken: room.shareToken.substring(0, 8) + '...',
+        viewers: room.viewers.size,
+        isPlaying: room.isPlaying,
+        isEnabled: room.settings?.isEnabled || false
+      }))
     };
   }
 
@@ -238,6 +345,12 @@ export class PhotoWallWebSocketService {
     this.io.disconnectSockets(true);
     this.rooms.clear();
     logger.info('📺 Photo wall WebSocket service cleaned up');
+  }
+
+  // 🚀 NEW: Utility method to check if wall is active
+  public isWallActive(shareToken: string): boolean {
+    const room = this.rooms.get(shareToken);
+    return !!(room && room.viewers.size > 0 && room.settings?.isEnabled);
   }
 }
 
@@ -254,4 +367,16 @@ export const initializePhotoWallWebSocket = (server: HTTPServer): PhotoWallWebSo
 
 export const getPhotoWallWebSocketService = (): PhotoWallWebSocketService | null => {
   return photoWallWebSocketService;
+};
+
+// 🚀 NEW: Helper function to notify media changes by shareToken
+export const notifyPhotoWallMediaChange = async (shareToken: string, mediaItem: any, action: 'added' | 'removed'): Promise<void> => {
+  const wsService = getPhotoWallWebSocketService();
+  if (!wsService) return;
+
+  if (action === 'added') {
+    await wsService.notifyNewMediaUpload(shareToken, mediaItem);
+  } else if (action === 'removed') {
+    await wsService.notifyMediaRemoved(shareToken, mediaItem._id || mediaItem.id);
+  }
 };

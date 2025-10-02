@@ -56,6 +56,15 @@ const userSchema = new mongoose.Schema({
     }
 }, {timestamps: true})
 
+// 📊 Essential User Indexes for Authentication & Performance
+userSchema.index({ email: 1 }, { unique: true, sparse: true }); // Login queries
+userSchema.index({ phone_number: 1, country_code: 1 }, { sparse: true }); // Phone-based auth
+userSchema.index({ stripeCustomerId: 1 }, { sparse: true }); // Stripe integration
+userSchema.index({ provider: 1, email: 1 }, { sparse: true }); // Social auth queries
+userSchema.index({ subscriptionId: 1 }); // Subscription lookups
+userSchema.index({ lastLoginAt: -1 }); // Recent activity queries
+userSchema.index({ createdAt: -1 }); // User registration analytics
+
 export const User = mongoose.model(MODEL_NAMES.USER, userSchema, MODEL_NAMES.USER);
 
 export type UserType = InferSchemaType<typeof userSchema>;

@@ -5,7 +5,8 @@ import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
 import { Event } from '@models/event.model';
 import { User } from '@models/user.model';
-import { AuthenticatedSocket} from 'types/websocket.types';
+import { AuthenticatedSocket } from 'types/websocket.types';
+import { EventParticipant } from '@models/event-participants.model';
 
 /**
  * WebSocket authentication middleware - validates JWT or share tokens
@@ -26,7 +27,7 @@ export const websocketAuthMiddleware = () => {
       });
 
       next(); // Allow connection, authentication happens later
-      
+
     } catch (error: any) {
       logger.error(`❌ WebSocket auth middleware error:`, error);
       next(new Error('Authentication failed'));
@@ -46,14 +47,14 @@ export const validateJWTToken = async (token: string): Promise<{
 }> => {
   try {
     const decoded = jwt.verify(token, keys.jwtSecret as string) as any;
-    
+
     if (!decoded.userId) {
       throw new Error('Invalid token payload - missing userId');
     }
 
     // Optionally verify user exists in database
     const user = await User.findById(decoded.userId).select('name email');
-    
+
     if (!user) {
       throw new Error('User not found');
     }
@@ -80,77 +81,81 @@ export const validateJWTToken = async (token: string): Promise<{
 /**
  * Check user permissions for event
  */
-export const checkEventPermissions = async (
-  userId: string, 
-  eventId: string
-): Promise<{
-  userRole: 'admin' | 'co_host' | 'user';
-  permissions: any;
-  canManage: boolean;
-}> => {
-  try {
-    const event = await Event.findById(eventId)
-      .populate('created_by', '_id')
-      .populate('co_hosts.user_id', '_id');
+// export const checkEventPermissions = async (
+//   userId: string,
+//   eventId: string
+// ): Promise<{
+//   userRole: 'admin' | 'co_host' | 'user';
+//   permissions: any;
+//   canManage: boolean;
+// }> => {
+//   try {
+//     const event = await Event.findById(eventId)
+//       .populate('created_by', '_id')
+//       .populate('co_hosts.user_id', '_id');
 
-    if (!event) {
-      throw new Error('Event not found');
-    }
+//     if (!event) {
+//       throw new Error('Event not found');
+//     }
 
-    // Check if user is event creator (admin)
-    if (event.created_by._id.toString() === userId) {
-      return {
-        userRole: 'admin',
-        permissions: {
-          manage_content: true,
-          manage_guests: true,
-          manage_settings: true,
-          approve_content: true,
-          can_view: true,
-          can_upload: true,
-          can_download: true
-        },
-        canManage: true
-      };
-    }
+//     // Check if user is event creator (admin)
+//     if (event.created_by._id.toString() === userId) {
+//       return {
+//         userRole: 'admin',
+//         permissions: {
+//           manage_content: true,
+//           manage_guests: true,
+//           manage_settings: true,
+//           approve_content: true,
+//           can_view: true,
+//           can_upload: true,
+//           can_download: true
+//         },
+//         canManage: true
+//       };
+//     }
 
-    // Check if user is approved co-host
-    const coHost = event.co_hosts.find((ch: any) => 
-      ch.user_id._id.toString() === userId && ch.status === 'approved'
-    );
+//     // Check if user is approved co-host
+//     // const coHost = event.co_hosts.find((ch: any) =>
+//     //   ch.user_id._id.toString() === userId && ch.status === 'approved'
+//     // );
 
-    if (coHost) {
-      return {
-        userRole: 'co_host',
-        permissions: {
-          ...coHost.permissions,
-          can_view: true,
-          can_upload: true,
-          can_download: true
-        },
-        canManage: coHost.permissions.manage_content || false
-      };
-    }
+//     const coHost = EventParticipant.find((ch: string) =>
+//       ch.user_id._id.toString() === userId && ch.status === 'approved'
+//     )
 
-    // Regular user - check event visibility
-    if (event.visibility === 'private') {
-      throw new Error('Access denied - this is a private event');
-    }
+//     if (coHost) {
+//       return {
+//         userRole: 'co_host',
+//         permissions: {
+//           ...coHost.permissions,
+//           can_view: true,
+//           can_upload: true,
+//           can_download: true
+//         },
+//         canManage: coHost.permissions.manage_content || false
+//       };
+//     }
 
-    return {
-      userRole: 'user',
-      permissions: event.permissions || {
-        can_view: true,
-        can_upload: false,
-        can_download: false
-      },
-      canManage: false
-    };
+//     // Regular user - check event visibility
+//     if (event.visibility === 'private') {
+//       throw new Error('Access denied - this is a private event');
+//     }
 
-  } catch (error: any) {
-    throw new Error(`Permission check failed: ${error.message}`);
-  }
-};
+//     return {
+//       userRole: 'user',
+//       permissions: event.permissions || {
+//         can_view: true,
+//         can_upload: false,
+//         can_download: false
+//       },
+//       canManage: false
+//     };
+
+//   } catch (error: any) {
+//     throw new Error(`Permission check failed: ${error.message}`);
+//   }
+// };
 
 /**
  * Rate limiting for WebSocket connections
@@ -263,7 +268,7 @@ export const validateSocketEventAccess = async (
 
     // Additional validation could be added here
     // e.g., check if event is still active, not archived, etc.
-    
+
     return true;
 
   } catch (error: any) {

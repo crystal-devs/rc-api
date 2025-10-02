@@ -1,13 +1,16 @@
 // 3. services/event/event-query.service.ts
+// Updated to use EventParticipant collection with Redis caching
 // ====================================
 
 import { Event } from "@models/event.model";
+import { EventParticipant } from "@models/event-participants.model";
 import { MODEL_NAMES } from "@models/names";
 import { logger } from "@utils/logger";
 import mongoose from "mongoose";
 import type { EventFilters, EventType, EventWithExtras } from './event.types';
 import { ServiceResponse } from "@services/media";
 import { getUserEventStats, recordEventActivity } from "./event-utils.service";
+import { eventCacheService } from "@services/cache/event-cache.service";
 
 export const getUserEventsService = async (
     filters: EventFilters
@@ -15,82 +18,61 @@ export const getUserEventsService = async (
     try {
         const { userId, page, limit, sort, status, privacy, template, search, tags } = filters;
 
-        // Build aggregation pipeline starting from Event collection
+        // Try to get from cache first
+        const cachedResult = await eventCacheService.getUserEvents(userId, filters);
+        if (cachedResult) {
+            logger.debug(`Cache HIT: getUserEventsService for user ${userId}`);
+            return {
+                status: true,
+                code: 200,
+                message: "Events fetched successfully (cached)",
+                data: cachedResult,
+                error: null,
+                other: null
+            };
+        }
+
+        // Build aggregation pipeline starting from EventParticipant collection
         const pipeline: any[] = [
-            // Match events where user is creator or approved co-host
+            // Match user's participations (creator, co_host, or other roles)
             {
                 $match: {
-                    $or: [
-                        { created_by: new mongoose.Types.ObjectId(userId) },
-                        {
-                            "co_hosts.user_id": new mongoose.Types.ObjectId(userId),
-                            "co_hosts.status": "approved"
-                        }
-                    ]
+                    user_id: new mongoose.Types.ObjectId(userId),
+                    status: { $in: ['active', 'pending'] },
+                    deleted_at: null
                 }
             },
-            // Lookup AccessControl permissions (optional, for additional roles)
+            // Lookup the Event details
             {
                 $lookup: {
-                    from: MODEL_NAMES.ACCESS_CONTROL,
-                    let: { eventId: "$_id" },
-                    pipeline: [
-                        {
-                            $match: {
-                                $expr: {
-                                    $and: [
-                                        { $eq: ["$resource_id", "$$eventId"] },
-                                        { $eq: ["$resource_type", "event"] },
-                                        { $eq: ["$user_id", new mongoose.Types.ObjectId(userId)] }
-                                    ]
-                                }
-                            }
-                        }
-                    ],
-                    as: "permissions"
+                    from: MODEL_NAMES.EVENT,
+                    localField: 'event_id',
+                    foreignField: '_id',
+                    as: 'event'
                 }
             },
-            // Add user role
+            // Unwind event array (should always be 1 item)
+            {
+                $unwind: {
+                    path: '$event',
+                    preserveNullAndEmptyArrays: false
+                }
+            },
+            // Add user_role from EventParticipant
             {
                 $addFields: {
-                    user_role: {
-                        $cond: {
-                            if: { $eq: ["$created_by", new mongoose.Types.ObjectId(userId)] },
-                            then: "creator",
-                            else: {
-                                $cond: {
-                                    if: {
-                                        $and: [
-                                            { $in: [new mongoose.Types.ObjectId(userId), "$co_hosts.user_id"] },
-                                            {
-                                                $eq: [
-                                                    {
-                                                        $arrayElemAt: [
-                                                            "$co_hosts.status",
-                                                            {
-                                                                $indexOfArray: [
-                                                                    "$co_hosts.user_id",
-                                                                    new mongoose.Types.ObjectId(userId)
-                                                                ]
-                                                            }
-                                                        ]
-                                                    },
-                                                    "approved"
-                                                ]
-                                            }
-                                        ]
-                                    },
-                                    then: "co-host",
-                                    else: { $arrayElemAt: ["$permissions.role", 0] }
-                                }
-                            }
-                        }
-                    }
+                    'event.user_role': '$role'
+                }
+            },
+            // Replace root with event document + user_role
+            {
+                $replaceRoot: {
+                    newRoot: '$event'
                 }
             }
         ];
 
-        // Apply filters
+        // Apply filters on event fields
         const matchConditions = buildMatchConditions(status, privacy, template, search, tags);
         if (Object.keys(matchConditions).length > 0) {
             pipeline.push({ $match: matchConditions });
@@ -102,7 +84,7 @@ export const getUserEventsService = async (
 
         // Count total documents
         const countPipeline = [...pipeline, { $count: "total" }];
-        const totalResult = await Event.aggregate(countPipeline);
+        const totalResult = await EventParticipant.aggregate(countPipeline);
         const total = totalResult[0]?.total || 0;
 
         // Add pagination
@@ -114,7 +96,7 @@ export const getUserEventsService = async (
         // Add enrichment stages
         addEnrichmentStages(pipeline);
 
-        const events = await Event.aggregate(pipeline);
+        const events = await EventParticipant.aggregate(pipeline);
 
         // Calculate pagination info
         const totalPages = Math.ceil(total / limit);
@@ -124,7 +106,7 @@ export const getUserEventsService = async (
         // Get user's event stats
         const stats = await getUserEventStats(userId);
 
-        return {
+        const response: ServiceResponse<{ events: EventType[]; pagination: any; stats: any }> = {
             status: true,
             code: 200,
             message: "Events fetched successfully",
@@ -143,6 +125,15 @@ export const getUserEventsService = async (
             error: null,
             other: null
         };
+
+        // Cache the result (short TTL handled by service)
+        try {
+            await eventCacheService.setUserEvents(userId, filters, response.data);
+        } catch (e) {
+            logger.debug('Failed to cache user events result:', e);
+        }
+
+        return response;
     } catch (error) {
         logger.error(`[getUserEventsService] Error: ${error.message}`);
         return {
@@ -177,6 +168,25 @@ export const getEventDetailService = async (
             };
         }
 
+        // Optional cache read when identifier is event ObjectId
+        if (mongoose.Types.ObjectId.isValid(identifier)) {
+            try {
+                const cached = await eventCacheService.getEventDetail(identifier, userId);
+                if (cached) {
+                    return {
+                        status: true,
+                        code: 200,
+                        message: 'Event details fetched successfully (cached)',
+                        data: cached,
+                        error: null,
+                        other: null,
+                    };
+                }
+            } catch (e) {
+                logger.debug('Cache read failed for event detail:', e);
+            }
+        }
+
         // Build match condition based on identifier type
         const matchCondition = buildIdentifierMatchCondition(identifier, tokenType);
 
@@ -195,15 +205,10 @@ export const getEventDetailService = async (
             };
         }
 
-        // Handle co-host invite token usage
-        if (identifier.startsWith('coh_') && event.user_role === 'co_host_invite') {
-            await handleCoHostInviteTokenUsage(event, userId);
-        }
-
         // Record view activity
         await recordEventActivity(event._id.toString(), userId, 'viewed');
 
-        return {
+        const response: ServiceResponse<EventWithExtras> = {
             status: true,
             code: 200,
             message: 'Event details fetched successfully',
@@ -211,6 +216,17 @@ export const getEventDetailService = async (
             error: null,
             other: null,
         };
+
+        // Optional cache write when identifier is ObjectId
+        if (mongoose.Types.ObjectId.isValid(identifier)) {
+            try {
+                await eventCacheService.setEventDetail(identifier, userId, event);
+            } catch (e) {
+                logger.debug('Cache write failed for event detail:', e);
+            }
+        }
+
+        return response;
     } catch (error) {
         logger.error(`[getEventDetailService] Error: ${(error as Error).message}`);
         return {
@@ -248,7 +264,7 @@ const buildMatchConditions = (
 
     // Privacy filter
     if (privacy !== 'all') {
-        matchConditions['privacy.visibility'] = privacy;
+        matchConditions.visibility = privacy;
     }
 
     // Template filter
@@ -260,14 +276,8 @@ const buildMatchConditions = (
     if (search) {
         matchConditions.$or = [
             { title: { $regex: search, $options: 'i' } },
-            { description: { $regex: search, $options: 'i' } },
-            { tags: { $in: [new RegExp(search, 'i')] } }
+            { description: { $regex: search, $options: 'i' } }
         ];
-    }
-
-    // Tags filter
-    if (tags && tags.length > 0) {
-        matchConditions.tags = { $in: tags };
     }
 
     return matchConditions;
@@ -285,24 +295,51 @@ const buildSortStage = (sort: string): any => {
 
 const addEnrichmentStages = (pipeline: any[]): void => {
     pipeline.push(
-        // Get participant count
+        // Get all participants count grouped by role
         {
             $lookup: {
                 from: MODEL_NAMES.EVENT_PARTICIPANT,
-                localField: "_id",
-                foreignField: "event_id",
-                as: "participants"
-            }
-        },
-        // Get recent activity
-        {
-            $lookup: {
-                from: MODEL_NAMES.EVENT_SESSION,
                 let: { eventId: "$_id" },
                 pipeline: [
-                    { $match: { $expr: { $eq: ["$event_id", "$$eventId"] } } },
-                    { $sort: { "session.last_activity_at": -1 } },
-                    { $limit: 5 }
+                    {
+                        $match: {
+                            $expr: {
+                                $and: [
+                                    { $eq: ["$event_id", "$$eventId"] },
+                                    { $in: ["$status", ["active", "pending"]] },
+                                    { $eq: ["$deleted_at", null] }
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: "$role",
+                            count: { $sum: 1 }
+                        }
+                    }
+                ],
+                as: "participant_stats"
+            }
+        },
+        // Get recent activity from EventParticipant
+        {
+            $lookup: {
+                from: MODEL_NAMES.EVENT_PARTICIPANT,
+                let: { eventId: "$_id" },
+                pipeline: [
+                    {
+                        $match: {
+                            $expr: {
+                                $and: [
+                                    { $eq: ["$event_id", "$$eventId"] },
+                                    { $ne: ["$last_activity_at", null] }
+                                ]
+                            }
+                        }
+                    },
+                    { $sort: { last_activity_at: -1 } },
+                    { $limit: 1 }
                 ],
                 as: "recent_activity"
             }
@@ -310,24 +347,36 @@ const addEnrichmentStages = (pipeline: any[]): void => {
         // Add computed fields
         {
             $addFields: {
-                participant_count: { $size: "$participants" },
+                participant_count: {
+                    $sum: "$participant_stats.count"
+                },
                 active_participants: {
-                    $size: {
-                        $filter: {
-                            input: "$participants",
-                            cond: { $eq: ["$this.participation.status", "active"] }
-                        }
+                    $let: {
+                        vars: {
+                            activeRole: {
+                                $arrayElemAt: [
+                                    {
+                                        $filter: {
+                                            input: "$participant_stats",
+                                            cond: { $eq: ["$$this._id", "active"] }
+                                        }
+                                    },
+                                    0
+                                ]
+                            }
+                        },
+                        in: { $ifNull: ["$$activeRole.count", 0] }
                     }
                 },
                 last_activity: {
-                    $max: "$recent_activity.session.last_activity_at"
+                    $arrayElemAt: ["$recent_activity.last_activity_at", 0]
                 }
             }
         },
         // Remove unnecessary fields
         {
             $project: {
-                participants: 0,
+                participant_stats: 0,
                 recent_activity: 0
             }
         }
@@ -342,104 +391,184 @@ const buildIdentifierMatchCondition = (
         return { _id: new mongoose.Types.ObjectId(identifier) };
     } else if (identifier.startsWith('evt_')) {
         return { share_token: identifier };
-    } else if (identifier.startsWith('coh_')) {
-        return { 'co_host_invite_token.token': identifier };
     } else {
-        if (tokenType === 'co_host_invite_token') {
-            return { 'co_host_invite_token.token': identifier };
-        } else {
-            return { share_token: identifier };
-        }
+        // Default to share_token for backward compatibility
+        return { share_token: identifier };
     }
 };
 
 const buildEventDetailPipeline = (matchCondition: any, userId: string): mongoose.PipelineStage[] => {
     return [
         { $match: matchCondition },
-        // Token access validation stage
+
+        // Lookup user's participation to determine role
+        {
+            $lookup: {
+                from: MODEL_NAMES.EVENT_PARTICIPANT,
+                let: { eventId: "$_id" },
+                pipeline: [
+                    {
+                        $match: {
+                            $expr: {
+                                $and: [
+                                    { $eq: ["$event_id", "$$eventId"] },
+                                    { $eq: ["$user_id", new mongoose.Types.ObjectId(userId)] },
+                                    { $eq: ["$deleted_at", null] }
+                                ]
+                            }
+                        }
+                    }
+                ],
+                as: "user_participation"
+            }
+        },
+
+        // Add user_role from participation
         {
             $addFields: {
-                token_access: {
-                    $cond: {
-                        if: { $ne: ['$share_token', matchCondition.share_token] },
-                        then: {
-                            $cond: {
-                                if: {
-                                    $and: [
-                                        { $eq: ['$co_host_invite_token.token', matchCondition['co_host_invite_token.token']] },
-                                        { $eq: ['$co_host_invite_token.is_active', true] },
-                                        { $gt: ['$co_host_invite_token.expires_at', new Date()] },
-                                    ],
-                                },
-                                then: 'co_host_invite',
-                                else: 'none',
-                            },
-                        },
-                        else: {
-                            $cond: {
-                                if: {
-                                    $and: [
-                                        { $eq: ['$share_settings.is_active', true] },
-                                        {
-                                            $or: [
-                                                { $eq: ['$share_settings.expires_at', null] },
-                                                { $gt: ['$share_settings.expires_at', new Date()] },
-                                            ],
-                                        },
-                                    ],
-                                },
-                                then: 'share_token',
-                                else: 'expired',
-                            },
-                        },
-                    },
+                user_role: {
+                    $ifNull: [
+                        { $arrayElemAt: ["$user_participation.role", 0] },
+                        "viewer" // Default role if no participation found
+                    ]
                 },
-            },
+                user_permissions: {
+                    $ifNull: [
+                        { $arrayElemAt: ["$user_participation.permissions", 0] },
+                        null
+                    ]
+                }
+            }
         },
-        // Access control filter
+
+        // Access control validation
         {
             $match: {
                 $or: [
+                    // User is creator
                     { created_by: new mongoose.Types.ObjectId(userId) },
-                    { 'co_hosts.user_id': new mongoose.Types.ObjectId(userId) },
-                    { token_access: { $in: ['share_token', 'co_host_invite'] } },
-                ],
-            },
-        },
-        // Additional enrichment stages would go here...
-        // (Creator lookup, co-hosts lookup, albums lookup, etc.)
-    ];
-};
-
-const handleCoHostInviteTokenUsage = async (event: any, userId: string): Promise<void> => {
-    const existingCoHost = event.co_hosts?.find(
-        (coHost: any) => coHost.user_id.toString() === userId
-    );
-
-    if (!existingCoHost) {
-        await Event.findByIdAndUpdate(
-            event._id,
-            {
-                $push: {
-                    co_hosts: {
-                        user_id: new mongoose.Types.ObjectId(userId),
-                        invited_by: event.co_host_invite_token.created_by,
-                        status: 'pending',
-                        permissions: {
-                            manage_content: true,
-                            manage_guests: true,
-                            manage_settings: true,
-                            approve_content: true,
-                        },
-                        invited_at: new Date(),
-                    },
-                },
-                $inc: {
-                    'co_host_invite_token.used_count': 1,
-                },
+                    // User has active/pending participation
+                    { "user_participation.0": { $exists: true } },
+                    // Event has public visibility with active share settings
+                    {
+                        $and: [
+                            { visibility: "anyone_with_link" },
+                            { "share_settings.is_active": true },
+                            {
+                                $or: [
+                                    { "share_settings.expires_at": null },
+                                    { "share_settings.expires_at": { $gt: new Date() } }
+                                ]
+                            }
+                        ]
+                    }
+                ]
             }
-        );
+        },
 
-        event.user_role = 'co_host_pending';
-    }
+        // Lookup creator details
+        {
+            $lookup: {
+                from: MODEL_NAMES.USER,
+                localField: "created_by",
+                foreignField: "_id",
+                as: "creator"
+            }
+        },
+
+        // Lookup all participants with their details
+        {
+            $lookup: {
+                from: MODEL_NAMES.EVENT_PARTICIPANT,
+                let: { eventId: "$_id" },
+                pipeline: [
+                    {
+                        $match: {
+                            $expr: {
+                                $and: [
+                                    { $eq: ["$event_id", "$$eventId"] },
+                                    { $in: ["$status", ["active", "pending"]] },
+                                    { $eq: ["$deleted_at", null] }
+                                ]
+                            }
+                        }
+                    },
+                    // Lookup user details for each participant
+                    {
+                        $lookup: {
+                            from: MODEL_NAMES.USER,
+                            localField: "user_id",
+                            foreignField: "_id",
+                            as: "user_details"
+                        }
+                    },
+                    {
+                        $unwind: {
+                            path: "$user_details",
+                            preserveNullAndEmptyArrays: true
+                        }
+                    },
+                    {
+                        $project: {
+                            user_id: 1,
+                            role: 1,
+                            status: 1,
+                            permissions: 1,
+                            joined_at: 1,
+                            last_activity_at: 1,
+                            "user_details.name": 1,
+                            "user_details.email": 1,
+                            "user_details.profile_picture": 1
+                        }
+                    }
+                ],
+                as: "participants"
+            }
+        },
+
+        // Add computed stats
+        {
+            $addFields: {
+                "stats.total_participants": { $size: "$participants" },
+                "stats.creators_count": {
+                    $size: {
+                        $filter: {
+                            input: "$participants",
+                            cond: { $eq: ["$$this.role", "creator"] }
+                        }
+                    }
+                },
+                "stats.co_hosts_count": {
+                    $size: {
+                        $filter: {
+                            input: "$participants",
+                            cond: { $eq: ["$$this.role", "co_host"] }
+                        }
+                    }
+                },
+                "stats.guests_count": {
+                    $size: {
+                        $filter: {
+                            input: "$participants",
+                            cond: { $in: ["$$this.role", ["guest", "viewer"]] }
+                        }
+                    }
+                }
+            }
+        },
+
+        // Format creator
+        {
+            $addFields: {
+                creator: { $arrayElemAt: ["$creator", 0] }
+            }
+        },
+
+        // Clean up
+        {
+            $project: {
+                user_participation: 0
+            }
+        }
+    ];
 };

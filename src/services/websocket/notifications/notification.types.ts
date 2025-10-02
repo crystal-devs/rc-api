@@ -42,6 +42,7 @@ export interface MediaBroadcastPayload {
     eventId: string;
     uploadedBy: { id: string; name: string; type: any };
     mediaData: {
+        hasInstantPreview: boolean;
         url: string;
         filename: string;
         type: string;
@@ -73,4 +74,17 @@ export interface MediaRemovedPayload {
     eventId: string;
     reason: string;
     adminName?: string;
+}
+
+// notification.types.ts - Add this interface
+export interface BulkMediaUploadPayload {
+    batchId: string;
+    eventId: string;
+    uploadedBy: {
+        id: string;
+        name: string;
+        type: string;
+    };
+    fileCount: number;
+    estimatedCompletionTime: string;
 }

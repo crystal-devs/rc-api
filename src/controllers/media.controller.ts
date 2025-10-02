@@ -1145,17 +1145,192 @@ export const getBatchOptimizedUrlsController: RequestHandler = async (
                 }
             }
         });
-
     } catch (error: any) {
         logger.error('Error in getBatchOptimizedUrlsController:', error);
         next(error);
     }
 };
 
-// Helper function to detect context from user agent
-function detectContextFromUserAgent(userAgent?: string): 'mobile' | 'desktop' | 'lightbox' {
-    if (!userAgent) return 'desktop';
+/**
+ * Get upload progress status for a single media item
+ */
+export const getUploadStatusController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { mediaId } = req.params;
+        
+        const media = await Media.findById(mediaId)
+            .select('processing original_filename image_variants url')
+            .lean();
+        
+        if (!media) {
+            res.status(404).json({
+                status: false,
+                code: 404,
+                message: 'Media not found',
+                data: null,
+                error: { message: 'Media item not found' },
+                other: null
+            });
+            return;
+        }
+        
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: 'Upload status retrieved successfully',
+            data: {
+                mediaId,
+                filename: media.original_filename,
+                processingStatus: media.processing?.status || 'unknown',
+                stage: media.processing?.current_stage || 'queued',
+                progress: media.processing?.progress_percentage || 0,
+                variantsGenerated: media.processing?.variants_generated || false,
+                url: media.url,
+                variants: media.image_variants ? {
+                    small: !!media.image_variants.small,
+                    medium: !!media.image_variants.medium,
+                    large: !!media.image_variants.large,
+                    original: !!media.image_variants.original
+                } : null
+            },
+            error: null,
+            other: null
+        });
+    } catch (error: any) {
+        logger.error('Error in getUploadStatusController:', error);
+        next(error);
+    }
+};
 
-    const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
-    return mobileRegex.test(userAgent) ? 'mobile' : 'desktop';
-}
+/**
+ * Batch get upload status for multiple media items
+ */
+export const getBatchUploadStatusController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { mediaIds } = req.body;
+        
+        if (!Array.isArray(mediaIds) || mediaIds.length === 0) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Media IDs array is required',
+                data: null,
+                error: { message: 'mediaIds must be a non-empty array' },
+                other: null
+            });
+            return;
+        }
+
+        if (mediaIds.length > 100) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Too many media IDs',
+                data: null,
+                error: { message: 'Maximum 100 media IDs allowed per request' },
+                other: null
+            });
+            return;
+        }
+        
+        const mediaList = await Media.find({ _id: { $in: mediaIds } })
+            .select('_id processing original_filename url')
+            .lean();
+        
+        const statusMap = mediaList.reduce((acc, media) => {
+            acc[media._id.toString()] = {
+                filename: media.original_filename,
+                status: media.processing?.status || 'unknown',
+                progress: media.processing?.progress_percentage || 0,
+                url: media.url
+            };
+            return acc;
+        }, {} as Record<string, any>);
+        
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: 'Batch upload status retrieved successfully',
+            data: statusMap,
+            error: null,
+            other: null
+        });
+    } catch (error: any) {
+        logger.error('Error in getBatchUploadStatusController:', error);
+        next(error);
+    }
+};
+
+/**
+ * Retry failed upload processing
+ */
+export const retryUploadController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { mediaId } = req.params;
+        
+        const media = await Media.findById(mediaId);
+        if (!media) {
+            res.status(404).json({
+                status: false,
+                code: 404,
+                message: 'Media not found',
+                data: null,
+                error: { message: 'Media item not found' },
+                other: null
+            });
+            return;
+        }
+        
+        if (media.processing?.status !== 'failed') {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Can only retry failed uploads',
+                data: null,
+                error: { message: 'Upload must be in failed status to retry' },
+                other: null
+            });
+            return;
+        }
+        
+        // Reset processing status
+        media.processing.status = 'pending';
+        media.processing.progress_percentage = 0;
+        media.processing.error_message = undefined;
+        media.processing.retry_count = (media.processing.retry_count || 0) + 1;
+        await media.save();
+        
+        // TODO: Re-queue the processing job
+        // const queue = getImageQueue();
+        // await queue.add('retry-processing', { mediaId, ... });
+        
+        logger.info(`Upload retry initiated for media ${mediaId} (attempt ${media.processing.retry_count})`);
+        
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: 'Upload retry initiated successfully',
+            data: { 
+                mediaId,
+                retryCount: media.processing.retry_count
+            },
+            error: null,
+            other: null
+        });
+    } catch (error: any) {
+        logger.error('Error in retryUploadController:', error);
+        next(error);
+    }
+};

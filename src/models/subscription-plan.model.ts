@@ -13,7 +13,7 @@ const planLimitsSchema = new mongoose.Schema({
 // Define subscription plan schema
 const subscriptionPlanSchema = new mongoose.Schema({
     _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
-    planId: { type: String, required: true, unique: true },
+    planId: { type: String, required: true },
     name: { type: String, required: true },
     description: { type: String, default: "" },
     price: { type: Number, required: true },

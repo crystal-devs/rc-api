@@ -18,6 +18,7 @@ import {
     updateEventService
 } from "@services/event";
 import { createDefaultAlbumForEvent } from "@services/album";
+import { eventCacheService } from "@services/cache/event-cache.service";
 
 interface InjectedRequest extends Request {
     user: {
@@ -127,7 +128,6 @@ export const createEventController = async (req: injectedRequest, res: Response,
             try {
                 await Promise.all([
                     createDefaultAlbumForEvent(response.data._id.toString(), req.user._id.toString()),
-                    addCreatorAsParticipant(response.data._id.toString(), req.user._id.toString()),
                 ]);
             } catch (albumError) {
                 console.error('Error creating default album:', albumError);
@@ -245,18 +245,7 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             return;
         }
 
-        // Get current event for visibility transition handling
-        const currentEvent = await Event.findById(event_id);
-        if (!currentEvent) {
-            res.status(404).json({
-                status: false,
-                message: 'Event not found',
-                data: null
-            });
-            return;
-        }
-
-        // Define fields that can be updated
+        // Define fields that can be updated (including photowall)
         const fieldsToProcess = [
             'title',
             'description',
@@ -266,30 +255,28 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             'visibility',
             'default_guest_permissions',
             'cover_image',
-
+            'photowall_settings',
+            'styling_config'
         ];
 
         // Process and validate update data
-        const processedUpdateData = await processEventUpdateData(updateData, fieldsToProcess);
-
+        const currentEvent = await Event.findById(event_id);
+        const processedUpdateData = await processEventUpdateData(updateData, currentEvent);
         const response = await updateEventService(event_id, processedUpdateData, userId);
 
-        // Check if response has proper structure
-        if (!response || typeof response.status === 'undefined') {
-            console.error('Invalid response from updateEventService:', response);
-            res.status(500).json({
-                status: false,
-                message: 'Internal server error - invalid service response',
-                data: null
-            });
-            return;
-        }
-
-        // Send proper response
         if (response.status) {
+            // Invalidate caches related to this event and user
+            try {
+                await Promise.all([
+                    eventCacheService.invalidateEventCaches(event_id),
+                    eventCacheService.invalidateUserCaches(userId)
+                ]);
+            } catch (e) {
+                console.warn('Cache invalidation failed after update:', e);
+            }
             res.status(200).json(response);
         } else {
-            res.status(400).json(response);
+            res.status(response.code).json(response);
         }
     } catch (error) {
         console.error('Error in updateEventController:', error);
@@ -312,6 +299,15 @@ export const deleteEventController = async (req: injectedRequest, res: Response,
         }
 
         const response = await deleteEventService(event_id, userId);
+        // Invalidate caches regardless of response status to be safe
+        try {
+            await Promise.all([
+                eventCacheService.invalidateEventCaches(event_id),
+                eventCacheService.invalidateUserCaches(userId)
+            ]);
+        } catch (e) {
+            console.warn('Cache invalidation failed after delete:', e);
+        }
         sendResponse(res, response);
     } catch (error) {
         next(error);

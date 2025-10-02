@@ -22,6 +22,7 @@ export class EventResponseService {
             location: event.location?.name ? {
                 name: event.location.name
             } : null,
+            styling_config: event.styling_config || {}
         };
 
         // Add permissions only if user can join

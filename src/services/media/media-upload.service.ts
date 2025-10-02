@@ -1,16 +1,9 @@
 // 4. services/media/media-upload.service.ts
 // ====================================
 
-import ImageKit from 'imagekit';
 import { logger } from '@utils/logger';
 import type { ServiceResponse } from './media.types';
-
-// ImageKit configuration
-const imagekit = new ImageKit({
-    publicKey: process.env.IMAGE_KIT_PUBLIC_KEY!,
-    privateKey: process.env.IMAGE_KIT_PRIVATE_KEY!,
-    urlEndpoint: "https://ik.imagekit.io/roseclick",
-});
+import { imagekit } from '@configs/imagekit.config';
 
 export const uploadCoverImageService = async (
     file: Express.Multer.File,

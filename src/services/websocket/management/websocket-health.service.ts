@@ -103,7 +103,10 @@ export class WebSocketHealthService {
         const stats: ConnectionStats = {
             totalConnections: this.connectedClients.size,
             byType: { admin: 0, co_host: 0, guest: 0 },
-            byEvent: {}
+            byEvent: {},
+            totalSubscriptions: 0,
+            activeEvents: 0,
+            averageSubscriptionsPerClient: 0,
         };
 
         this.connectedClients.forEach((client) => {
@@ -159,11 +162,11 @@ export class WebSocketHealthService {
 
     public async cleanup(): Promise<void> {
         logger.info('🧹 Cleaning up health service...');
-        
+
         // Clear all heartbeat intervals
         this.heartbeatIntervals.forEach(interval => clearInterval(interval));
         this.heartbeatIntervals.clear();
-        
+
         this.connectedClients.clear();
         logger.info('✅ Health service cleaned up');
     }

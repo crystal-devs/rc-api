@@ -18,6 +18,8 @@ export {
     uploadCoverImageService 
 } from './media-upload.service';
 
+export { mediaProcessingService } from './media-processing.service';
+
 // Export types
 export type {
     ServiceResponse,

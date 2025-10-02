@@ -1,15 +1,11 @@
-// routes/photo-wall.router.ts
-import express from "express";
+// routes/photo-wall.router.ts - Keep it minimal
 
-import { getPhotoWallController, getPhotoWallStatusController, updatePhotoWallSettingsController } from "@controllers/photowall.controller";
+import express from "express";
+import { getPhotoWallController } from "@controllers/photowall.controller";
 
 const photoWallRouter = express.Router();
 
-// Public endpoints (no auth needed)
+// Single public endpoint for display
 photoWallRouter.get("/:shareToken", getPhotoWallController);
-photoWallRouter.get("/:shareToken/status", getPhotoWallStatusController);
-
-// Host-only endpoints (auth required)
-photoWallRouter.patch("/:shareToken/settings", updatePhotoWallSettingsController);
 
 export default photoWallRouter;
