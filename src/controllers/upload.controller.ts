@@ -60,7 +60,8 @@ export const optimisticUploadController = async (
                 albumId: album_id,
                 userId,
                 userName,
-                isGuestUpload: req.user.role === 'guest'
+                isGuestUpload: req.user.role === 'guest',
+                guestInfo: req.user.role === 'guest' ? req.user : null
             }
         );
 
