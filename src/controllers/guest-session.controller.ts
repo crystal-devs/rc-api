@@ -13,7 +13,11 @@ export const getClaimableSummaryController: RequestHandler = async (
     try {
         const userId = (req as any).user?._id;
         const { eventId } = req.params;
+        
+        // Get session ID from cookie
+        const guestSessionId = req.cookies?.guest_session_id;
 
+        console.log(guestSessionId, 'guestSessionIdguestSessionId');
         if (!userId) {
             res.status(401).json({
                 status: false,
@@ -24,7 +28,27 @@ export const getClaimableSummaryController: RequestHandler = async (
             return;
         }
 
-        const summary = await SessionClaimService.getClaimSummary(userId, eventId);
+        // If no session ID in cookie, return empty summary
+        if (!guestSessionId) {
+            res.status(200).json({
+                status: true,
+                code: 200,
+                message: 'No claimable content found',
+                data: {
+                    hasClaimableContent: false,
+                    totalSessions: 0,
+                    totalMedia: 0,
+                    sessions: []
+                }
+            });
+            return;
+        }
+
+        const summary = await SessionClaimService.getClaimSummaryBySessionId(
+            userId, 
+            eventId, 
+            guestSessionId
+        );
 
         res.status(200).json({
             status: true,
@@ -55,7 +79,9 @@ export const claimGuestContentController: RequestHandler = async (
     try {
         const userId = (req as any).user?._id;
         const { eventId } = req.params;
-        const { sessionIds } = req.body; // Optional: specific sessions
+        
+        // Get session ID from cookie (primary) or body (fallback)
+        const guestSessionId = req.cookies?.guest_session_id || req.body?.sessionId;
 
         if (!userId) {
             res.status(401).json({
@@ -67,10 +93,20 @@ export const claimGuestContentController: RequestHandler = async (
             return;
         }
 
+        if (!guestSessionId) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Guest session ID required to claim content',
+                data: null
+            });
+            return;
+        }
+
         const result = await SessionClaimService.claimGuestContent(
             userId,
             eventId,
-            sessionIds
+            [guestSessionId] // Always pass as array
         );
 
         res.status(200).json({

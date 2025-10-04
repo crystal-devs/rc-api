@@ -65,12 +65,76 @@ export class SessionClaimService {
     }
 
     /**
-     * Claim guest content for a user
-     */
+ * Get claim summary by session ID (from cookie)
+ */
+    static async getClaimSummaryBySessionId(
+        userId: mongoose.Types.ObjectId | string,
+        eventId: mongoose.Types.ObjectId | string,
+        sessionId: string
+    ): Promise<any> {
+        try {
+            const userIdObj = typeof userId === 'string' ? new mongoose.Types.ObjectId(userId) : userId;
+            const eventIdObj = typeof eventId === 'string' ? new mongoose.Types.ObjectId(eventId) : eventId;
+
+            // Find session by session_id
+            const session = await GuestSession.findOne({
+                session_id: sessionId,
+                event_id: eventIdObj,
+                status: 'active',
+                claimed_by_user: null
+            });
+
+            if (!session) {
+                return {
+                    hasClaimableContent: false,
+                    totalSessions: 0,
+                    totalMedia: 0,
+                    sessions: []
+                };
+            }
+
+            // Count media for this session
+            const mediaCount = await Media.countDocuments({
+                guest_session_id: session._id,
+                event_id: eventIdObj
+            });
+
+            if (mediaCount === 0) {
+                return {
+                    hasClaimableContent: false,
+                    totalSessions: 0,
+                    totalMedia: 0,
+                    sessions: []
+                };
+            }
+
+            return {
+                hasClaimableContent: true,
+                totalSessions: 1,
+                totalMedia: mediaCount,
+                sessions: [{
+                    sessionId: session.session_id,
+                    _id: session._id,
+                    mediaCount: mediaCount,
+                    firstUploadAt: session.upload_stats.first_upload_at,
+                    lastUploadAt: session.upload_stats.last_upload_at,
+                    guestName: session.guest_info.name || 'Anonymous Guest',
+                    accessMethod: session.access_method
+                }]
+            };
+        } catch (error: any) {
+            logger.error('Error getting claim summary by session ID:', error);
+            throw error;
+        }
+    }
+
+    /**
+* Claim guest content (sessionIds are now REQUIRED)
+*/
     static async claimGuestContent(
         userId: mongoose.Types.ObjectId | string,
         eventId: mongoose.Types.ObjectId | string,
-        sessionIds?: string[] // Optional: specific sessions to claim
+        sessionIds: string[] // Now required, not optional
     ): Promise<ClaimResult> {
         const session = await mongoose.startSession();
         session.startTransaction();
@@ -84,6 +148,10 @@ export class SessionClaimService {
         };
 
         try {
+            if (!sessionIds || sessionIds.length === 0) {
+                throw new Error('Session IDs are required to claim content');
+            }
+
             const user = await User.findById(userId);
             if (!user) {
                 throw new Error('User not found');
@@ -92,37 +160,25 @@ export class SessionClaimService {
             const userIdObj = typeof userId === 'string' ? new mongoose.Types.ObjectId(userId) : userId;
             const eventIdObj = typeof eventId === 'string' ? new mongoose.Types.ObjectId(eventId) : eventId;
 
-            // Find sessions to claim
-            let sessionsToclaim;
-            if (sessionIds && sessionIds.length > 0) {
-                // Claim specific sessions
-                sessionsToclaim = await GuestSession.find({
-                    session_id: { $in: sessionIds },
-                    event_id: eventIdObj,
-                    status: 'active',
-                    claimed_by_user: null
-                }).session(session);
-            } else {
-                // Find all claimable sessions
-                sessionsToclaim = await GuestSession.findClaimableSessions(
-                    userIdObj,
-                    eventIdObj,
-                    user.email,
-                    user.phone_number
-                );
-            }
+            // Find sessions by session_id (from cookie)
+            const sessionsToClaim = await GuestSession.find({
+                session_id: { $in: sessionIds },
+                event_id: eventIdObj,
+                status: 'active',
+                claimed_by_user: null
+            }).session(session);
 
-            result.sessionsFound = sessionsToclaim.length;
+            result.sessionsFound = sessionsToClaim.length;
 
-            if (sessionsToclaim.length === 0) {
+            if (sessionsToClaim.length === 0) {
                 await session.commitTransaction();
                 result.success = true;
                 return result;
             }
 
             // Update all guest sessions
-            const sessionObjectIds = sessionsToclaim.map(s => s._id);
-            
+            const sessionObjectIds = sessionsToClaim.map(s => s._id);
+
             await GuestSession.updateMany(
                 { _id: { $in: sessionObjectIds } },
                 {
@@ -135,7 +191,7 @@ export class SessionClaimService {
                 { session }
             );
 
-            result.sessionsClaimed = sessionsToclaim.length;
+            result.sessionsClaimed = sessionsToClaim.length;
 
             // Migrate media uploads
             const mediaUpdateResult = await Media.updateMany(
@@ -173,7 +229,7 @@ export class SessionClaimService {
                 }], { session });
             }
 
-            // Update event stats (recalculate)
+            // Update event stats
             await this.recalculateEventStats(eventIdObj, session);
 
             await session.commitTransaction();
@@ -257,7 +313,7 @@ export class SessionClaimService {
     ): Promise<any> {
         try {
             const claimableSessions = await this.findClaimableSessions(userId, eventId);
-            
+
             const totalUploads = claimableSessions.reduce((sum, s) => sum + s.uploadCount, 0);
 
             return {

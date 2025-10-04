@@ -370,7 +370,12 @@ class MediaProcessingServiceClass {
                     mediaDoc.uploaded_by = null;
 
                     if (jobData.guestInfo) {
-                        mediaDoc.guest_uploader = createGuestUploaderInfo(jobData.guestInfo, true);
+                        // Include sessionId in guestData for createGuestUploaderInfo
+                        const guestDataWithSession = {
+                            ...jobData.guestInfo,
+                            sessionId: jobData.guestSessionId
+                        };
+                        mediaDoc.guest_uploader = createGuestUploaderInfo(guestDataWithSession, true);
                     }
                 } else if (jobData.userId && mongoose.Types.ObjectId.isValid(jobData.userId)) {
                     mediaDoc.uploader_type = 'registered_user';

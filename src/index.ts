@@ -37,6 +37,7 @@ import { InitializationService } from "@services/initialization.service";
 import { CleanupService } from "@services/cleanup.service";
 import { ShutdownService } from "@services/shutdown.service";
 import { ProductionMonitoringService } from "@services/monitoring.service";
+import guestRouter from "@routes/guest-session.routes";
 
 const app = express();
 const PORT = keys.port;
@@ -99,6 +100,7 @@ app.use(`/api/${VERSION}/token`, shareTokenRouter);
 app.use(`/api/${VERSION}/photo-wall`, photoWallRouter);
 app.use(`/api/${VERSION}/download`, bulkDownloadRouter);
 app.use(`/api/${VERSION}/upload-queue`, uploadQueueRouter);
+app.use(`/api/${VERSION}/guest-sessions`, guestRouter);
 
 // NEW: Dedicated bulk operations router with its own rate limiting
 app.use(`/api/${VERSION}/bulk`, bulkOperationsRouter);

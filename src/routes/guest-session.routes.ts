@@ -4,20 +4,20 @@ import { authMiddleware } from '@middlewares/clicky-auth.middleware';
 import express from 'express';
 
 
-const router = express.Router();
+const guestRouter = express.Router();
 
 // Get claimable content summary (requires auth)
-router.get(
+guestRouter.get(
     '/claimable/:eventId',
     authMiddleware,
     getClaimableSummaryController
 );
 
 // Claim guest content (requires auth)
-router.post(
+guestRouter.post(
     '/claim/:eventId',
     authMiddleware,
     claimGuestContentController
 );
 
-export default router;
+export default guestRouter;
