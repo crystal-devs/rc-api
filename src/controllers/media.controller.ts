@@ -15,11 +15,14 @@ import {
     getGuestMediaService,
     getMediaByAlbumService,
     getMediaByEventService,
+    mediaProcessingService,
     MediaQueryOptions,
     updateMediaStatusService,
     uploadCoverImageService
 } from "@services/media";
 import { uploadGuestMedia } from "@services/guest";
+import { GuestSessionService } from "@services/guest/guest-session.service";
+import { GuestSessionHelper } from "@services/guest/guest-session-helper";
 
 // Enhanced interface for authenticated requests
 interface AuthenticatedRequest extends Request {
@@ -578,274 +581,83 @@ export const guestUploadMediaController: RequestHandler = async (
 
     try {
         const { share_token } = req.params;
-        const files = (req.files as Express.Multer.File[]) || (req.file ? [req.file] : []);
+        const files = (req.files as Express.Multer.File[]) || [];
         const { guest_name, guest_email, guest_phone } = req.body;
 
-        logger.info('🔍 Guest upload request:', {
-            shareToken: share_token,
-            fileCount: files.length,
-            guestName: guest_name || 'Anonymous',
-            guestEmail: guest_email || 'Not provided',
-            isAuthenticated: !!req.user,
-            userId: req.user?._id?.toString()
-        });
-
-        // 🔧 FAST VALIDATION: Basic checks only (similar to admin)
-        if (!share_token) {
+        if (!share_token || !files.length) {
             res.status(400).json({
                 status: false,
                 code: 400,
-                message: "Share token is required",
-                data: null,
-                error: { message: "Missing share token parameter" },
-                other: null
+                message: !share_token ? "Share token required" : "No files provided",
+                data: null
             });
             return;
         }
 
-        if (!files || files.length === 0) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "No files provided",
-                data: null,
-                error: { message: "At least one file is required" },
-                other: null
-            });
-            return;
-        }
-
-        // Find event by share token
-        const event = await Event.findOne({ share_token });
-        if (!event) {
-            // Cleanup files before returning error
+        const event = await Event.findOne({ share_token }).lean();
+        if (!event || !event.permissions?.can_upload) {
             await cleanupFiles(files);
-            res.status(404).json({
+            res.status(event ? 403 : 404).json({
                 status: false,
-                code: 404,
-                message: "Event not found",
-                data: null,
-                error: { message: "Invalid share token" },
-                other: null
+                code: event ? 403 : 404,
+                message: event ? "Uploads not allowed" : "Event not found",
+                data: null
             });
             return;
         }
 
-        logger.info('✅ Event found:', {
-            eventId: event._id.toString(),
-            title: event.title,
-            canUpload: event.permissions?.can_upload,
-            requireApproval: event.permissions?.require_approval
-        });
-
-        // Check if event allows uploads
-        if (!event.permissions?.can_upload) {
-            await cleanupFiles(files);
-            res.status(403).json({
-                status: false,
-                code: 403,
-                message: "Uploads not allowed",
-                data: null,
-                error: { message: "This event does not allow photo uploads" },
-                other: null
-            });
-            return;
-        }
-
-        // Prepare guest information to match your model structure
+        // Get or create guest session
         const guestInfo = {
             name: guest_name || '',
             email: guest_email || '',
-            phone: guest_phone || '',
-            sessionId: req.sessionID || '',
-            deviceFingerprint: req.ip + '_' + (req.get('User-Agent') || '').slice(0, 50),
-            uploadMethod: 'web',
-            platformInfo: {
-                source: 'web_upload',
-                referrer: req.get('Referer') || ''
-            }
+            phone: guest_phone || ''
         };
 
-        // 🚀 PARALLEL PROCESSING: Process all files concurrently (like admin)
-        const uploadPromises = files.map(file =>
-            processGuestFileUploadWithOptionalBroadcast(file, {
-                shareToken: share_token,
-                guestInfo,
-                authenticatedUserId: req.user?._id?.toString(),
-                eventId: event._id.toString()
-            })
+        const guestSession = await GuestSessionHelper.getOrCreate(
+            req,
+            event._id.toString(),
+            guestInfo
         );
 
-        const results = await Promise.allSettled(uploadPromises);
+        GuestSessionHelper.setCookie(res, guestSession.session_id);
 
-        // 🔧 SEPARATE SUCCESS/FAILURES (same pattern as admin)
-        const successful = results
-            .filter((result): result is PromiseFulfilledResult<any> => result.status === 'fulfilled')
-            .map(result => result.value);
-
-        const failed = results
-            .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-            .map((result, index) => ({
-                filename: files[index]?.originalname || 'unknown',
-                error: result.reason?.message || 'Upload failed'
-            }));
+        // Use existing media processing service with guest context
+        const results = await mediaProcessingService.processOptimisticUpload(
+            files,
+            {
+                eventId: event._id.toString(),
+                userId: req.user?._id?.toString(),
+                userName: guest_name || 'Guest',
+                isGuestUpload: true,
+                guestSessionId: guestSession._id.toString(),
+                guestInfo
+            }
+        );
 
         const processingTime = Date.now() - startTime;
 
-        // 🔧 Calculate summary FIRST (before any usage)
-        const successCount = successful.length;
-        const failCount = failed.length;
-
-        // 🚀 CORRECTED: Only notify ADMINS about guest uploads (not other guests)
-        if (successCount > 0) {
-            logger.info(`📡 Notifying admins about ${successCount} new guest uploads...`);
-
-            // Create uploader info for admin notifications
-            const uploaderInfo = {
-                id: req.user?._id?.toString() || 'guest_' + Date.now(),
-                name: guest_name || 'Anonymous Guest',
-                type: req.user ? 'authenticated_guest' : 'guest',
-                email: guest_email || '',
-                uploadTime: new Date()
-            };
-
-            // Notify admins about each successful upload for review/approval
-            try {
-                if (successCount === 1) {
-                    // Single upload notification
-                    const uploadResult = successful[0];
-                    const originalFile = files[0];
-
-                    mediaNotificationService.notifyAdminsAboutGuestUpload({
-                        eventId: event._id.toString(),
-                        uploadedBy: uploaderInfo,
-                        mediaData: {
-                            mediaId: uploadResult.mediaId || uploadResult._id?.toString(),
-                            url: uploadResult.url || uploadResult.preview_url,
-                            filename: uploadResult.filename || originalFile?.originalname,
-                            type: uploadResult.type || 'image',
-                            size: uploadResult.size || originalFile?.size || 0,
-                            approvalStatus: uploadResult.approval_status || 'pending'
-                        },
-                        requiresApproval: event.permissions?.require_approval || false
-                    });
-                } else {
-                    // Bulk upload notification
-                    const mediaItems = successful.map((uploadResult, index) => ({
-                        mediaId: uploadResult.mediaId || uploadResult._id?.toString(),
-                        url: uploadResult.url || uploadResult.preview_url,
-                        filename: uploadResult.filename || files[index]?.originalname,
-                        type: uploadResult.type || 'image',
-                        size: uploadResult.size || files[index]?.size || 0,
-                        approvalStatus: uploadResult.approval_status || 'pending'
-                    }));
-
-                    mediaNotificationService.notifyAdminsAboutBulkGuestUpload({
-                        eventId: event._id.toString(),
-                        uploadedBy: uploaderInfo,
-                        mediaItems,
-                        totalCount: successCount,
-                        requiresApproval: event.permissions?.require_approval || false
-                    });
-                }
-
-                logger.info('📤 Admin notifications sent successfully', {
-                    uploadCount: successCount,
-                    uploaderName: uploaderInfo.name,
-                    eventId: event._id.toString(),
-                    requiresApproval: event.permissions?.require_approval
-                });
-
-            } catch (broadcastError) {
-                logger.error('❌ Failed to notify admins about guest uploads:', {
-                    error: broadcastError.message,
-                    uploadCount: successCount,
-                    eventId: event._id.toString()
-                });
-                // Don't fail the entire request for notification errors
-            }
-
-            // Update admin dashboard statistics (optional)
-            try {
-                // Simple room count update - no complex stats needed
-                const wsService = getWebSocketService();
-                const adminRoom = `admin_${event._id.toString()}`;
-                const adminCount = wsService.getRoomUserCounts()[adminRoom] || 0;
-
-                if (adminCount > 0) {
-                    wsService.io.to(adminRoom).emit('guest_upload_summary', {
-                        eventId: event._id.toString(),
-                        newUploadsCount: successCount,
-                        uploaderName: uploaderInfo.name,
-                        timestamp: new Date()
-                    });
-                }
-
-                logger.info('📊 Admin summary notification sent');
-            } catch (statsError) {
-                logger.error('❌ Failed to send admin summary:', statsError);
-            }
-        }
-
-        logger.info(`📊 Guest upload completed in ${processingTime}ms:`, {
-            total: files.length,
-            success: successCount,
-            failed: failCount,
-            adminNotificationsSent: successCount > 0,
-            requiresApproval: event.permissions?.require_approval
-        });
-
-        // 🚨 CRITICAL: Send response immediately (similar to admin pattern)
-        const response = {
-            status: successCount > 0,
-            code: successCount > 0 ? 200 : 400,
-            message: generateGuestSuccessMessage(successCount, failCount, files.length, event.permissions?.require_approval),
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: `Successfully uploaded ${results.length} file(s)`,
             data: {
-                results: successful,
-                errors: failed.length > 0 ? failed : undefined,
+                results,
                 summary: {
                     total: files.length,
-                    success: successCount,
-                    failed: failCount,
-                    processingTime: `${processingTime}ms`,
-                    pending_approval: successful.filter(r => r.approval_status === 'pending').length,
-                    admin_notifications_sent: successCount, // Track admin notifications
-                    requires_approval: event.permissions?.require_approval || false
-                },
-                note: event.permissions?.require_approval
-                    ? "Images uploaded successfully! They will appear after admin approval."
-                    : "Images uploaded successfully! High-quality versions processing in background..."
-            },
-            error: failed.length > 0 ? { message: 'Some uploads failed', details: failed } : null,
-            other: {
-                event_id: event._id.toString(),
-                requires_approval: event.permissions?.require_approval,
-                uploader_type: req.user ? 'registered_user' : 'guest',
-                admin_review_required: event.permissions?.require_approval || false
+                    success: results.length,
+                    processingTime: `${processingTime}ms`
+                }
             }
-        };
-
-        res.status(response.code).json(response);
-
-    } catch (error: any) {
-        logger.error('💥 Guest upload controller error:', {
-            message: error.message,
-            stack: error.stack,
-            shareToken: req.params.share_token
         });
 
-        // Cleanup files on error
-        if (req.files) {
-            await cleanupFiles(req.files as Express.Multer.File[]);
-        }
-
+    } catch (error: any) {
+        logger.error('Guest upload error:', error);
+        if (req.files) await cleanupFiles(req.files as Express.Multer.File[]);
         res.status(500).json({
             status: false,
             code: 500,
             message: 'Upload failed',
-            data: null,
-            error: { message: 'Internal server error occurred' },
-            other: null
+            data: null
         });
     }
 };
@@ -1161,11 +973,11 @@ export const getUploadStatusController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { mediaId } = req.params;
-        
+
         const media = await Media.findById(mediaId)
             .select('processing original_filename image_variants url')
             .lean();
-        
+
         if (!media) {
             res.status(404).json({
                 status: false,
@@ -1177,7 +989,7 @@ export const getUploadStatusController: RequestHandler = async (
             });
             return;
         }
-        
+
         res.status(200).json({
             status: true,
             code: 200,
@@ -1216,7 +1028,7 @@ export const getBatchUploadStatusController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { mediaIds } = req.body;
-        
+
         if (!Array.isArray(mediaIds) || mediaIds.length === 0) {
             res.status(400).json({
                 status: false,
@@ -1240,11 +1052,11 @@ export const getBatchUploadStatusController: RequestHandler = async (
             });
             return;
         }
-        
+
         const mediaList = await Media.find({ _id: { $in: mediaIds } })
             .select('_id processing original_filename url')
             .lean();
-        
+
         const statusMap = mediaList.reduce((acc, media) => {
             acc[media._id.toString()] = {
                 filename: media.original_filename,
@@ -1254,7 +1066,7 @@ export const getBatchUploadStatusController: RequestHandler = async (
             };
             return acc;
         }, {} as Record<string, any>);
-        
+
         res.status(200).json({
             status: true,
             code: 200,
@@ -1279,7 +1091,7 @@ export const retryUploadController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { mediaId } = req.params;
-        
+
         const media = await Media.findById(mediaId);
         if (!media) {
             res.status(404).json({
@@ -1292,7 +1104,7 @@ export const retryUploadController: RequestHandler = async (
             });
             return;
         }
-        
+
         if (media.processing?.status !== 'failed') {
             res.status(400).json({
                 status: false,
@@ -1304,25 +1116,25 @@ export const retryUploadController: RequestHandler = async (
             });
             return;
         }
-        
+
         // Reset processing status
         media.processing.status = 'pending';
         media.processing.progress_percentage = 0;
         media.processing.error_message = undefined;
         media.processing.retry_count = (media.processing.retry_count || 0) + 1;
         await media.save();
-        
+
         // TODO: Re-queue the processing job
         // const queue = getImageQueue();
         // await queue.add('retry-processing', { mediaId, ... });
-        
+
         logger.info(`Upload retry initiated for media ${mediaId} (attempt ${media.processing.retry_count})`);
-        
+
         res.status(200).json({
             status: true,
             code: 200,
             message: 'Upload retry initiated successfully',
-            data: { 
+            data: {
                 mediaId,
                 retryCount: media.processing.retry_count
             },

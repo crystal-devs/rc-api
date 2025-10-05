@@ -38,17 +38,8 @@ const imageVariantsSchema = new mongoose.Schema({
 const guestUploaderSchema = new mongoose.Schema({
     guest_id: { type: String, required: true },
     name: { type: String, default: "" },
-    email: { type: String, default: "" },
-    phone: { type: String, default: "" },
-    session_id: { type: String, default: "" },
-    device_fingerprint: { type: String, default: "" },
-    upload_method: { type: String, enum: ['web', 'mobile', 'qr_scan', 'direct_link'], default: 'web' },
-    total_uploads: { type: Number, default: 1 },
-    first_upload_at: { type: Date, default: Date.now },
-    platform_info: {
-        source: { type: String, default: "" },
-        referrer: { type: String, default: "" }
-    }
+    email: { type: String, default: "" }, // Kept for display purposes
+    session_id: { type: String, required: true } // Critical: links to GuestSession
 }, { _id: false });
 
 // Enhanced metadata schema
@@ -159,6 +150,11 @@ const mediaSchema = new mongoose.Schema({
         default: function () {
             return this.uploaded_by ? 'registered_user' : 'guest';
         }
+    },
+    guest_session_id: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: MODEL_NAMES.GUEST_SESSION,
+        default: null
     },
 
     // File info
@@ -290,7 +286,7 @@ mediaSchema.methods.canContactUploader = function (this: MediaDocument) {
     if (this.uploader_type === 'registered_user') {
         return true;
     } else if (this.uploader_type === 'guest' && this.guest_uploader) {
-        return !!(this.guest_uploader.email || this.guest_uploader.phone);
+        return !!(this.guest_uploader.email);
     }
     return false;
 };
@@ -377,6 +373,8 @@ mediaSchema.index({ type: 1, event_id: 1 });
 mediaSchema.index({ uploader_type: 1, event_id: 1 });
 mediaSchema.index({ "content_flags.inappropriate": 1 });
 mediaSchema.index({ created_at: -1 });
+mediaSchema.index({ guest_session_id: 1, event_id: 1 });
+mediaSchema.index({ guest_session_id: 1, uploader_type: 1 });
 
 // ✅ FIXED: Create model with proper typing
 export const Media = mongoose.model<MediaDocument>(MODEL_NAMES.MEDIA, mediaSchema, MODEL_NAMES.MEDIA);

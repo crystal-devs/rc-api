@@ -9,11 +9,13 @@ import { variantConfigService } from '@services/processing/config/variant-config
 import { imageOptimizerService } from '@services/processing/core/image-optimizer.service';
 import { variantOrganizerService } from '@services/processing/organizer/variant-organizer.service';
 import { mediaNotificationService } from '@services/websocket/notifications';
-import { Media } from '@models/media.model';
+import { createGuestUploaderInfo, Media } from '@models/media.model';
 import { Event } from '@models/event.model';
 import { EventParticipant } from '@models/event-participants.model';
 import { ImageKitUploadService } from '@services/external/imagekit';
 import { unifiedProgressService } from '@services/websocket/unified-progress.service';
+import { GuestSession } from '@models/guest-session.model';
+import { accessControlService } from '@services/event/access';
 
 interface ProcessingContext {
     eventId: string;
@@ -21,6 +23,8 @@ interface ProcessingContext {
     userId: string;
     userName: string;
     isGuestUpload?: boolean;
+    guestSessionId?: string;
+    guestInfo: any
 }
 
 interface ProcessingResult {
@@ -103,7 +107,9 @@ class MediaProcessingServiceClass {
                         userId: context.userId,
                         userName: context.userName,
                         isGuestUpload: context.isGuestUpload || false,
-                        optimisticFileId: previewResult.fileId
+                        optimisticFileId: previewResult.fileId,
+                        guestSessionId: context.guestSessionId,
+                        guestInfo: context.guestInfo
                     }).catch(error => {
                         logger.error(`Background processing failed for ${file.originalname}:`, error);
                         // Mark as failed in progress service
@@ -268,10 +274,8 @@ class MediaProcessingServiceClass {
         metadata: any
     ): Promise<void> {
         const session = await mongoose.startSession();
-
         try {
             await session.withTransaction(async () => {
-                // Ensure all required fields are present with fallbacks
                 const safeMetadata = {
                     width: metadata?.width || 1920,
                     height: metadata?.height || 1080,
@@ -279,43 +283,53 @@ class MediaProcessingServiceClass {
                     size: metadata?.size || jobData.fileSize || 0
                 };
 
-                // Create media document with all required fields
-                const media = new Media({
+                // Fetch event permissions for approval logic (cached in transaction)
+                const event = await Event.findById(jobData.eventId)
+                    .select('permissions')
+                    .session(session)
+                    .lean();
+
+                if (!event) {
+                    throw new Error('Event not found');
+                }
+
+                // Determine approval status based on uploader type and event settings
+                let approvalStatus: 'pending' | 'approved' | 'auto_approved' = 'approved';
+                let autoApprovalReason: string | null = null;
+
+                if (jobData.isGuestUpload) {
+                    // Guest upload logic
+                    if (event.permissions?.can_upload === false) {
+                        throw new Error('Guest uploads not allowed for this event');
+                    }
+
+                    if (event.permissions?.require_approval === true) {
+                        approvalStatus = 'pending';
+                        autoApprovalReason = null;
+                    } else {
+                        approvalStatus = 'auto_approved';
+                        autoApprovalReason = 'guest_auto_approve';
+                    }
+                } else {
+                    // Authenticated user - auto approve
+                    approvalStatus = 'auto_approved';
+                    autoApprovalReason = 'authenticated_user';
+                }
+
+                // Build media document
+                const mediaDoc: any = {
                     _id: new mongoose.Types.ObjectId(jobData.mediaId),
                     url: originalResult.url,
                     type: 'image',
                     album_id: new mongoose.Types.ObjectId(jobData.albumId),
                     event_id: new mongoose.Types.ObjectId(jobData.eventId),
-                    uploaded_by: new mongoose.Types.ObjectId(jobData.userId),
-                    uploader_type: jobData.isGuestUpload ? 'guest' : 'registered_user',
                     original_filename: jobData.originalFilename,
                     size_mb: jobData.fileSize / (1024 * 1024),
                     format: safeMetadata.format,
-
-                    // Original field (if your schema has it)
-                    original: {
-                        url: originalResult.url,
-                        width: safeMetadata.width,
-                        height: safeMetadata.height,
-                        size_mb: (originalResult.size || jobData.fileSize) / (1024 * 1024),
-                        format: safeMetadata.format
-                    },
-
-                    // COMPLETE image_variants with all required fields
                     image_variants: {
-                        small: completeVariants.small || {
-                            webp: null,
-                            jpeg: null
-                        },
-                        medium: completeVariants.medium || {
-                            webp: null,
-                            jpeg: null
-                        },
-                        large: completeVariants.large || {
-                            webp: null,
-                            jpeg: null
-                        },
-                        // CRITICAL: Include original in image_variants
+                        small: completeVariants.small || { webp: null, jpeg: null },
+                        medium: completeVariants.medium || { webp: null, jpeg: null },
+                        large: completeVariants.large || { webp: null, jpeg: null },
                         original: {
                             url: originalResult.url,
                             width: safeMetadata.width,
@@ -324,8 +338,6 @@ class MediaProcessingServiceClass {
                             format: safeMetadata.format
                         }
                     },
-
-                    // Metadata field (if your schema has it)
                     metadata: {
                         width: safeMetadata.width,
                         height: safeMetadata.height,
@@ -333,7 +345,6 @@ class MediaProcessingServiceClass {
                         format: safeMetadata.format,
                         size: safeMetadata.size
                     },
-
                     processing: {
                         status: 'completed',
                         current_stage: 'completed',
@@ -343,68 +354,129 @@ class MediaProcessingServiceClass {
                         variants_generated: true,
                         variants_count: this.calculateAllVariantsCount(completeVariants)
                     },
-
                     approval: {
-                        status: 'approved',
-                        auto_approval_reason: jobData.isGuestUpload ? 'guest_upload' : 'authenticated_user',
-                        approved_at: new Date()
+                        status: approvalStatus,
+                        auto_approval_reason: autoApprovalReason,
+                        approved_at: approvalStatus !== 'pending' ? new Date() : null,
+                        approved_by: null,
+                        rejection_reason: ''
                     }
-                });
+                };
 
+                // Handle guest vs authenticated user
+                if (jobData.isGuestUpload && jobData.guestSessionId) {
+                    mediaDoc.uploader_type = 'guest';
+                    mediaDoc.guest_session_id = jobData.guestSessionId;
+                    mediaDoc.uploaded_by = null;
+
+                    if (jobData.guestInfo) {
+                        // Include sessionId in guestData for createGuestUploaderInfo
+                        const guestDataWithSession = {
+                            ...jobData.guestInfo,
+                            sessionId: jobData.guestSessionId
+                        };
+                        mediaDoc.guest_uploader = createGuestUploaderInfo(guestDataWithSession, true);
+                    }
+                } else if (jobData.userId && mongoose.Types.ObjectId.isValid(jobData.userId)) {
+                    mediaDoc.uploader_type = 'registered_user';
+                    mediaDoc.uploaded_by = new mongoose.Types.ObjectId(jobData.userId);
+                } else {
+                    logger.warn(`Invalid userId: ${jobData.userId}, treating as guest`);
+                    mediaDoc.uploader_type = 'guest';
+                    mediaDoc.uploaded_by = null;
+                }
+
+                const media = new Media(mediaDoc);
                 await media.save({ session });
 
-                // Update event stats
+                // Update event stats based on approval status
+                const statsUpdate: any = {
+                    $inc: {
+                        'stats.total_size_mb': jobData.fileSize / (1024 * 1024)
+                    },
+                    $set: { 'updated_at': new Date() }
+                };
+
+                if (approvalStatus === 'pending') {
+                    // Pending approval - increment pending count
+                    statsUpdate.$inc['stats.pending_approval'] = 1;
+                } else {
+                    // Auto-approved - increment photo count
+                    statsUpdate.$inc['stats.photos'] = 1;
+                }
+
                 await Event.updateOne(
                     { _id: new mongoose.Types.ObjectId(jobData.eventId) },
-                    {
-                        $inc: {
-                            'stats.photos': 1,
-                            'stats.total_size_mb': jobData.fileSize / (1024 * 1024)
-                        },
-                        $set: { 'updated_at': new Date() }
-                    },
+                    statsUpdate,
                     { session }
                 );
 
-                // Update or create participant
-                const participant = await EventParticipant.findOne({
-                    user_id: new mongoose.Types.ObjectId(jobData.userId),
-                    event_id: new mongoose.Types.ObjectId(jobData.eventId)
-                }).session(session);
+                // Only update participant for valid authenticated users
+                if (!jobData.isGuestUpload &&
+                    jobData.userId &&
+                    mongoose.Types.ObjectId.isValid(jobData.userId)) {
 
-                if (participant) {
-                    await EventParticipant.updateOne(
-                        { _id: participant._id },
+                    const participant = await EventParticipant.findOne({
+                        user_id: new mongoose.Types.ObjectId(jobData.userId),
+                        event_id: new mongoose.Types.ObjectId(jobData.eventId)
+                    }).session(session);
+
+                    if (participant) {
+                        await EventParticipant.updateOne(
+                            { _id: participant._id },
+                            {
+                                $inc: {
+                                    'stats.uploads_count': 1,
+                                    'stats.total_file_size_mb': jobData.fileSize / (1024 * 1024)
+                                },
+                                $set: {
+                                    'stats.last_upload_at': new Date(),
+                                    'last_activity_at': new Date()
+                                }
+                            },
+                            { session }
+                        );
+                    } else {
+                        await EventParticipant.create([{
+                            user_id: new mongoose.Types.ObjectId(jobData.userId),
+                            event_id: new mongoose.Types.ObjectId(jobData.eventId),
+                            join_method: 'admin_upload',
+                            status: 'active',
+                            joined_at: new Date(),
+                            stats: {
+                                uploads_count: 1,
+                                total_file_size_mb: jobData.fileSize / (1024 * 1024),
+                                last_upload_at: new Date()
+                            },
+                            last_activity_at: new Date()
+                        }], { session });
+                    }
+                }
+
+                // Update guest session stats if applicable
+                if (jobData.isGuestUpload && jobData.guestSessionId) {
+                    await GuestSession.updateOne(
+                        { _id: jobData.guestSessionId },
                         {
                             $inc: {
-                                'stats.uploads_count': 1,
-                                'stats.total_file_size_mb': jobData.fileSize / (1024 * 1024)
+                                'upload_stats.successful_uploads': 1,
+                                'upload_stats.total_uploads': 1,
+                                'upload_stats.total_size_mb': jobData.fileSize / (1024 * 1024)
                             },
                             $set: {
-                                'stats.last_upload_at': new Date(),
+                                'upload_stats.last_upload_at': new Date(),
                                 'last_activity_at': new Date()
+                            },
+                            $setOnInsert: {
+                                'upload_stats.first_upload_at': new Date()
                             }
                         },
                         { session }
                     );
-                } else {
-                    await EventParticipant.create([{
-                        user_id: new mongoose.Types.ObjectId(jobData.userId),
-                        event_id: new mongoose.Types.ObjectId(jobData.eventId),
-                        join_method: jobData.isGuestUpload ? 'guest_upload' : 'admin_upload',
-                        status: 'active',
-                        joined_at: new Date(),
-                        stats: {
-                            uploads_count: 1,
-                            total_file_size_mb: jobData.fileSize / (1024 * 1024),
-                            last_upload_at: new Date()
-                        },
-                        last_activity_at: new Date()
-                    }], { session });
                 }
             });
 
-            logger.info(`Successfully saved media ${jobData.mediaId} to database`);
+            logger.info(`Successfully saved media ${jobData.mediaId} with approval status`);
 
         } catch (dbError) {
             logger.error(`Database save failed for ${jobData.mediaId}:`, dbError);
