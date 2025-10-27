@@ -359,11 +359,23 @@ async function generateSingleVariant(
   format: 'webp' | 'jpeg',
   config: { width: number; height: number; quality: number }
 ): Promise<ImageVariant> {
+  let sharpInstance: sharp.Sharp | null = null;
   try {
-    let sharpInstance = sharp(filePath)
+    // 🛡️ MEMORY PROTECTION: Check memory pressure before processing
+    if (checkMemoryPressure()) {
+      logger.warn('High memory pressure detected in worker, delaying processing');
+      await waitForMemoryRelief();
+    }
+
+    // 🚀 SHARP PIPELINE: Optimized settings with memory protection
+    sharpInstance = sharp(filePath, {
+      sequentialRead: true,
+      limitInputPixels: 268402689  // 🛡️ 16MP limit (268M pixels) - prevents OOM
+    })
       .resize(config.width, config.height, {
         fit: 'inside',
-        withoutEnlargement: true
+        withoutEnlargement: true,
+        kernel: sharp.kernel.lanczos3  // Better quality
       });
 
     let buffer: Buffer;
@@ -372,6 +384,7 @@ async function generateSingleVariant(
         .webp({
           quality: config.quality,
           effort: 4,
+          smartSubsample: true,  // Better compression
           nearLossless: false
         })
         .toBuffer();
@@ -380,10 +393,15 @@ async function generateSingleVariant(
         .jpeg({
           quality: config.quality,
           progressive: true,
-          mozjpeg: true
+          mozjpeg: true,
+          optimizeScans: true  // Better compression
         })
         .toBuffer();
     }
+
+    // 🧹 CLEANUP: Destroy Sharp instance immediately after processing
+    sharpInstance.destroy();
+    sharpInstance = null;
 
     const metadata = await sharp(buffer).metadata();
     const sizeBytes = buffer.length;
@@ -411,6 +429,15 @@ async function generateSingleVariant(
   } catch (error) {
     logger.error(`Failed to generate ${sizeName} ${format} variant:`, error);
     throw error;
+  } finally {
+    // 🧹 CLEANUP: Ensure Sharp instance is always destroyed
+    if (sharpInstance) {
+      try {
+        sharpInstance.destroy();
+      } catch (cleanupError) {
+        logger.warn('Error destroying Sharp instance in worker:', cleanupError);
+      }
+    }
   }
 }
 
@@ -515,6 +542,64 @@ function calculateTotalVariantsSize(variants: any): number {
   });
 
   return Math.round(total * 100) / 100;
+}
+
+/**
+ * 🛡️ MEMORY MONITORING: Check if system is under memory pressure
+ */
+function checkMemoryPressure(): boolean {
+  try {
+    const memUsage = process.memoryUsage();
+    const heapUsedMB = memUsage.heapUsed / 1024 / 1024;
+    const heapTotalMB = memUsage.heapTotal / 1024 / 1024;
+    const rssMB = memUsage.rss / 1024 / 1024;
+
+    // Check multiple memory pressure indicators
+    const heapPressure = heapUsedMB > 1536; // 1.5GB heap used
+    const rssPressure = rssMB > 2048; // 2GB RSS
+    const heapRatioPressure = (heapUsedMB / heapTotalMB) > 0.85; // 85% heap utilization
+
+    const isUnderPressure = heapPressure || rssPressure || heapRatioPressure;
+
+    if (isUnderPressure) {
+      logger.warn('Memory pressure detected in worker:', {
+        heapUsedMB: Math.round(heapUsedMB),
+        heapTotalMB: Math.round(heapTotalMB),
+        rssMB: Math.round(rssMB),
+        heapRatio: Math.round((heapUsedMB / heapTotalMB) * 100) + '%'
+      });
+    }
+
+    return isUnderPressure;
+  } catch (error) {
+    logger.warn('Failed to check memory pressure in worker:', error);
+    return false; // Default to no pressure if check fails
+  }
+}
+
+/**
+ * ⏳ MEMORY RELIEF: Wait for memory pressure to reduce
+ */
+async function waitForMemoryRelief(): Promise<void> {
+  const maxWaitTime = 5000; // 5 seconds max wait
+  const checkInterval = 500; // Check every 500ms
+  let waitTime = 0;
+
+  while (checkMemoryPressure() && waitTime < maxWaitTime) {
+    await new Promise(resolve => setTimeout(resolve, checkInterval));
+    waitTime += checkInterval;
+
+    // Force garbage collection if available
+    if (global.gc) {
+      global.gc();
+    }
+  }
+
+  if (waitTime >= maxWaitTime) {
+    logger.warn('Memory pressure timeout reached in worker, proceeding with processing');
+  } else {
+    logger.info(`Memory pressure relieved in worker after ${waitTime}ms`);
+  }
 }
 
 export const getImageWorker = (): Worker | null => {

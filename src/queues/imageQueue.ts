@@ -115,7 +115,7 @@ export const initializeImageQueue = async (): Promise<Queue> => {
         maxRetriesPerRequest: null as any,
         enableReadyCheck: false,
       },
-      concurrency: process.env.NODE_ENV === 'production' ? 5 : 2,
+      concurrency: process.env.NODE_ENV === 'production' ? 15 : 5, // 🚀 Increased for heavy loads (1000+ uploads)
       maxStalledCount: 3,        // INCREASED: Allow more stall recoveries
       stalledInterval: 30000,    // 30 seconds
       lockDuration: 300000,      // ADDED: 5 min lock duration (matches job timeout)
