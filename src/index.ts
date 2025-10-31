@@ -124,6 +124,9 @@ async function initializeApplication() {
       CleanupService.initializeBulkDownloadCleanupJobs();
     }
 
+    // Initialize S3 connection
+    const s3Connected = await InitializationService.initializeS3();
+
     // WebSocket status logging
     if (webSocketService) {
       const stats = webSocketService.getConnectionStats();

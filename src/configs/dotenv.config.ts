@@ -59,6 +59,12 @@ export const keys: Record<string, string | number | string[]> = {
   redisHost: process.env.REDIS_HOST || 'localhost',
   redisPort: process.env.REDIS_PORT ? Number(process.env.REDIS_PORT) : 6379,
   redisPassword: process.env.REDIS_PASSWORD || undefined,
+
+  // ☁️ AWS S3 Configuration
+  awsRegion: process.env.AWS_REGION || 'us-east-1',
+  awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+  awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+  s3BucketName: process.env.AWS_S3_BUCKET || '',
 };
 
 // Validate environment variables

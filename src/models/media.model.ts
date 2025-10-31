@@ -21,16 +21,16 @@ const imageVariantsSchema = new mongoose.Schema({
         format: { type: String, required: true }
     },
     small: {
-        webp: { type: imageVariantSchema, required: false },
-        jpeg: { type: imageVariantSchema, required: true }
+        webp: { type: imageVariantSchema, required: true },
+        jpeg: { type: imageVariantSchema, required: false }
     },
     medium: {
-        webp: { type: imageVariantSchema, required: false },
-        jpeg: { type: imageVariantSchema, required: true }
+        webp: { type: imageVariantSchema, required: true },
+        jpeg: { type: imageVariantSchema, required: false }
     },
     large: {
-        webp: { type: imageVariantSchema, required: false },
-        jpeg: { type: imageVariantSchema, required: true }
+        webp: { type: imageVariantSchema, required: true },
+        jpeg: { type: imageVariantSchema, required: false }
     }
 }, { _id: false });
 
@@ -118,10 +118,13 @@ const mediaSchema = new mongoose.Schema({
     _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
 
     // Core media info
-    url: { type: String, required: true },
+    url: { type: String, required: false },
     public_id: { type: String, default: "" },
     type: { type: String, enum: ["image", "video"], required: true },
-
+    // In mediaSchema
+    upload_id: {
+        type: String, required: true, unique: true, index: true
+    },
     // Image variants (only for images)
     image_variants: {
         type: imageVariantsSchema,
@@ -194,7 +197,7 @@ const mediaSchema = new mongoose.Schema({
 
     // Upload context
     upload_context: {
-        method: { type: String, enum: ['web', 'mobile', 'api', 'guest_upload'], default: 'web' },
+        method: { type: String, enum: ['web', 'mobile', 'api', 'guest_upload', 'optimistic_upload'], default: 'web' },
         ip_address: { type: String, default: "" },
         user_agent: { type: String, default: "" },
         upload_session_id: { type: String, default: "" },

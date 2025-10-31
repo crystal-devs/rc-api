@@ -16,7 +16,7 @@ interface AuthenticatedRequest extends Request {
 /**
  * Optimistic Upload Controller - Clean and Simple
  */
-export const optimisticUploadController = async (
+export const uploadMediaController = async (
     req: AuthenticatedRequest,
     res: Response,
     next: NextFunction
@@ -28,7 +28,7 @@ export const optimisticUploadController = async (
         const { album_id, event_id } = req.body;
         const userId = req.user._id.toString();
         const userName = req.user.name || 'Admin';
-
+        
         // Initialize progress for each file
         const uploadPromises = files.map(async (file) => {
             const mediaId = new mongoose.Types.ObjectId().toString();
@@ -69,6 +69,8 @@ export const optimisticUploadController = async (
         results.forEach(result => {
             unifiedProgressService.updatePreviewProgress(result.mediaId, true);
         });
+        
+        logger.info(`📊 Upload completed: ${results.length} files processed successfully`);
 
         const processingTime = Date.now() - startTime;
 
@@ -94,4 +96,13 @@ export const optimisticUploadController = async (
             message: error.message || "Upload failed"
         });
     }
+};
+
+export const uploads3MediaController = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<Response | void> => {
+    // Placeholder for S3 upload controller
+
 };

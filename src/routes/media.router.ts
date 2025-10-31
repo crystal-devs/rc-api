@@ -18,7 +18,7 @@ import {
     getBatchUploadStatusController,
     retryUploadController
 } from "@controllers/media.controller";
-import { optimisticUploadController } from "@controllers/upload.controller";
+import { uploadMediaController } from "@controllers/upload.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import {
     checkStorageLimitMiddleware,
@@ -27,8 +27,13 @@ import {
 import { validateGuestTokenMiddleware } from "@middlewares/validate-share-token.middleware";
 import { optionalAuthMiddleware } from "@middlewares/conditional-auth.middleware";
 import { checkFileSizeLimitMiddleware } from "@middlewares/upload.middleware";
+import { generateBatchUploadUrlsController, generateUploadUrlController } from "@controllers/upload-url.controller";
+import { uploadCompleteController } from "@controllers/upload-complete.controller";
+import { validateLambdaToken } from "@middlewares/validateLambdaToken.middleware";
+import { updateMediaController } from "@controllers/update-media.controller";
 
 const mediaRouter = express.Router();
+const wrap = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next);
 
 // Configure multer for file uploads with better error handling
 const upload = multer({
@@ -56,15 +61,12 @@ mediaRouter.post(
     checkFileSizeLimitMiddleware as RequestHandler,
     checkStorageLimitMiddleware as RequestHandler,
     checkEventPhotoLimitMiddleware as RequestHandler,
-    optimisticUploadController as RequestHandler,
-    // uploadMediaController as RequestHandler // Uses optimized controller
+    uploadMediaController as RequestHandler,
 );
 
-// mediaRouter.get('/temp-image/:mediaId', serveTempImageController);
-
-// Add status endpoints
-// mediaRouter.get("/status/:mediaId", getUploadStatusController as RequestHandler);
-// mediaRouter.post("/status/batch", getBatchUploadStatusController as RequestHandler);
+mediaRouter.post('/upload-url', wrap(generateBatchUploadUrlsController))
+mediaRouter.post('/upload-complete', wrap(uploadCompleteController))
+mediaRouter.post('/update-photo', validateLambdaToken as RequestHandler, wrap(updateMediaController))
 
 // Cover image upload (always requires auth)
 mediaRouter.post(

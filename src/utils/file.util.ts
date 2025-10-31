@@ -2,6 +2,7 @@
 
 import fs from 'fs/promises';
 import { logger } from './logger';
+import { getCachedSignedUrl } from './signedUrl';
 
 /**
  * Determine file type based on MIME type
@@ -221,7 +222,7 @@ export function hasImageVariants(mediaItem: any): boolean {
 /**
  * Media metadata interface for better type safety
  */
-interface MediaMetadata {
+export interface MediaMetadata {
     _id: any;
     type: any;
     url: any;
@@ -243,13 +244,7 @@ interface MediaMetadata {
     created_at: any;
     updated_at: any;
     // Optional properties that might be added
-    responsive_urls?: {
-        thumbnail: string;
-        medium: string;
-        large: string;
-        original: string;
-        preferred: string;
-    };
+    responsive_urls?: Record<string, string>;
     available_variants?: {
         small: {
             webp: boolean;
@@ -321,27 +316,25 @@ export function getResponsiveImageUrls(
     mediaItem: any,
     userAgent?: string
 ): {
-    thumbnail: string;
+    small: string;
     medium: string;
     large: string;
     original: string;
-    preferred: string;
 } {
     const context = detectContextFromUserAgent(userAgent);
 
     return {
-        thumbnail: getOptimizedImageUrlForItem(mediaItem, 'small', 'auto', 'mobile', userAgent),
+        small: getOptimizedImageUrlForItem(mediaItem, 'small', 'auto', 'mobile', userAgent),
         medium: getOptimizedImageUrlForItem(mediaItem, 'medium', 'auto', 'desktop', userAgent),
         large: getOptimizedImageUrlForItem(mediaItem, 'large', 'auto', 'lightbox', userAgent),
         original: mediaItem.url,
-        preferred: getOptimizedImageUrlForItem(mediaItem, 'medium', 'auto', context, userAgent)
     };
 }
 
 /**
  * Transform media array for API response (updated for your model)
  */
-export function transformMediaForResponse(
+export async function transformMediaForResponse(
     mediaItems: any[],
     options: {
         quality?: string;
@@ -350,42 +343,111 @@ export function transformMediaForResponse(
         includeVariants?: boolean;
     } = {},
     userAgent?: string
-): any[] {
-    return mediaItems.map(item => {
-        const transformed: MediaMetadata = getMediaMetadata(item, userAgent);
+): Promise<MediaMetadata[]> {
+    const useWebP = supportsWebP(userAgent);
 
-        // Add variant information if requested
-        if (options.includeVariants && hasImageVariants(item)) {
-            transformed.responsive_urls = getResponsiveImageUrls(item, userAgent);
-            transformed.available_variants = {
-                small: {
-                    webp: !!item.image_variants?.small?.webp?.url,
-                    jpeg: !!item.image_variants?.small?.jpeg?.url
-                },
-                medium: {
-                    webp: !!item.image_variants?.medium?.webp?.url,
-                    jpeg: !!item.image_variants?.medium?.jpeg?.url
-                },
-                large: {
-                    webp: !!item.image_variants?.large?.webp?.url,
-                    jpeg: !!item.image_variants?.large?.jpeg?.url
-                }
+    const results = await Promise.all(
+        mediaItems.map(async (item) => {
+            const transformed: MediaMetadata = {
+                _id: item._id.toString(),
+                type: item.type,
+                url: item.url,
+                optimized_url: hasImageVariants(item) ?
+                    getOptimizedImageUrlForItem(item, 'medium', 'auto', 'desktop', userAgent) :
+                    item.url,
+                has_variants: hasImageVariants(item),
+                processing_status: item.processing?.status || 'unknown',
+                approval_status: item.approval?.status || 'pending',
+                size_mb: item.size_mb || 0,
+                original_filename: item.original_filename || '',
+                format: item.format || '',
+                uploader_type: item.uploader_type || 'guest',
+                uploader_display_name: item.uploader_display_name || getUploaderDisplayName(item),
+                dimensions: item.metadata ? {
+                    width: item.metadata.width || 0,
+                    height: item.metadata.height || 0,
+                    aspect_ratio: item.metadata.aspect_ratio || 1
+                } : null,
+                stats: item.stats || { views: 0, downloads: 0, shares: 0, likes: 0 },
+                created_at: item.created_at,
+                updated_at: item.updated_at
             };
-        }
 
-        // Add specific optimized URL if quality/format/context specified
-        if (options.quality || options.format || options.context) {
-            transformed.requested_optimized_url = getOptimizedImageUrlForItem(
-                item,
-                options.quality || 'medium',
-                options.format || 'auto',
-                options.context || 'desktop',
-                userAgent
-            );
-        }
+            const originalKey = item.public_id;
+            const getKey = (size: 'small' | 'medium' | 'large', format: 'webp' | 'jpeg') =>
+                item.image_variants?.[size]?.[format]?.public_id || null;
 
-        return transformed;
-    });
+            const keys = {
+                original: originalKey,
+                small_webp: getKey('small', 'webp'),
+                small_jpeg: getKey('small', 'jpeg'),
+                medium_webp: getKey('medium', 'webp'),
+                medium_jpeg: getKey('medium', 'jpeg'),
+                large_webp: getKey('large', 'webp'),
+                large_jpeg: getKey('large', 'jpeg'),
+            };
+
+            // --- RESPONSIVE URLS ---
+            if (options.includeVariants && hasImageVariants(item)) {
+                transformed.available_variants = {
+                    small: { webp: !!keys.small_webp, jpeg: !!keys.small_jpeg },
+                    medium: { webp: !!keys.medium_webp, jpeg: !!keys.medium_jpeg },
+                    large: { webp: !!keys.large_webp, jpeg: !!keys.large_jpeg },
+                };
+
+                const responsiveUrls: Record<string, string> = {};
+
+                const tasks = [
+                    { size: 'small', key: useWebP ? keys.small_webp : keys.small_jpeg },
+                    { size: 'medium', key: useWebP ? keys.medium_webp : keys.medium_jpeg },
+                    { size: 'large', key: useWebP ? keys.large_webp : keys.large_jpeg },
+                    { size: 'original', key: keys.original, expires: 604800 },
+                ].filter(t => t.key);
+
+                const urls = await Promise.all(
+                    tasks.map(t =>
+                        getCachedSignedUrl(t.key!, t.expires || 3600)
+                    )
+                );
+
+                tasks.forEach((t, i) => {
+                    if (t.size) responsiveUrls[t.size] = urls[i];
+                });
+
+                transformed.responsive_urls = responsiveUrls;
+            }
+
+            // --- REQUESTED OPTIMIZED URL ---
+            if (options.quality || options.format || options.context) {
+                const quality = options.quality || 'medium';
+                const format = options.format || 'auto';
+
+                let targetKey: string | null = null;
+
+                if (format === 'webp' && useWebP) {
+                    targetKey = quality === 'small' ? keys.small_webp :
+                        quality === 'large' ? keys.large_webp :
+                            keys.medium_webp;
+                }
+
+                if (!targetKey) {
+                    targetKey = quality === 'small' ? (keys.small_jpeg || keys.small_webp) :
+                        quality === 'large' ? (keys.large_jpeg || keys.large_webp) :
+                            (keys.medium_jpeg || keys.medium_webp);
+                }
+
+                if (!targetKey && keys.original) targetKey = keys.original;
+
+                if (targetKey) {
+                    transformed.requested_optimized_url = await getCachedSignedUrl(targetKey, 3600);
+                }
+            }
+
+            return transformed;
+        })
+    );
+
+    return results;
 }
 
 export const extractImageKitFileId = (url: string): string | null => {
@@ -440,7 +502,7 @@ export const extractImageKitFileId = (url: string): string | null => {
 export const extractImageKitDirectory = (url: string): string | null => {
     const filePath = extractImageKitFileId(url);
     if (!filePath) return null;
-    
+
     const parts = filePath.split('/');
     parts.pop(); // Remove filename
     return parts.join('/');
@@ -452,13 +514,13 @@ export const extractImageKitDirectory = (url: string): string | null => {
 export const extractEventIdFromImageKitUrl = (url: string): string | null => {
     const filePath = extractImageKitFileId(url);
     if (!filePath) return null;
-    
+
     // Path format: events/{eventId}/originals/file.jpg
     const parts = filePath.split('/');
     if (parts.length >= 2 && parts[0] === 'events') {
         return parts[1];
     }
-    
+
     return null;
 };
 
@@ -467,7 +529,7 @@ export const extractEventIdFromImageKitUrl = (url: string): string | null => {
  */
 export const isValidImageKitUrl = (url: string): boolean => {
     if (!url || typeof url !== 'string') return false;
-    
+
     try {
         const urlObj = new URL(url);
         return urlObj.hostname.includes('imagekit.io');
@@ -482,10 +544,10 @@ export const isValidImageKitUrl = (url: string): boolean => {
 export const getFileTypeFromImageKitUrl = (url: string): 'original' | 'variant' | 'unknown' => {
     const filePath = extractImageKitFileId(url);
     if (!filePath) return 'unknown';
-    
+
     if (filePath.includes('/originals/')) return 'original';
     if (filePath.includes('/variants/')) return 'variant';
-    
+
     return 'unknown';
 };
 
@@ -494,7 +556,7 @@ export const getFileTypeFromImageKitUrl = (url: string): 'original' | 'variant' 
  */
 export const groupUrlsByEvent = (urls: string[]): Map<string, string[]> => {
     const grouped = new Map<string, string[]>();
-    
+
     urls.forEach(url => {
         const eventId = extractEventIdFromImageKitUrl(url);
         if (eventId) {
@@ -506,7 +568,7 @@ export const groupUrlsByEvent = (urls: string[]): Map<string, string[]> => {
             logger.warn('Could not extract event ID from URL:', url);
         }
     });
-    
+
     return grouped;
 };
 
@@ -519,7 +581,7 @@ export const validateAndCleanUrls = (urls: string[]): {
 } => {
     const validUrls: string[] = [];
     const invalidUrls: string[] = [];
-    
+
     urls.forEach(url => {
         if (isValidImageKitUrl(url)) {
             validUrls.push(url);
@@ -527,13 +589,13 @@ export const validateAndCleanUrls = (urls: string[]): {
             invalidUrls.push(url);
         }
     });
-    
+
     if (invalidUrls.length > 0) {
         logger.warn(`Found ${invalidUrls.length} invalid ImageKit URLs`, {
             sample: invalidUrls.slice(0, 3)
         });
     }
-    
+
     return { validUrls, invalidUrls };
 };
 /**

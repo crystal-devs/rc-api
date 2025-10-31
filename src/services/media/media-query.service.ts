@@ -7,6 +7,7 @@ import { Media } from '@models/media.model';
 import { Event } from '@models/event.model';
 import { transformMediaForResponse } from '@utils/file.util';
 import type { ServiceResponse, MediaQueryOptions, MediaItem } from './media.types';
+import type { MediaMetadata } from '@utils/file.util';
 
 export const buildMediaQuery = (
     baseId: string,
@@ -93,6 +94,7 @@ export const getMediaByEventService = async (
         });
         const filteredCount = await Media.countDocuments(query);
 
+        console.log(filteredCount, 'media items found after applying filters');
         logger.info('Media query debug:', {
             eventId,
             totalCount,
@@ -128,7 +130,7 @@ export const getMediaByEventService = async (
             .lean();
 
         // Apply image optimization
-        const optimizedMedia = transformMediaForResponse(mediaItems, {
+        const optimizedMedia = await transformMediaForResponse(mediaItems, {
             quality: options.quality || 'medium',
             format: options.format || 'auto',
             context: options.context || 'desktop',
@@ -153,11 +155,11 @@ export const getMediaByEventService = async (
                     hasNext: page < totalPages,
                     hasPrev: page > 1
                 },
-                debug: {
-                    totalInEvent: totalCount,
-                    afterFilters: filteredCount,
-                    returned: optimizedMedia.length
-                },
+                // debug: {
+                //     totalInEvent: totalCount,
+                //     afterFilters: filteredCount,
+                //     returned: optimizedMedia.length
+                // },
                 optimization_settings: {
                     quality: options.quality || 'medium',
                     format: options.format || 'auto',
@@ -214,7 +216,7 @@ export const getMediaByAlbumService = async (
         const totalCount = await Media.countDocuments(query);
 
         // Optimize images for response
-        const optimizedMedia = transformMediaForResponse(mediaItems, {
+        const optimizedMedia = await transformMediaForResponse(mediaItems, {
             quality: options.quality,
             format: options.format,
             context: options.context,
@@ -332,7 +334,7 @@ export const getGuestMediaService = async (
             .lean();
 
         // 🚀 Use the SAME transformation function as admin service
-        const transformedMedia = transformMediaForResponse(mediaItems, {
+        const transformedMedia = await transformMediaForResponse(mediaItems, {
             quality: options.quality || 'medium',
             format: options.format || 'auto',
             context: options.context || 'mobile', // Default to mobile for guests
@@ -340,7 +342,7 @@ export const getGuestMediaService = async (
         }, options.userAgent);
 
         // Add guest-specific metadata to each item
-        const guestEnhancedMedia = transformedMedia.map(item => ({
+        const guestEnhancedMedia = transformedMedia.map((item: MediaMetadata) => ({
             ...item,
             // Hide uploader info for privacy
             uploaded_by: "Guest",
@@ -403,7 +405,7 @@ export const getGuestMediaBatchService = async (
     shareToken: string,
     mediaIds: string[],
     quality: string = 'medium'
-): Promise<ServiceResponse<any[]>> => {
+): Promise<ServiceResponse<MediaMetadata[]>> => {
     try {
         // Validate input
         if (!shareToken || !mediaIds || !Array.isArray(mediaIds) || mediaIds.length === 0) {
@@ -451,7 +453,7 @@ export const getGuestMediaBatchService = async (
         }).lean();
 
         // 🚀 Use the SAME transformation function
-        const optimizedBatch = transformMediaForResponse(mediaItems, {
+        const optimizedBatch = await transformMediaForResponse(mediaItems, {
             quality: quality,
             format: 'auto',
             context: 'mobile',

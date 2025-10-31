@@ -7,7 +7,6 @@ import { sendResponse } from "@utils/express.util";
 import { Event } from "@models/event.model";
 import { Media } from "@models/media.model";
 import { bytesToMB, cleanupFile, getOptimizedImageUrlForItem } from "@utils/file.util";
-import { mediaNotificationService } from "@services/websocket/notifications";
 import { getWebSocketService } from "@services/websocket/websocket.service";
 import {
     bulkUpdateMediaStatusService,
