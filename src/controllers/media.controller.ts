@@ -6,7 +6,7 @@ import { logger } from "@utils/logger";
 import { sendResponse } from "@utils/express.util";
 import { Event } from "@models/event.model";
 import { Media } from "@models/media.model";
-import { bytesToMB, cleanupFile, getOptimizedImageUrlForItem } from "@utils/file.util";
+import { bytesToMB, getOptimizedImageUrlForItem } from "@utils/file.util";
 import { getWebSocketService } from "@services/websocket/websocket.service";
 import {
     bulkUpdateMediaStatusService,
@@ -14,13 +14,9 @@ import {
     getGuestMediaService,
     getMediaByAlbumService,
     getMediaByEventService,
-    mediaProcessingService,
     MediaQueryOptions,
     updateMediaStatusService,
-    uploadCoverImageService
 } from "@services/media";
-import { uploadGuestMedia } from "@services/guest";
-import { GuestSessionService } from "@services/guest/guest-session.service";
 import { GuestSessionHelper } from "@services/guest/guest-session-helper";
 
 // Enhanced interface for authenticated requests
@@ -41,47 +37,6 @@ interface InjectedRequest extends AuthenticatedRequest {
         subscription?: any;
     };
 }
-
-/**
- * Cover image upload controller
- */
-export const uploadCoverImageController: RequestHandler = async (
-    req: InjectedRequest,
-    res: Response,
-    next: NextFunction
-): Promise<void> => {
-    try {
-        const file = req.file;
-        const { folder = 'covers' } = req.body;
-
-        // Validate inputs
-        if (!file) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "No file provided",
-                data: null,
-                error: { message: "Image file is required" },
-                other: null
-            });
-            return;
-        }
-
-        logger.info('📸 Cover image upload started', {
-            filename: file.originalname,
-            size: file.size,
-            folder,
-            user_id: req.user._id.toString()
-        });
-
-        // Upload cover image
-        const response = await uploadCoverImageService(file, folder);
-        sendResponse(res, response);
-    } catch (error: any) {
-        logger.error('Error in uploadCoverImageController:', error);
-        next(error);
-    }
-};
 
 /**
  * Get all media for a specific event with enhanced variant support
@@ -621,18 +576,18 @@ export const guestUploadMediaController: RequestHandler = async (
         GuestSessionHelper.setCookie(res, guestSession.session_id);
 
         // Use existing media processing service with guest context
-        const results = await mediaProcessingService.processOptimisticUpload(
-            files,
-            {
-                eventId: event._id.toString(),
-                userId: req.user?._id?.toString(),
-                userName: guest_name || 'Guest',
-                isGuestUpload: true,
-                guestSessionId: guestSession._id.toString(),
-                guestInfo
-            }
-        );
-
+        // const results = await mediaProcessingService.processOptimisticUpload(
+        //     files,
+        //     {
+        //         eventId: event._id.toString(),
+        //         userId: req.user?._id?.toString(),
+        //         userName: guest_name || 'Guest',
+        //         isGuestUpload: true,
+        //         guestSessionId: guestSession._id.toString(),
+        //         guestInfo
+        //     }
+        // );
+        let results: any[] = [];
         const processingTime = Date.now() - startTime;
 
         res.status(200).json({
@@ -661,80 +616,10 @@ export const guestUploadMediaController: RequestHandler = async (
     }
 };
 
-// 🚀 UPDATED: Guest-friendly success messages considering approval workflow
-function generateGuestSuccessMessage(
-    successCount: number,
-    failCount: number,
-    totalCount: number,
-    requiresApproval: boolean = false
-): string {
-    const approvalText = requiresApproval
-        ? " They will appear in the gallery after admin approval."
-        : " They are now visible to everyone!";
-
-    if (failCount === 0) {
-        return `All ${successCount} photo${successCount > 1 ? 's' : ''} uploaded successfully!${approvalText}`;
-    } else if (successCount > 0) {
-        return `${successCount} photo${successCount > 1 ? 's' : ''} uploaded successfully, ${failCount} failed.${approvalText}`;
-    } else {
-        return `All ${totalCount} upload${totalCount > 1 ? 's' : ''} failed. Please try again.`;
-    }
-}
-/**
- * 🚀 NEW: Process individual guest file upload with optional broadcast support
- * Similar to admin's processFileUploadWithBroadcast but for guests
- */
-const processGuestFileUploadWithOptionalBroadcast = async (
-    file: Express.Multer.File,
-    context: {
-        shareToken: string;
-        guestInfo: any;
-        authenticatedUserId?: string;
-        eventId: string;
-    }
-): Promise<any> => {
-    try {
-        logger.info(`📁 Processing guest file: ${file.originalname}`, {
-            size: `${bytesToMB(file.size)}MB`,
-            type: file.mimetype,
-            guestName: context.guestInfo.name || 'Anonymous'
-        });
-
-        const uploadResult = await uploadGuestMedia(
-            context.shareToken,
-            file,
-            context.guestInfo,
-            context.authenticatedUserId
-        );
-
-        // 🚀 PLACEHOLDER: WebSocket broadcast point
-        if (uploadResult.success && uploadResult.media_id) {
-            // TODO: Add WebSocket broadcast here when needed
-            // await broadcastGuestUploadSuccess(context.eventId, uploadResult);
-            logger.info(`📡 WebSocket placeholder - guest upload success: ${uploadResult.media_id}`);
-        }
-
-        return {
-            filename: file.originalname,
-            ...uploadResult
-        };
-
-    } catch (error: any) {
-        logger.error(`❌ Error processing guest file ${file.originalname}:`, error);
-
-        // Ensure file cleanup on error
-        await cleanupFile(file);
-
-        throw new Error(`Failed to process ${file.originalname}: ${error.message}`);
-    }
-};
-
 /**
  * 🚀 NEW: Cleanup multiple files utility (if not already available)
  */
 const cleanupFiles = async (files: Express.Multer.File[]): Promise<void> => {
-    const cleanupPromises = files.map(file => cleanupFile(file));
-    await Promise.allSettled(cleanupPromises);
 };
 
 /**
@@ -785,8 +670,6 @@ export const getGuestMediaController: RequestHandler = async (
         });
     }
 };
-
-
 
 /**
  * Get media variants information

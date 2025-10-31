@@ -4,7 +4,6 @@ import express, { RequestHandler } from "express";
 import multer from "multer";
 import {
     guestUploadMediaController,
-    uploadCoverImageController,
     getMediaByEventController,
     getMediaByAlbumController,
     deleteMediaController,
@@ -18,13 +17,11 @@ import {
     getBatchUploadStatusController,
     retryUploadController
 } from "@controllers/media.controller";
-import { uploadMediaController } from "@controllers/upload.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import {
     checkStorageLimitMiddleware,
     checkEventPhotoLimitMiddleware,
 } from "@middlewares/subscription-limit.middleware";
-import { validateGuestTokenMiddleware } from "@middlewares/validate-share-token.middleware";
 import { optionalAuthMiddleware } from "@middlewares/conditional-auth.middleware";
 import { checkFileSizeLimitMiddleware } from "@middlewares/upload.middleware";
 import { generateBatchUploadUrlsController, generateUploadUrlController } from "@controllers/upload-url.controller";
@@ -54,27 +51,19 @@ const upload = multer({
 
 // === AUTHENTICATED UPLOADS ===
 // routes/media.routes.ts - Updated route
-mediaRouter.post(
-    "/upload",
-    authMiddleware,
-    upload.array('images', 10),
-    checkFileSizeLimitMiddleware as RequestHandler,
-    checkStorageLimitMiddleware as RequestHandler,
-    checkEventPhotoLimitMiddleware as RequestHandler,
-    uploadMediaController as RequestHandler,
-);
+// mediaRouter.post(
+//     "/upload",
+//     authMiddleware,
+//     upload.array('images', 10),
+//     checkFileSizeLimitMiddleware as RequestHandler,
+//     checkStorageLimitMiddleware as RequestHandler,
+//     checkEventPhotoLimitMiddleware as RequestHandler,
+//     uploadMediaController as RequestHandler,
+// );
 
 mediaRouter.post('/upload-url', wrap(generateBatchUploadUrlsController))
 mediaRouter.post('/upload-complete', wrap(uploadCompleteController))
 mediaRouter.post('/update-photo', validateLambdaToken as RequestHandler, wrap(updateMediaController))
-
-// Cover image upload (always requires auth)
-mediaRouter.post(
-    "/upload-cover",
-    authMiddleware,
-    upload.single('image'),
-    uploadCoverImageController
-);
 
 // === GUEST UPLOADS ===
 mediaRouter.post(

@@ -45,63 +45,6 @@ export function isValidVideoFormat(file: Express.Multer.File): boolean {
     return validVideoTypes.includes(file.mimetype.toLowerCase());
 }
 
-/**
- * Clean up temporary file with error handling
- */
-export async function cleanupFile(file: Express.Multer.File): Promise<void> {
-    try {
-        if (file?.path) {
-            await fs.unlink(file.path);
-            logger.debug(`🗑️ Cleaned up temp file: ${file.path}`);
-        }
-    } catch (error) {
-        logger.warn(`Failed to cleanup file ${file.path}:`, error);
-    }
-}
-
-/**
- * Calculate total size of variants in MB
- */
-export function calculateTotalVariantsSize(variants: any): number {
-    if (!variants) return 0;
-
-    let total = 0;
-    try {
-        Object.values(variants).forEach((sizeVariants: any) => {
-            if (sizeVariants && typeof sizeVariants === 'object') {
-                Object.values(sizeVariants).forEach((formatVariant: any) => {
-                    if (formatVariant && formatVariant.size_mb) {
-                        total += formatVariant.size_mb;
-                    }
-                });
-            }
-        });
-    } catch (error) {
-        logger.warn('Error calculating variants size:', error);
-    }
-    return Math.round(total * 100) / 100;
-}
-
-/**
- * Calculate number of variants
- */
-export function calculateVariantsCount(variants: any): number {
-    if (!variants) return 0;
-
-    let count = 0;
-    try {
-        Object.values(variants).forEach((sizeVariants: any) => {
-            if (sizeVariants && typeof sizeVariants === 'object') {
-                Object.keys(sizeVariants).forEach(() => {
-                    count++;
-                });
-            }
-        });
-    } catch (error) {
-        logger.warn('Error calculating variants count:', error);
-    }
-    return count;
-}
 
 /**
  * Convert bytes to MB with precision

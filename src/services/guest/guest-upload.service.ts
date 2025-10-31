@@ -5,15 +5,13 @@ import mongoose from 'mongoose';
 import { logger } from '@utils/logger';
 import { Media, createGuestUploaderInfo } from '@models/media.model';
 import { determineApprovalStatus } from '@utils/user.utils';
-import { bytesToMB, cleanupFile } from '@utils/file.util';
+import { bytesToMB } from '@utils/file.util';
 
 // Import shared services
-import { createInstantPreview, getBasicImageMetadata, getFileExtension } from '@services/upload/shared/image-processing.service';
 import { queueImageProcessing } from '../upload/shared/queue-processing.service';
 import { validateGuestFile, validateShareToken } from './guest-validation.service';
 
 import type { GuestUploadResult, GuestUploadInfo } from './guest.types';
-import { getEstimatedProcessingTime } from '@services/upload/shared/image-processing.service';
 import { getOrCreateDefaultAlbum } from '@services/album';
 import { EventParticipant } from '@models/event-participants.model';
 
@@ -54,7 +52,6 @@ export const uploadGuestMedia = async (
         );
 
         if (!defaultAlbumResponse.status) {
-            await cleanupFile(file);
             return {
                 success: false,
                 error: 'Failed to get or create album for upload'
@@ -98,7 +95,6 @@ export const uploadGuestMedia = async (
             fileName: file.originalname
         });
 
-        await cleanupFile(file);
         return {
             success: false,
             error: 'Upload failed due to server error'
@@ -124,15 +120,15 @@ const processGuestImageUpload = async (
         const userObjectId = authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : null;
 
         // Create preview image immediately
-        const previewUrl = await createInstantPreview(file, mediaId.toString(), eventId);
+        // const previewUrl = await createInstantPreview(file, mediaId.toString(), eventId);
 
         // Get basic metadata
-        const metadata = await getBasicImageMetadata(file.path);
+        // const metadata = await getBasicImageMetadata(file.path);
 
         // Create database record
         const media = new Media({
             _id: mediaId,
-            url: previewUrl,
+            url: 'previewUrl',
             type: 'image',
             album_id: albumObjectId,
             event_id: eventObjectId,
@@ -141,11 +137,11 @@ const processGuestImageUpload = async (
             uploader_type: authenticatedUserId ? 'registered_user' : 'guest',
             original_filename: file.originalname,
             size_mb: fileSizeMB,
-            format: getFileExtension(file),
+            format: '',
             metadata: {
-                width: metadata.width,
-                height: metadata.height,
-                aspect_ratio: metadata.aspect_ratio
+                width: '',
+                height: '',
+                aspect_ratio: ''
             },
             processing: {
                 status: 'processing',
@@ -176,14 +172,14 @@ const processGuestImageUpload = async (
         if (authenticatedUserId) {
             try {
                 await EventParticipant.updateOne(
-                    { 
+                    {
                         user_id: new mongoose.Types.ObjectId(authenticatedUserId),
                         event_id: new mongoose.Types.ObjectId(eventId)
                     },
-                    { 
-                        $inc: { 
+                    {
+                        $inc: {
                             'stats.uploads_count': 1,
-                            'stats.total_file_size_mb': fileSizeMB 
+                            'stats.total_file_size_mb': fileSizeMB
                         },
                         $set: {
                             'stats.last_upload_at': new Date(),
@@ -218,16 +214,14 @@ const processGuestImageUpload = async (
         return {
             success: true,
             media_id: mediaId.toString(),
-            url: previewUrl,
+            url: 'previewUrl',
             approval_status: media.approval.status,
             processing_status: jobId ? 'processing' : 'pending',
-            estimated_processing_time: getEstimatedProcessingTime(file.size),
             message: `${authenticatedUserId ? 'Image' : 'Guest image'} uploaded successfully! High-quality versions processing...`
         };
 
     } catch (error: any) {
         logger.error('❌ Guest image upload error:', error);
-        await cleanupFile(file);
         return {
             success: false,
             error: 'Failed to upload image'
@@ -278,14 +272,14 @@ const processGuestVideoUpload = async (
         if (authenticatedUserId) {
             try {
                 await EventParticipant.updateOne(
-                    { 
+                    {
                         user_id: new mongoose.Types.ObjectId(authenticatedUserId),
                         event_id: new mongoose.Types.ObjectId(eventId)
                     },
-                    { 
-                        $inc: { 
+                    {
+                        $inc: {
                             'stats.uploads_count': 1,
-                            'stats.total_file_size_mb': fileSizeMB 
+                            'stats.total_file_size_mb': fileSizeMB
                         },
                         $set: {
                             'stats.last_upload_at': new Date(),
@@ -321,6 +315,5 @@ const processGuestVideoUpload = async (
             error: 'Failed to upload video'
         };
     } finally {
-        await cleanupFile(file);
     }
 };

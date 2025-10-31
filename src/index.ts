@@ -116,9 +116,7 @@ async function initializeApplication() {
 
     // Initialize image processing (requires Redis)
     if (redisConnected) {
-      await InitializationService.initializeImageProcessing();
       await InitializationService.initializeBulkDownload();
-      await InitializationService.initializeImageStorageCleaup();
 
       // Initialize cleanup jobs
       CleanupService.initializeBulkDownloadCleanupJobs();
@@ -174,14 +172,6 @@ function startServer() {
 
 // Error handling middleware
 app.use(globalErrorHandler);
-
-// Signal handlers for graceful shutdown
-const handleShutdown = () => ShutdownService.handleGracefulShutdown(server, webSocketService);
-
-// Enhanced graceful shutdown
-gracefulShutdown(server);
-process.on('SIGTERM', handleShutdown);
-process.on('SIGINT', handleShutdown);
 
 // Process error handling
 process.on("uncaughtException", (err) => {
