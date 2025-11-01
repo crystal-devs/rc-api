@@ -47,12 +47,6 @@ export class ProductionMonitoringService {
                         timestamp: new Date().toISOString()
                     });
 
-                    const queueHealth = await MonitoringService.getQueueHealth();
-                    logger.info('Bulk Download Queue Health:', {
-                        ...queueHealth,
-                        timestamp: new Date().toISOString()
-                    });
-
                 } catch (error) {
                     logger.error('Error getting bulk download stats:', error);
                 }

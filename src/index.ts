@@ -22,7 +22,6 @@ import userRouter from "@routes/user.router";
 import albumRouter from "@routes/album.router";
 import shareTokenRouter from "@routes/share-token.router";
 import photoWallRouter from "@routes/photo-wall.router";
-import bulkDownloadRouter from "@routes/bulk-download.routes";
 import uploadQueueRouter from "@routes/upload-queue.routes";
 import bulkOperationsRouter from "@routes/bulk-operations.router";
 
@@ -35,7 +34,6 @@ import http from "http";
 import { HealthService } from "@services/health.service";
 import { InitializationService } from "@services/initialization.service";
 import { CleanupService } from "@services/cleanup.service";
-import { ShutdownService } from "@services/shutdown.service";
 import { ProductionMonitoringService } from "@services/monitoring.service";
 import guestRouter from "@routes/guest-session.routes";
 
@@ -98,7 +96,6 @@ app.use(`/api/${VERSION}/media`, mediaRouter);
 app.use(`/api/${VERSION}/user`, userRouter);
 app.use(`/api/${VERSION}/token`, shareTokenRouter);
 app.use(`/api/${VERSION}/photo-wall`, photoWallRouter);
-app.use(`/api/${VERSION}/download`, bulkDownloadRouter);
 app.use(`/api/${VERSION}/upload-queue`, uploadQueueRouter);
 app.use(`/api/${VERSION}/guest-sessions`, guestRouter);
 

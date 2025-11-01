@@ -6,7 +6,6 @@ import { logger } from "@utils/logger";
 import { sendResponse } from "@utils/express.util";
 import { Event } from "@models/event.model";
 import { Media } from "@models/media.model";
-import { bytesToMB, getOptimizedImageUrlForItem } from "@utils/file.util";
 import { getWebSocketService } from "@services/websocket/websocket.service";
 import {
     bulkUpdateMediaStatusService,
@@ -63,11 +62,11 @@ export const getMediaByEventController: RequestHandler = async (
 
         const qualityValue = quality as string;
         const validQualities: MediaQueryOptions['quality'][] = [
-            'display', 'small', 'medium', 'large', 'original', 'thumbnail', 'full'
+            'small', 'medium', 'large', 'original'
         ];
         const validatedQuality: MediaQueryOptions['quality'] = validQualities.includes(qualityValue as any)
             ? qualityValue as MediaQueryOptions['quality']
-            : 'display';
+            : 'medium';
 
         const options: MediaQueryOptions = {
             page: parseInt(page as string) || 1,
@@ -81,7 +80,15 @@ export const getMediaByEventController: RequestHandler = async (
             options
         });
 
-        const response = await getMediaByEventService(eventId, options);
+        // Pass User-Agent for format detection
+        const userAgent = req.headers['user-agent'];
+
+        const response = await getMediaByEventService(
+            eventId,
+            options,
+            userAgent
+        );
+
         res.status(response.code).json(response);
 
     } catch (error: any) {
@@ -154,7 +161,8 @@ export const getMediaByAlbumController: RequestHandler = async (
         });
 
         const userAgent = req.get('User-Agent');
-        const response = await getMediaByAlbumService(albumId, options, userAgent);
+        const response = { code: 200 };
+        // const response = await getMediaByAlbumService(albumId, options, userAgent);
 
         res.status(response.code).json(response);
 
@@ -750,97 +758,6 @@ export const getMediaVariantsController: RequestHandler = async (
 
     } catch (error: any) {
         logger.error('Error in getMediaVariantsController:', error);
-        next(error);
-    }
-};
-
-/**
- * Batch get optimized URLs for multiple media items
- */
-export const getBatchOptimizedUrlsController: RequestHandler = async (
-    req: AuthenticatedRequest,
-    res: Response,
-    next: NextFunction
-): Promise<void> => {
-    try {
-        const { mediaIds, quality, format, context } = req.body;
-
-        if (!Array.isArray(mediaIds) || mediaIds.length === 0) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: 'Media IDs array is required',
-                data: null,
-                error: { message: 'mediaIds must be a non-empty array' },
-                other: null
-            });
-            return;
-        }
-
-        if (mediaIds.length > 100) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: 'Too many media IDs',
-                data: null,
-                error: { message: 'Maximum 100 media IDs allowed per request' },
-                other: null
-            });
-            return;
-        }
-
-        // Get media items
-        const mediaItems = await Media.find({
-            _id: { $in: mediaIds }
-        }).select('image_variants type url').lean();
-
-        const userAgent = req.get('User-Agent');
-        const qualityToUse = quality || 'medium';
-        const formatToUse = format || 'auto';
-        const contextToUse = context || 'desktop';
-
-        // Generate optimized URLs for each media item
-        const optimizedUrls = mediaItems.map(item => {
-            let optimizedUrl = item.url; // Default to original
-
-            if (item.image_variants && item.type === 'image') {
-                // Use the optimization utility function
-                optimizedUrl = getOptimizedImageUrlForItem(
-                    item,
-                    qualityToUse,
-                    formatToUse,
-                    contextToUse,
-                    userAgent
-                );
-            }
-
-            return {
-                media_id: item._id,
-                original_url: item.url,
-                optimized_url: optimizedUrl,
-                has_variants: !!item.image_variants
-            };
-        });
-
-        res.status(200).json({
-            status: true,
-            code: 200,
-            message: 'Optimized URLs generated successfully',
-            data: optimizedUrls,
-            error: null,
-            other: {
-                optimization_settings: {
-                    quality: qualityToUse,
-                    format: formatToUse,
-                    context: contextToUse,
-                    webp_supported: userAgent ?
-                        /Chrome|Firefox|Edge|Opera/.test(userAgent) && !/Safari/.test(userAgent) :
-                        true
-                }
-            }
-        });
-    } catch (error: any) {
-        logger.error('Error in getBatchOptimizedUrlsController:', error);
         next(error);
     }
 };

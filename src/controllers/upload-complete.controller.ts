@@ -6,6 +6,7 @@ import { getWebSocketService } from '@services/websocket/websocket.service';
 import { S3Client } from '@aws-sdk/client-s3';
 import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
+import { Event } from '@models/event.model';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -38,6 +39,8 @@ export const uploadCompleteController = async (
   res: Response
 ): Promise<Response> => {
   try {
+    const userId = req.user?._id;
+    console.log(userId, 'User ID');
     const { key, eventId, upload_id }: UploadCompleteRequest = req.body;
 
     console.log('key:', key, 'eventId:', eventId, 'upload_id:', upload_id);
@@ -76,6 +79,9 @@ export const uploadCompleteController = async (
       { expiresIn: 604800 } // 7 days
     );
 
+    const approvalResult = await validatePermissionsAndGetApproval(eventId, userId);
+    console.log(approvalResult, 'Approval result');
+
     // ────────────────────── SAVE TO MONGODB ──────────────────────
     const media = new Media({
       url: originalUrl,                    // ← Presigned for 7 days
@@ -86,6 +92,8 @@ export const uploadCompleteController = async (
       album_id: eventId,
       original_filename: originalFileName,
       format: extension,
+      guest_session_id: req.user?.role === 'guest' ? req.user?._id : null,
+      uploaded_by: req.user?._id,
       size_mb: 0, // You can get from S3 HeadObject if needed
       processing: {
         status: 'processing',
@@ -93,9 +101,8 @@ export const uploadCompleteController = async (
         progress_percentage: 100,
         last_updated: new Date(),
       },
-      approval: { status: 'pending' },
+      approval: approvalResult,
       uploader_type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
-      uploaded_by: req.user?.role !== 'guest' ? req.user?._id : null,
       created_at: new Date(),
       updated_at: new Date(),
     });
@@ -146,4 +153,20 @@ export const uploadCompleteController = async (
       error: error.message,
     });
   }
+};
+
+const validatePermissionsAndGetApproval = async (eventId: string, userId: string) => {
+  const event = await Event.findById(eventId)
+    .select('permissions created_by')
+    .lean();
+
+  console.log(event, userId, eventId, 'Event from validatePermissionsAndGetApproval');
+  if (!event) {
+    throw new Error('Event not found');
+  }
+  if (event.created_by.toString() === userId.toString()) {
+    return { status: 'approved', auto_approval_reason: 'authenticated_user', approved_by: userId, approved_at: new Date() };
+  }
+
+  return { status: 'pending', auto_approval_reason: null, approved_by: null, approved_at: null };
 };

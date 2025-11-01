@@ -3,8 +3,6 @@ import { connectToMongoDB, logConnectionPoolStats } from '@configs/database.conf
 import { redisConnection } from '@configs/redis.config';
 import { createDefaultPlans } from '@models/subscription-plan.model';
 import { logger } from '@utils/logger';
-import { BulkDownloadService } from './media/bulk-download.service';
-import { initializeStorageCleanupWorker } from 'workers/storageCleanupWorker';
 import { ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import { keys } from '@configs/dotenv.config';
 
@@ -33,7 +31,6 @@ export class InitializationService {
     static async initializeBulkDownload() {
         try {
             logger.info('Initializing bulk download service...');
-            await BulkDownloadService.initializeQueue();
             logger.info('Bulk download service initialized successfully');
             return true;
         } catch (error) {

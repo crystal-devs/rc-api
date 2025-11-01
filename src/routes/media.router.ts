@@ -12,7 +12,6 @@ import {
     getGuestMediaController,
     getMediaByIdController,
     getMediaVariantsController,
-    getBatchOptimizedUrlsController,
     getUploadStatusController,
     getBatchUploadStatusController,
     retryUploadController
@@ -61,8 +60,8 @@ const upload = multer({
 //     uploadMediaController as RequestHandler,
 // );
 
-mediaRouter.post('/upload-url', wrap(generateBatchUploadUrlsController))
-mediaRouter.post('/upload-complete', wrap(uploadCompleteController))
+mediaRouter.post('/upload-url', authMiddleware, wrap(generateBatchUploadUrlsController))
+mediaRouter.post('/upload-complete', authMiddleware, wrap(uploadCompleteController))
 mediaRouter.post('/update-photo', validateLambdaToken as RequestHandler, wrap(updateMediaController))
 
 // === GUEST UPLOADS ===
@@ -132,12 +131,6 @@ mediaRouter.get(
     getMediaVariantsController
 );
 
-// Batch get optimized URLs
-mediaRouter.post(
-    "/batch/optimized-urls",
-    authMiddleware,
-    getBatchOptimizedUrlsController
-);
 
 // === UPLOAD STATUS ENDPOINTS ===
 // Get upload progress status for a single media item

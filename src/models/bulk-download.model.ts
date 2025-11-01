@@ -85,7 +85,7 @@ const bulkDownloadSchema = new mongoose.Schema({
     download_url_expires_at: { type: Date, default: null },
 
     // Cloud storage info
-    storage_provider: { type: String, enum: ['imagekit', 'aws_s3', 'google_drive'], default: 'imagekit' },
+    storage_provider: { type: String, enum: ['aws_s3', 'google_drive'], default: 'imagekit' },
     storage_key: { type: String, default: null }, // File path in cloud storage
     storage_file_id: { type: String, default: null }, // Provider-specific file ID
 

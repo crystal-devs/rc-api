@@ -9,11 +9,7 @@ import { EventParticipant } from '@models/event-participants.model';
 import { mediaNotificationService } from '../websocket/notifications';
 import type { ServiceResponse, StatusUpdateOptions } from './media.types';
 import { getPhotoWallWebSocketService } from '@services/photoWallWebSocketService';
-import { imagekit } from '@configs/imagekit.config';
-import { FileObject } from 'imagekit/dist/libs/interfaces';
 // import { queueStorageCleanup } from 'workers/storageCleanupWorker';
-import { queueStorageCleanup } from 'workers/batchStorageCleanupWorker';
-import { validateAndCleanUrls } from '@utils/file.util';
 
 export const updateMediaStatusService = async (
     mediaId: string,
@@ -356,24 +352,6 @@ export const deleteMediaService = async (
         const uploadedBy = media.uploaded_by;
         const sizeMB = media.size_mb || 0;
 
-        // IMPROVED: Collect all URLs with better validation
-        const urlsToDelete = collectAllMediaUrls(media);
-        const { validUrls, invalidUrls } = validateAndCleanUrls(urlsToDelete);
-
-        if (invalidUrls.length > 0) {
-            logger.warn(`Found ${invalidUrls} invalid URLs for media ${mediaId}`, {
-                invalidUrls: invalidUrls.slice(0, 3)
-            });
-        }
-
-        logger.info(`Collected ${validUrls} valid URLs for deletion ${urlsToDelete.length}`, {
-            mediaId,
-            totalUrls: urlsToDelete.length,
-            validUrls: validUrls.length,
-            invalidUrls: invalidUrls.length,
-            sampleUrls: validUrls.slice(0, 3)
-        });
-
         // STEP 1: Delete from database IMMEDIATELY (for instant UI response)
         await Media.findByIdAndDelete(mediaId);
 
@@ -411,29 +389,6 @@ export const deleteMediaService = async (
             }
         }
 
-        // STEP 4: Queue storage cleanup in background (non-blocking) - ONLY valid URLs
-        if (validUrls.length > 0) {
-            logger.info(`Queueing storage cleanup for ${validUrls.length} valid URLs`);
-            queueStorageCleanup({
-                mediaId,
-                urls: validUrls, // Only pass valid URLs
-                eventId,
-                userId,
-                isBulk: false
-            }).catch((error: any) => {
-                logger.error('Failed to queue storage cleanup:', error);
-            });
-        } else {
-            logger.info('No valid URLs to cleanup for media deletion');
-        }
-
-        logger.info('Media deleted successfully (storage cleanup queued):', {
-            mediaId,
-            deletedBy: userId,
-            eventId,
-            urlsToCleanup: validUrls.length
-        });
-
         return {
             status: true,
             code: 200,
@@ -446,9 +401,9 @@ export const deleteMediaService = async (
             other: {
                 websocketBroadcasted: wasVisible,
                 photoWallNotified: !!(wasVisible && shareToken),
-                storageCleanupQueued: validUrls.length > 0,
-                validUrlsQueued: validUrls.length,
-                invalidUrlsSkipped: invalidUrls.length
+                // storageCleanupQueued: validUrls.length > 0,
+                // validUrlsQueued: validUrls.length,
+                // invalidUrlsSkipped: invalidUrls.length
             }
         };
 
@@ -532,24 +487,6 @@ export const bulkDeleteMediaService = async (
             }
         });
 
-        const { validUrls, invalidUrls } = validateAndCleanUrls(allUrls);
-
-        if (invalidUrls.length > 0) {
-            logger.warn(`Found ${invalidUrls.length} invalid URLs for bulk deletion`, {
-                eventId,
-                mediaCount: mediaItems.length,
-                invalidUrls: invalidUrls.slice(0, 3)
-            });
-        }
-
-        logger.info(`Collected URLs for bulk deletion`, {
-            eventId,
-            mediaItems: mediaItems.length,
-            totalUrls: allUrls.length,
-            validUrls: validUrls.length,
-            invalidUrls: invalidUrls.length
-        });
-
         // STEP 1: Delete from database IMMEDIATELY
         const deleteResult = await Media.deleteMany({
             _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
@@ -594,29 +531,6 @@ export const bulkDeleteMediaService = async (
             }
         }
 
-        // STEP 4: Queue storage cleanup in background - ONLY valid URLs
-        if (validUrls.length > 0) {
-            logger.info(`Queueing bulk storage cleanup for ${validUrls.length} valid URLs`);
-            queueStorageCleanup({
-                mediaId: `bulk-${eventId}-${Date.now()}`,
-                urls: validUrls, // Only pass valid URLs
-                eventId,
-                userId,
-                isBulk: true
-            }).catch((error: any) => {
-                logger.error('Failed to queue bulk storage cleanup:', error);
-            });
-        } else {
-            logger.info('No valid URLs to cleanup for bulk media deletion');
-        }
-
-        logger.info('Bulk media deletion completed:', {
-            eventId,
-            requestedCount: validMediaIds.length,
-            deletedFromDb: deleteResult.deletedCount,
-            urlsToCleanup: validUrls.length
-        });
-
         return {
             status: true,
             code: 200,
@@ -630,9 +544,9 @@ export const bulkDeleteMediaService = async (
             other: {
                 websocketBroadcasted: visibleMediaIds.length > 0,
                 photoWallNotified: !!(shareToken && visibleMediaIds.length > 0),
-                storageCleanupQueued: validUrls.length > 0,
-                validUrlsQueued: validUrls.length,
-                invalidUrlsSkipped: invalidUrls.length
+                // storageCleanupQueued: validUrls.length > 0,
+                // validUrlsQueued: validUrls.length,
+                // invalidUrlsSkipped: invalidUrls.length
             }
         };
 
@@ -936,73 +850,3 @@ function collectAllMediaUrls(media: any): string[] {
     return urlArray;
 }
 
-
-// Cleanup orphaned ImageKit files - CORRECTED VERSION
-export const cleanupOrphanedImageKitFiles = async (eventId: string): Promise<void> => {
-    try {
-        // List all files in the event folder
-        const listResponse = await imagekit.listFiles({
-            path: `/events/${eventId}`,
-            limit: 1000
-        });
-
-        // Filter to only get files (not folders)
-        const files = listResponse.filter((item): item is FileObject =>
-            'fileId' in item && item.type === 'file'
-        );
-
-        // Get all media URLs from database
-        const mediaItems = await Media.find({ event_id: eventId })
-            .select('url image_variants')
-            .lean();
-
-        const validUrls = new Set<string>();
-
-        // Collect all valid URLs from media items
-        mediaItems.forEach(media => {
-            if (media.url) validUrls.add(media.url);
-
-            // Add all variant URLs
-            if (media.image_variants) {
-                const variants = media.image_variants;
-
-                // Helper to safely add URL
-                const addUrl = (obj: any) => {
-                    if (obj?.url) validUrls.add(obj.url);
-                };
-
-                // Original
-                addUrl(variants.original);
-
-                // Small variants
-                addUrl(variants.small?.webp);
-                addUrl(variants.small?.jpeg);
-
-                // Medium variants
-                addUrl(variants.medium?.webp);
-                addUrl(variants.medium?.jpeg);
-
-                // Large variants
-                addUrl(variants.large?.webp);
-                addUrl(variants.large?.jpeg);
-            }
-        });
-
-        // Find orphaned files
-        const orphanedFiles = files.filter(file => !validUrls.has(file.url));
-
-        logger.info(`Found ${orphanedFiles.length} orphaned files for event ${eventId}`);
-
-        // Delete orphaned files
-        for (const file of orphanedFiles) {
-            try {
-                await imagekit.deleteFile(file.fileId);
-                logger.debug(`Deleted orphaned file: ${file.name}`);
-            } catch (deleteError) {
-                logger.error(`Failed to delete orphaned file ${file.name}:`, deleteError);
-            }
-        }
-    } catch (error) {
-        logger.error('Cleanup orphaned files error:', error);
-    }
-};

@@ -98,8 +98,11 @@ export const getPhotoWallDisplayService = async (
 // Helper functions
 const getOptimizedImageUrl = (variants: any, quality: string): string => {
   if (!variants) return '';
+  const { getCachedSignedUrl } = require('../utils/signedUrl');
   const variant = variants[quality] || variants.large || variants.medium || variants.original;
-  return variant?.webp?.url || variant?.jpeg?.url || variant?.url || '';
+  return variant?.webp?.public_id ? getCachedSignedUrl(variant.webp.public_id) :
+         variant?.jpeg?.public_id ? getCachedSignedUrl(variant.jpeg.public_id) :
+         variant?.public_id ? getCachedSignedUrl(variant.public_id) : '';
 };
 
 const getUploaderName = (media: any): string => {

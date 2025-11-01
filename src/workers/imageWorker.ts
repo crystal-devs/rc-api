@@ -45,7 +45,7 @@ interface ProcessingResult {
 }
 
 interface ImageVariant {
-  url: string;
+  public_id: string;
   width: number;
   height: number;
   size_mb: number;
@@ -173,7 +173,7 @@ export const initializeImageWorker = async (): Promise<Worker> => {
             'processing.total_variants_size_mb': calculateTotalVariantsSize(variants),
             image_variants: {
               original: {
-                url: originalUrl,
+                public_id: mediaId, // Use mediaId as public_id for original
                 width: originalMetadata.width,
                 height: originalMetadata.height,
                 size_mb: originalMetadata.size_mb,
@@ -188,19 +188,22 @@ export const initializeImageWorker = async (): Promise<Worker> => {
           await Media.findByIdAndUpdate(mediaId, updateData);
 
           // Broadcast completion
-          const bestGuestUrl = variants.medium?.webp?.url || variants.medium?.jpeg?.url || originalUrl;
+           const { getCachedSignedUrl } = require('../utils/signedUrl');
+           const bestGuestUrl = variants.medium?.webp?.public_id ? getCachedSignedUrl(variants.medium.webp.public_id) :
+                               variants.medium?.jpeg?.public_id ? getCachedSignedUrl(variants.medium.jpeg.public_id) :
+                               originalUrl;
 
-          mediaNotificationService.broadcastProcessingComplete({
-            mediaId,
-            eventId,
-            newUrl: bestGuestUrl,
-            variants: {
-              thumbnail: variants.small?.jpeg?.url || bestGuestUrl,
-              display: bestGuestUrl,
-              full: variants.large?.jpeg?.url || bestGuestUrl
-            },
-            processingTimeMs: processingTime
-          });
+           mediaNotificationService.broadcastProcessingComplete({
+             mediaId,
+             eventId,
+             newUrl: bestGuestUrl,
+             variants: {
+               thumbnail: variants.small?.jpeg?.public_id ? getCachedSignedUrl(variants.small.jpeg.public_id) : bestGuestUrl,
+               display: bestGuestUrl,
+               full: variants.large?.jpeg?.public_id ? getCachedSignedUrl(variants.large.jpeg.public_id) : bestGuestUrl
+             },
+             processingTimeMs: processingTime
+           });
 
           // Cleanup: Remove local file
           try {
@@ -220,12 +223,12 @@ export const initializeImageWorker = async (): Promise<Worker> => {
             originalUrl,
             bestGuestUrl,
             variantUrls: {
-              small_webp: variants.small?.webp?.url,
-              small_jpeg: variants.small?.jpeg?.url,
-              medium_webp: variants.medium?.webp?.url,
-              medium_jpeg: variants.medium?.jpeg?.url,
-              large_webp: variants.large?.webp?.url,
-              large_jpeg: variants.large?.jpeg?.url,
+              small_webp: variants.small?.webp?.public_id,
+              small_jpeg: variants.small?.jpeg?.public_id,
+              medium_webp: variants.medium?.webp?.public_id,
+              medium_jpeg: variants.medium?.jpeg?.public_id,
+              large_webp: variants.large?.webp?.public_id,
+              large_jpeg: variants.large?.jpeg?.public_id,
             },
             guestsBroadcasted: !isGuestUpload,
             isGuestUpload: isGuestUpload || false
@@ -419,7 +422,7 @@ async function generateSingleVariant(
     logger.info(`✅ Generated ${sizeName} ${format}: ${url} (${sizeMB}MB)`);
 
     return {
-      url,
+      public_id: url, // url here is actually the public_id returned by uploadVariantImage
       width: metadata.width || 0,
       height: metadata.height || 0,
       size_mb: sizeMB,

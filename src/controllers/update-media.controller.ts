@@ -44,7 +44,7 @@ export const updateMediaController = async (
         // 3. Update variants (WebP only)
         media.image_variants = {
             original: media.image_variants?.original || {
-                url: media.url,
+                public_id: media.public_id,
                 width: media.metadata?.width || 0,
                 height: media.metadata?.height || 0,
                 size_mb: media.size_mb,
@@ -52,7 +52,7 @@ export const updateMediaController = async (
             },
             small: {
                 webp: {
-                    url: await getCachedSignedUrl(variants.small),
+                    public_id: variants.small,
                     width: 300,
                     height: Math.round(300 * (media.metadata?.aspect_ratio || 1)),
                     size_mb: 0.05, // approximate
@@ -62,7 +62,7 @@ export const updateMediaController = async (
             },
             medium: {
                 webp: {
-                    url: await getCachedSignedUrl(variants.medium),
+                    public_id: variants.medium,
                     width: 1080,
                     height: Math.round(1080 * (media.metadata?.aspect_ratio || 1)),
                     size_mb: 0.2,
@@ -72,7 +72,7 @@ export const updateMediaController = async (
             },
             large: {
                 webp: {
-                    url: await getCachedSignedUrl(variants.large),
+                    public_id: variants.large,
                     width: 1920,
                     height: Math.round(1920 * (media.metadata?.aspect_ratio || 1)),
                     size_mb: 0.5,
@@ -98,9 +98,9 @@ export const updateMediaController = async (
 
         // 5. Emit WebSocket using MediaNotificationService
         const eventId = media.event_id.toString();
-        const smallUrl = media.image_variants.small.webp!.url;
-        const mediumUrl = media.image_variants.medium.webp!.url;
-        const largeUrl = media.image_variants.large.webp!.url;
+        const smallUrl = await getCachedSignedUrl(media.image_variants.small.webp!.public_id);
+        const mediumUrl = await getCachedSignedUrl(media.image_variants.medium.webp!.public_id);
+        const largeUrl = await getCachedSignedUrl(media.image_variants.large.webp!.public_id);
 
         mediaNotificationService.broadcastProcessingComplete({
             mediaId: media._id.toString(),

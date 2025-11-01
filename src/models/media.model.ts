@@ -4,7 +4,7 @@ import { MODEL_NAMES } from "./names";
 
 // Image variant sub-schema
 const imageVariantSchema = new mongoose.Schema({
-    url: { type: String, required: true },
+    public_id: { type: String, required: true },
     width: { type: Number, required: true },
     height: { type: Number, required: true },
     size_mb: { type: Number, required: true },
@@ -14,7 +14,7 @@ const imageVariantSchema = new mongoose.Schema({
 // Image variants schema
 const imageVariantsSchema = new mongoose.Schema({
     original: {
-        url: { type: String, required: true },
+        public_id: { type: String, required: true },
         width: { type: Number, required: true },
         height: { type: Number, required: true },
         size_mb: { type: Number, required: true },
@@ -321,14 +321,19 @@ mediaSchema.methods.getOptimizedUrl = function (
             targetVariant = variants.medium;
     }
 
-    if (supportsWebP && targetVariant?.webp?.url) {
-        return targetVariant.webp.url;
-    } else if (targetVariant?.jpeg?.url) {
-        return targetVariant.jpeg.url;
+    // Import getCachedSignedUrl dynamically to avoid circular dependency
+    const { getCachedSignedUrl } = require('../utils/signedUrl');
+
+    if (supportsWebP && targetVariant?.webp?.public_id) {
+        return getCachedSignedUrl(targetVariant.webp.public_id);
+    } else if (targetVariant?.jpeg?.public_id) {
+        return getCachedSignedUrl(targetVariant.jpeg.public_id);
     }
 
     // Fallback chain
-    return variants.medium?.jpeg?.url || variants.small?.jpeg?.url || this.url;
+    return variants.medium?.jpeg?.public_id ? getCachedSignedUrl(variants.medium.jpeg.public_id) :
+           variants.small?.jpeg?.public_id ? getCachedSignedUrl(variants.small.jpeg.public_id) :
+           this.url;
 };
 
 // Check if image processing is complete

@@ -1,6 +1,5 @@
 // services/cleanup.service.ts
 import cron from 'node-cron';
-import { BulkDownloadService } from './media/bulk-download.service';
 import { logger } from '@utils/logger';
 import { MonitoringService } from '@utils/monitoring';
 
@@ -11,7 +10,6 @@ export class CleanupService {
         cron.schedule('0 * * * *', async () => {
             try {
                 logger.info('Starting scheduled cleanup of expired downloads');
-                await BulkDownloadService.cleanupExpiredDownloads();
                 logger.info('Completed scheduled cleanup');
             } catch (error) {
                 logger.error('Bulk download cleanup job failed:', error);

@@ -2,7 +2,6 @@
 
 import { BulkDownload } from "@models/bulk-download.model";
 import { logger } from "./logger";
-import { BulkDownloadService } from "@services/media/bulk-download.service";
 
 interface QueueHealth {
     healthy: boolean;
@@ -89,50 +88,6 @@ export class MonitoringService {
         } catch (error: any) {
             logger.error('Failed to check stuck jobs:', error);
             return 0;
-        }
-    }
-
-    /**
-     * Get queue health metrics
-     */
-    static async getQueueHealth(): Promise<QueueHealth> {
-        try {
-            // Pick the right one depending on how BulkDownloadService is implemented
-            const queue = BulkDownloadService.downloadQueue;
-
-            if (!queue) {
-                return {
-                    healthy: false,
-                    error: "Queue not initialized",
-                    waiting: 0,
-                    active: 0,
-                    completed: 0,
-                    failed: 0,
-                };
-            }
-
-            const waiting = await queue.getWaiting();
-            const active = await queue.getActive();
-            const completed = await queue.getCompleted();
-            const failed = await queue.getFailed();
-
-            return {
-                healthy: active.length < 10 && waiting.length < 50, // Thresholds
-                waiting: waiting.length,
-                active: active.length,
-                completed: completed.length,
-                failed: failed.length,
-            };
-        } catch (error: any) {
-            logger.error("Failed to get queue health:", error);
-            return {
-                healthy: false,
-                error: error.message,
-                waiting: 0,
-                active: 0,
-                completed: 0,
-                failed: 0,
-            };
         }
     }
 

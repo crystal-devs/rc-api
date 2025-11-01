@@ -105,6 +105,8 @@ export const generateBatchUploadUrlsController = async (
   res: Response
 ): Promise<Response> => {
   try {
+    const userId = req.user
+    console.log(userId, 'User ID');
     const { eventId, files }: BatchUploadUrlRequest = req.body;
 
     // Validate required fields

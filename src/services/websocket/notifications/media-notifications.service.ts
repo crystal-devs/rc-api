@@ -67,12 +67,12 @@ class MediaNotificationService {
     public broadcastOptimisticMediaUpdate(update: OptimisticMediaUpdate): void {
         try {
             const { eventId, mediaData, type } = update;
-            
+
             // Get all relevant rooms
             const guestRoom = `guest_${eventId}`;
             const adminRoom = `admin_${eventId}`;
             const eventRoom = `event_${eventId}`;
-            
+
             logger.info(`Broadcasting optimistic ${type}: ${mediaData.filename}`, {
                 mediaId: mediaData.id.substring(0, 8) + '...',
                 stage: mediaData.processingStage,
@@ -117,7 +117,7 @@ class MediaNotificationService {
 
                     // Broadcast to guests (they can see it immediately)
                     wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.NEW_MEDIA_UPLOADED, optimisticPayload);
-                    
+
                     // Broadcast to admins
                     wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.ADMIN_NEW_UPLOAD_NOTIFICATION, {
                         ...optimisticPayload,
@@ -182,10 +182,10 @@ class MediaNotificationService {
     public broadcastEventStatsUpdate(statsUpdate: EventStatsUpdate): void {
         try {
             const { eventId, type, photoCount, isOptimistic } = statsUpdate;
-            
+
             const guestRoom = `guest_${eventId}`;
             const adminRoom = `admin_${eventId}`;
-            
+
             const wsService = getWebSocketService();
 
             const payload = {
@@ -334,22 +334,21 @@ class MediaNotificationService {
                 progress: 100,
                 stage: 'completed' as const,
                 variantsGenerated: true,
-                finalUrl: newUrl,
                 variants: variants || {
-                    thumbnail: newUrl,
-                    display: newUrl,
-                    full: newUrl
+                    small: { webp: newUrl, jpeg: '' as any },
+                    medium: { webp: newUrl, jpeg: '' as any },
+                    large: { webp: newUrl, jpeg: '' as any },
                 },
                 processingTime: processingTimeMs,
                 timestamp: new Date()
             };
 
             wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.MEDIA_PROCESSING_COMPLETE, payload);
-            
+
             // Also notify admin room
             const adminRoom = `admin_${eventId}`;
             wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.MEDIA_PROCESSING_COMPLETE, payload);
-            
+
             logger.info(`Processing completion broadcasted to guests and admins`);
 
         } catch (error) {
@@ -386,11 +385,11 @@ class MediaNotificationService {
             };
 
             wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.MEDIA_UPLOAD_FAILED, payload);
-            
+
             // Also notify admin room
             const adminRoom = `admin_${eventId}`;
             wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.MEDIA_UPLOAD_FAILED, payload);
-            
+
             logger.info(`Processing failure broadcasted`);
 
         } catch (error) {

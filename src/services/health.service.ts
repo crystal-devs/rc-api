@@ -30,11 +30,7 @@ export class HealthService {
       };
 
       try {
-        const queueHealth = await MonitoringService.getQueueHealth();
-        bulkDownloadHealth = {
-          status: queueHealth.healthy ? "healthy" : "unhealthy",
-          ...queueHealth,
-        };
+
       } catch (error: any) {
         bulkDownloadHealth = {
           status: "unhealthy",
