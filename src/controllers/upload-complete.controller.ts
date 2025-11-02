@@ -105,6 +105,7 @@ export const uploadCompleteController = async (
       uploader_type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
       created_at: new Date(),
       updated_at: new Date(),
+      deleteGroup: `event-${eventId}-upload-${upload_id}`
     });
 
     const savedMedia = await media.save();

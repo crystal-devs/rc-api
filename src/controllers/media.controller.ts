@@ -17,6 +17,7 @@ import {
     updateMediaStatusService,
 } from "@services/media";
 import { GuestSessionHelper } from "@services/guest/guest-session-helper";
+import { softDeleteMediaService } from "@services/media/media-management.service";
 
 // Enhanced interface for authenticated requests
 interface AuthenticatedRequest extends Request {
@@ -503,7 +504,7 @@ export const deleteMediaController: RequestHandler = async (
     try {
         const { media_id } = req.params;
         const user_id = req.user._id;
-
+        console.log(req.user, 'reqeuserser')
         // Validate media_id
         if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
             res.status(400).json({
@@ -523,7 +524,11 @@ export const deleteMediaController: RequestHandler = async (
         });
 
         // Delete the media
-        const response = await deleteMediaService(media_id, user_id.toString());
+        // const response = await deleteMediaService(media_id, user_id.toString());
+        const response = await softDeleteMediaService(media_id, user_id.toString(), {
+            adminName: 'guest', // Assuming user has name
+            reason: req.body.reason || 'deleted_by_user'
+        });
         sendResponse(res, response);
     } catch (error: any) {
         logger.error('Error in deleteMediaController:', error);

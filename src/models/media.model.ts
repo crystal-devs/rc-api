@@ -207,7 +207,10 @@ const mediaSchema = new mongoose.Schema({
 
     // Timestamps
     created_at: { type: Date, default: Date.now },
-    updated_at: { type: Date, default: Date.now }
+    updated_at: { type: Date, default: Date.now },
+    isDeleted: { type: Boolean, default: false, index: true },
+    deletedAt: { type: Date, default: null, index: true },
+    deleteGroup: { type: String, default: null },
 });
 
 // Pre-save middleware
@@ -332,8 +335,8 @@ mediaSchema.methods.getOptimizedUrl = function (
 
     // Fallback chain
     return variants.medium?.jpeg?.public_id ? getCachedSignedUrl(variants.medium.jpeg.public_id) :
-           variants.small?.jpeg?.public_id ? getCachedSignedUrl(variants.small.jpeg.public_id) :
-           this.url;
+        variants.small?.jpeg?.public_id ? getCachedSignedUrl(variants.small.jpeg.public_id) :
+            this.url;
 };
 
 // Check if image processing is complete

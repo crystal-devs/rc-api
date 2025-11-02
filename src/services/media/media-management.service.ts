@@ -9,7 +9,17 @@ import { EventParticipant } from '@models/event-participants.model';
 import { mediaNotificationService } from '../websocket/notifications';
 import type { ServiceResponse, StatusUpdateOptions } from './media.types';
 import { getPhotoWallWebSocketService } from '@services/photoWallWebSocketService';
+import { S3Client } from '@aws-sdk/client-s3';
+import { keys } from '@configs/dotenv.config';
 // import { queueStorageCleanup } from 'workers/storageCleanupWorker';
+
+const s3Client = new S3Client({
+    region: keys.awsRegion as string,
+    credentials: {
+        accessKeyId: keys.awsAccessKeyId as string,
+        secretAccessKey: keys.awsSecretAccessKey as string,
+    },
+});
 
 export const updateMediaStatusService = async (
     mediaId: string,
@@ -419,7 +429,240 @@ export const deleteMediaService = async (
     }
 };
 
+export const softDeleteMediaService = async (
+    mediaId: string,
+    userId: string,
+    options?: {
+        adminName?: string;
+        reason?: string;
+    }
+): Promise<ServiceResponse<any>> => {
+    try {
+        const media = await Media.findById(mediaId)
+            .select('event_id url image_variants approval.status uploaded_by size_mb deleteGroup')
+            .populate('event_id', 'share_token')
+            .lean();
 
+        if (!media) {
+            return {
+                status: false,
+                code: 404,
+                message: 'Media not found',
+                data: null,
+                error: { message: 'Media item does not exist' }
+            };
+        }
+
+        const eventId = media.event_id._id?.toString() || media.event_id.toString();
+        const shareToken = (media.event_id as any)?.share_token || null;
+        const wasVisible = ['approved', 'auto_approved'].includes(media.approval?.status || '');
+        const uploadedBy = media.uploaded_by;
+        const sizeMB = media.size_mb || 0;
+
+        // STEP 1: Soft-delete in DB IMMEDIATELY
+        const updateResult = await Media.updateOne(
+            { _id: mediaId },
+            {
+                $set: {
+                    isDeleted: true,
+                    deletedAt: new Date(),
+                    approval: {
+                        ...media.approval,
+                        status: 'deleted' // or 'rejected' if needed
+                    }
+                }
+            }
+        );
+
+        if (updateResult.modifiedCount === 0) {
+            return {
+                status: false,
+                code: 404,
+                message: 'Media not found or already deleted',
+                data: null,
+                error: { message: 'No changes made' }
+            };
+        }
+
+        // STEP 2: Update counters
+        try {
+            await updateCountersForDeletion(eventId, uploadedBy, media.approval?.status || 'pending', sizeMB);
+        } catch (counterError) {
+            logger.warn('Failed to update counters after soft-deletion:', counterError);
+        }
+
+        // STEP 3: Broadcast soft-deletion if visible
+        if (wasVisible) {
+            try {
+                mediaNotificationService.broadcastMediaRemoved({
+                    mediaId,
+                    eventId,
+                    reason: options?.reason || 'deleted_by_admin',
+                    adminName: options?.adminName
+                });
+
+                mediaNotificationService.broadcastMediaStats(eventId);
+
+                if (shareToken) {
+                    const photoWallService = getPhotoWallWebSocketService();
+                    if (photoWallService) {
+                        await photoWallService.notifyMediaRemoved(
+                            shareToken,
+                            mediaId,
+                            options?.reason || 'Soft-removed by admin'
+                        );
+                    }
+                }
+            } catch (wsError) {
+                logger.error('Failed to broadcast soft-deletion via WebSocket:', wsError);
+            }
+        }
+
+        return {
+            status: true,
+            code: 200,
+            message: 'Media soft-deleted successfully',
+            data: {
+                id: mediaId,
+                wasVisibleToGuests: wasVisible
+            },
+            error: null,
+            other: {
+                websocketBroadcasted: wasVisible,
+                photoWallNotified: !!(wasVisible && shareToken),
+                cleanupScheduled: true // Now async after 30 days
+            }
+        };
+
+    } catch (error: any) {
+        logger.error('Error in softDeleteMediaService:', error);
+        return {
+            status: false,
+            code: 500,
+            message: 'Failed to soft-delete media',
+            data: null,
+            error: { message: error.message }
+        };
+    }
+};
+
+// export const recoverMediaService = async (
+//     mediaId: string,
+//     userId: string
+// ): Promise<ServiceResponse<any>> => {
+//     try {
+//         const media = await Media.findById(mediaId)
+//             .select('event_id approval.status')
+//             .lean();
+
+//         if (!media) {
+//             return {
+//                 status: false,
+//                 code: 404,
+//                 message: 'Media not found',
+//                 data: null,
+//                 error: { message: 'Media item does not exist' }
+//             };
+//         }
+
+//         // STEP 1: Recover in DB
+//         const updateResult = await Media.updateOne(
+//             { _id: mediaId },
+//             {
+//                 $set: {
+//                     isDeleted: false,
+//                     approval: {
+//                         ...media.approval,
+//                         status: 'approved' // or original status
+//                     }
+//                 },
+//                 $unset: { deletedAt: "" }
+//             }
+//         );
+
+//         if (updateResult.modifiedCount === 0) {
+//             return {
+//                 status: false,
+//                 code: 404,
+//                 message: 'Media not deleted or already recovered',
+//                 data: null,
+//                 error: { message: 'No changes made' }
+//             };
+//         }
+
+//         // STEP 2: Broadcast recovery
+//         try {
+//             mediaNotificationService.broadcastMediaRecovered({
+//                 mediaId,
+//                 eventId: media.event_id.toString(),
+//                 userId
+//             });
+//         } catch (wsError) {
+//             logger.error('Failed to broadcast recovery:', wsError);
+//         }
+
+//         return {
+//             status: true,
+//             code: 200,
+//             message: 'Media recovered successfully',
+//             data: { id: mediaId },
+//             error: null,
+//             other: null
+//         };
+//     } catch (error: any) {
+//         logger.error('Error in recoverMediaService:', error);
+//         return {
+//             status: false,
+//             code: 500,
+//             message: 'Failed to recover media',
+//             data: null,
+//             error: { message: error.message }
+//         };
+//     }
+// };
+
+export const cleanupDeletedMedia = async () => {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const toDelete = await Media.find({
+        isDeleted: true,
+        deletedAt: { $lt: thirtyDaysAgo }
+    }).select('deleteGroup public_id image_variants').lean();
+
+    if (toDelete.length === 0) return;
+
+    // Group by deleteGroup
+    const groups = {};
+    toDelete.forEach(m => {
+        if (m.deleteGroup) {
+            groups[m.deleteGroup] = groups[m.deleteGroup] || [];
+            groups[m.deleteGroup].push(m);
+        }
+    });
+
+    // Delete per group
+    for (const [group, mediaList] of Object.entries(groups)) {
+        const uploadId = group.split('-upload-')[1];
+        const keys = [
+            `events/${eventId}/original/${uploadId}.jpg`,
+            `events/${eventId}/variants/small/${uploadId}.webp`,
+            `events/${eventId}/variants/med/${uploadId}.webp`,
+            `events/${eventId}/variants/large/${uploadId}.webp`
+        ];
+
+        await s3.deleteObjects({
+            Bucket: BUCKET,
+            Delete: { Objects: keys.map(k => ({ Key: k })) }
+        });
+    }
+
+    // Hard-delete from DB
+    await Media.deleteMany({
+        _id: { $in: toDelete.map(m => m._id) }
+    });
+
+    logger.info(`Cleaned up ${toDelete.length} items`);
+};
 /**
  * Bulk delete multiple media items
  */
