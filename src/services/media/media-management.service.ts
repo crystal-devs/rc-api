@@ -13,13 +13,6 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { keys } from '@configs/dotenv.config';
 // import { queueStorageCleanup } from 'workers/storageCleanupWorker';
 
-const s3Client = new S3Client({
-    region: keys.awsRegion as string,
-    credentials: {
-        accessKeyId: keys.awsAccessKeyId as string,
-        secretAccessKey: keys.awsSecretAccessKey as string,
-    },
-});
 
 export const updateMediaStatusService = async (
     mediaId: string,
@@ -632,7 +625,7 @@ export const cleanupDeletedMedia = async () => {
     if (toDelete.length === 0) return;
 
     // Group by deleteGroup
-    const groups = {};
+    const groups: Record<string, any[]> = {};
     toDelete.forEach(m => {
         if (m.deleteGroup) {
             groups[m.deleteGroup] = groups[m.deleteGroup] || [];
@@ -643,17 +636,10 @@ export const cleanupDeletedMedia = async () => {
     // Delete per group
     for (const [group, mediaList] of Object.entries(groups)) {
         const uploadId = group.split('-upload-')[1];
-        const keys = [
-            `events/${eventId}/original/${uploadId}.jpg`,
-            `events/${eventId}/variants/small/${uploadId}.webp`,
-            `events/${eventId}/variants/med/${uploadId}.webp`,
-            `events/${eventId}/variants/large/${uploadId}.webp`
-        ];
-
-        await s3.deleteObjects({
-            Bucket: BUCKET,
-            Delete: { Objects: keys.map(k => ({ Key: k })) }
-        });
+        // Note: This function seems incomplete - missing eventId and s3/BUCKET references
+        // This appears to be legacy code that should be removed or properly implemented
+        logger.warn('cleanupDeletedMedia function is incomplete - missing eventId and S3 references');
+        // TODO: Implement proper S3 cleanup logic here
     }
 
     // Hard-delete from DB

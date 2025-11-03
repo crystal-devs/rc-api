@@ -24,6 +24,7 @@ import shareTokenRouter from "@routes/share-token.router";
 import photoWallRouter from "@routes/photo-wall.router";
 import uploadQueueRouter from "@routes/upload-queue.routes";
 import bulkOperationsRouter from "@routes/bulk-operations.router";
+import cleanupRouter from "@routes/cleanup.router";
 
 // Packages
 import compression from "compression";
@@ -101,6 +102,9 @@ app.use(`/api/${VERSION}/guest-sessions`, guestRouter);
 
 // NEW: Dedicated bulk operations router with its own rate limiting
 app.use(`/api/${VERSION}/bulk`, bulkOperationsRouter);
+
+// Cleanup router for admin operations
+app.use(`/api/${VERSION}`, cleanupRouter);
 
 // Enhanced Application Initialization
 async function initializeApplication() {
