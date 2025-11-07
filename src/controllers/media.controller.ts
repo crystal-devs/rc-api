@@ -17,7 +17,7 @@ import {
     updateMediaStatusService,
 } from "@services/media";
 import { GuestSessionHelper } from "@services/guest/guest-session-helper";
-import { softDeleteMediaService } from "@services/media/media-management.service";
+import { softDeleteMediaService, bulkSoftDeleteMediaService } from "@services/media/media-management.service";
 
 // Enhanced interface for authenticated requests
 interface AuthenticatedRequest extends Request {
@@ -882,6 +882,99 @@ export const getBatchUploadStatusController: RequestHandler = async (
     } catch (error: any) {
         logger.error('Error in getBatchUploadStatusController:', error);
         next(error);
+    }
+};
+
+/**
+ * Bulk soft delete media items
+ */
+export const bulkSoftDeleteMediaController: RequestHandler = async (
+    req: InjectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { event_id } = req.params;
+        const userId = req.user._id.toString();
+        const { media_ids, reason } = req.body;
+
+        // Validate event_id
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid or missing event ID',
+                data: null,
+                error: { message: 'A valid event ID is required' },
+                other: null
+            });
+            return;
+        }
+
+        // Validate required fields
+        if (!media_ids || !Array.isArray(media_ids) || media_ids.length === 0) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Media IDs array is required',
+                data: null,
+                error: { message: 'media_ids must be a non-empty array' },
+                other: null
+            });
+            return;
+        }
+
+        // Limit bulk operations
+        if (media_ids.length > 100) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Too many items for bulk soft delete',
+                data: null,
+                error: { message: 'Maximum 100 items can be soft-deleted at once' },
+                other: null
+            });
+            return;
+        }
+
+        logger.info('Bulk soft deleting media:', {
+            event_id,
+            mediaCount: media_ids.length,
+            userId
+        });
+
+        // Call service
+        const response = await bulkSoftDeleteMediaService(event_id, media_ids, userId, {
+            adminName: 'Admin',
+            reason: reason || 'Bulk soft-deleted by admin'
+        });
+
+        logger.info('Bulk soft delete completed:', {
+            success: response.status,
+            modifiedCount: response.data?.modifiedCount,
+            requestedCount: response.data?.requestedCount
+        });
+
+        res.status(response.code).json(response);
+
+    } catch (error: any) {
+        logger.error('Error in bulkSoftDeleteMediaController:', {
+            message: error.message,
+            params: req.params,
+            body: req.body
+        });
+
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Internal server error',
+            data: null,
+            error: {
+                message: 'An unexpected error occurred',
+                details: process.env.NODE_ENV === 'development' ? error.message : undefined
+            },
+            other: null
+        });
     }
 };
 

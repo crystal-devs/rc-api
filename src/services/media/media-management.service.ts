@@ -652,7 +652,7 @@ export const cleanupDeletedMedia = async () => {
 /**
  * Bulk delete multiple media items
  */
-export const bulkDeleteMediaService = async (
+export const bulkSoftDeleteMediaService = async (
     eventId: string,
     mediaIds: string[],
     userId: string,
@@ -684,11 +684,11 @@ export const bulkDeleteMediaService = async (
             };
         }
 
-        // Get media items for URL collection
+        // Get media items for processing
         const mediaItems = await Media.find({
             _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
             event_id: new mongoose.Types.ObjectId(eventId)
-        }).select('url image_variants approval.status uploaded_by size_mb')
+        }).select('url image_variants approval.status uploaded_by size_mb deleteGroup')
             .populate('event_id', 'share_token')
             .lean();
 
@@ -705,38 +705,56 @@ export const bulkDeleteMediaService = async (
         const shareToken = (mediaItems[0].event_id as any)?.share_token || null;
         const visibleMediaIds: string[] = [];
 
-        // IMPROVED: Collect all URLs with better validation
-        const allUrls: string[] = [];
+        // Collect visible media IDs for notifications
         mediaItems.forEach(media => {
-            const urls = collectAllMediaUrls(media);
-            allUrls.push(...urls);
-
             if (['approved', 'auto_approved'].includes(media.approval?.status || '')) {
                 visibleMediaIds.push(media._id.toString());
             }
         });
 
-        // STEP 1: Delete from database IMMEDIATELY
-        const deleteResult = await Media.deleteMany({
-            _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
-            event_id: new mongoose.Types.ObjectId(eventId)
-        });
+        // STEP 1: Soft-delete in DB IMMEDIATELY
+        const updateResult = await Media.updateMany(
+            {
+                _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
+                event_id: new mongoose.Types.ObjectId(eventId)
+            },
+            {
+                $set: {
+                    isDeleted: true,
+                    deletedAt: new Date(),
+                    approval: {
+                        ...mediaItems[0].approval, // Use first item's approval as template
+                        status: 'deleted'
+                    }
+                }
+            }
+        );
+
+        if (updateResult.modifiedCount === 0) {
+            return {
+                status: false,
+                code: 404,
+                message: 'No media items were modified',
+                data: null,
+                error: { message: 'No changes made - items may already be deleted' }
+            };
+        }
 
         // STEP 2: Update counters
         try {
             await updateBulkCountersForDeletion(eventId, mediaItems);
         } catch (counterError) {
-            logger.warn('Failed to update bulk counters for deletion:', counterError);
+            logger.warn('Failed to update bulk counters for soft-deletion:', counterError);
         }
 
-        // STEP 3: Broadcast deletions
+        // STEP 3: Broadcast soft-deletions if visible
         if (visibleMediaIds.length > 0) {
             try {
                 for (const mediaId of visibleMediaIds) {
                     mediaNotificationService.broadcastMediaRemoved({
                         mediaId,
                         eventId,
-                        reason: options?.reason || 'bulk_deleted_by_admin',
+                        reason: options?.reason || 'bulk_soft_deleted_by_admin',
                         adminName: options?.adminName
                     });
                 }
@@ -750,22 +768,22 @@ export const bulkDeleteMediaService = async (
                             await photoWallService.notifyMediaRemoved(
                                 shareToken,
                                 mediaId,
-                                options?.reason || 'Bulk removed by admin'
+                                options?.reason || 'Bulk soft-removed by admin'
                             );
                         }
                     }
                 }
             } catch (wsError) {
-                logger.error('Failed to broadcast bulk media deletion via WebSocket:', wsError);
+                logger.error('Failed to broadcast bulk soft-deletion via WebSocket:', wsError);
             }
         }
 
         return {
             status: true,
             code: 200,
-            message: `Successfully deleted ${deleteResult.deletedCount} media items`,
+            message: `Successfully soft-deleted ${updateResult.modifiedCount} media items`,
             data: {
-                deletedCount: deleteResult.deletedCount,
+                modifiedCount: updateResult.modifiedCount,
                 requestedCount: validMediaIds.length,
                 visibleMediaDeleted: visibleMediaIds.length
             },
@@ -773,18 +791,16 @@ export const bulkDeleteMediaService = async (
             other: {
                 websocketBroadcasted: visibleMediaIds.length > 0,
                 photoWallNotified: !!(shareToken && visibleMediaIds.length > 0),
-                // storageCleanupQueued: validUrls.length > 0,
-                // validUrlsQueued: validUrls.length,
-                // invalidUrlsSkipped: invalidUrls.length
+                cleanupScheduled: true // Now async after 30 days
             }
         };
 
     } catch (error: any) {
-        logger.error('Error in bulkDeleteMediaService:', error);
+        logger.error('Error in bulkSoftDeleteMediaService:', error);
         return {
             status: false,
             code: 500,
-            message: 'Failed to bulk delete media',
+            message: 'Failed to bulk soft-delete media',
             data: null,
             error: { message: error.message }
         };

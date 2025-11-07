@@ -9,6 +9,7 @@ import {
     deleteMediaController,
     updateMediaStatusController,
     bulkUpdateMediaStatusController,
+    bulkSoftDeleteMediaController,
     getGuestMediaController,
     getMediaByIdController,
     getMediaVariantsController,
@@ -121,6 +122,13 @@ mediaRouter.delete(
     "/:media_id",
     authMiddleware,
     deleteMediaController
+);
+
+// Bulk soft delete media
+mediaRouter.delete(
+    "/event/:event_id/media/bulk-delete",
+    authMiddleware,
+    bulkSoftDeleteMediaController
 );
 
 // === OPTIMIZATION ENDPOINTS ===
