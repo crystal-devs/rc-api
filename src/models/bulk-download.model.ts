@@ -11,7 +11,7 @@ const bulkDownloadSchema = new mongoose.Schema({
 
     // Event relationship
     event_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.EVENT, required: true, index: true },
-    share_token: { type: String, required: true, index: true },
+    share_token: { type: String, required: false, index: true },
 
     // Requester info (supports concurrent requests from multiple users)
     requested_by_type: { type: String, enum: ['guest', 'user', 'host'], required: true },
@@ -85,7 +85,7 @@ const bulkDownloadSchema = new mongoose.Schema({
     download_url_expires_at: { type: Date, default: null },
 
     // Cloud storage info
-    storage_provider: { type: String, enum: ['aws_s3', 'google_drive'], default: 'imagekit' },
+    storage_provider: { type: String, enum: ['aws_s3', 'google_drive', 'imagekit'], default: 'imagekit' },
     storage_key: { type: String, default: null }, // File path in cloud storage
     storage_file_id: { type: String, default: null }, // Provider-specific file ID
 

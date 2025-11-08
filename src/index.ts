@@ -14,17 +14,17 @@ import { logger, morganMiddleware } from "@utils/logger";
 import { initializeWebSocketService } from "@services/websocket/websocket.service";
 
 // Route imports
-import authRouter from "@routes/auth-router";
-import systemRouter from "@routes/system.route";
+import authRouter from "@routes/auth.router";
+import systemRouter from "@routes/system.router";
 import eventRouter from "@routes/event.router";
 import mediaRouter from "@routes/media.router";
 import userRouter from "@routes/user.router";
 import albumRouter from "@routes/album.router";
 import shareTokenRouter from "@routes/share-token.router";
 import photoWallRouter from "@routes/photo-wall.router";
-import uploadQueueRouter from "@routes/upload-queue.routes";
+import uploadQueueRouter from "@routes/upload-queue.router";
 import bulkOperationsRouter from "@routes/bulk-operations.router";
-import cleanupRouter from "@routes/cleanup.router";
+import bulkDownloadRouter from "@routes/bulk-download.router";
 
 // Packages
 import compression from "compression";
@@ -32,11 +32,9 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
 import http from "http";
-import { HealthService } from "@services/health.service";
-import { InitializationService } from "@services/initialization.service";
-import { CleanupService } from "@services/cleanup.service";
-import { ProductionMonitoringService } from "@services/monitoring.service";
-import guestRouter from "@routes/guest-session.routes";
+import { HealthService } from "@services/system";
+import { InitializationService, ProductionMonitoringService } from "@services/system";
+import guestRouter from "@routes/guest-session.router";
 
 const app = express();
 const PORT = keys.port;
@@ -103,8 +101,8 @@ app.use(`/api/${VERSION}/guest-sessions`, guestRouter);
 // NEW: Dedicated bulk operations router with its own rate limiting
 app.use(`/api/${VERSION}/bulk`, bulkOperationsRouter);
 
-// Cleanup router for admin operations
-app.use(`/api/${VERSION}`, cleanupRouter);
+// Bulk download router
+app.use(`/api/${VERSION}/download`, bulkDownloadRouter);
 
 // Enhanced Application Initialization
 async function initializeApplication() {
@@ -118,9 +116,6 @@ async function initializeApplication() {
     // Initialize image processing (requires Redis)
     if (redisConnected) {
       await InitializationService.initializeBulkDownload();
-
-      // Initialize cleanup jobs
-      CleanupService.initializeBulkDownloadCleanupJobs();
     }
 
     // Initialize S3 connection
