@@ -3,7 +3,9 @@ import { keys } from "@configs/dotenv.config";
 import {
   corsOptions,
   rateLimiter,
-  securityHeaders
+  securityHeaders,
+  botDetectionMiddleware,
+  rateLimitLogger
 } from "@configs/security.config";
 import { gracefulShutdown } from "@configs/shutdown.config";
 import { globalErrorHandler } from "@middlewares/error-handler.middleware";
@@ -47,8 +49,10 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(securityHeaders);
 
-// Apply general rate limiter globally
-app.use(rateLimiter);
+// Apply security middlewares
+app.use(botDetectionMiddleware); // Bot detection first
+app.use(rateLimiter); // Global rate limiting
+app.use(rateLimitLogger); // Rate limit monitoring
 
 app.use(cors(corsOptions));
 app.use(morganMiddleware);

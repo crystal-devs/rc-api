@@ -26,10 +26,23 @@ export class LoginService {
             if (phone_number) query.phone_number = phone_number;
             
             // Find existing user
-            let user = await User.findOne(query).lean();
+            let user = await User.findOne(query);
             let isNewUser = false;
 
             logger.info(`Login attempt: ${email || phone_number} (provider: ${provider})`);
+
+            // Check if account is locked
+            if (user && user.lockoutUntil && user.lockoutUntil > new Date()) {
+                const remainingTime = Math.ceil((user.lockoutUntil.getTime() - Date.now()) / 1000 / 60);
+                throw new Error(`Account is temporarily locked due to too many failed attempts. Try again in ${remainingTime} minutes.`);
+            }
+
+            // Reset lockout if enough time has passed
+            if (user && user.lockoutUntil && user.lockoutUntil <= new Date()) {
+                user.failedLoginAttempts = 0;
+                user.lockoutUntil = null;
+                await user.save();
+            }
 
             if (!user) {
                 // **SIGNUP FLOW**: Create new user
@@ -48,25 +61,42 @@ export class LoginService {
                 };
 
                 const newUser = await User.create(newUserData);
-                user = newUser.toObject();
+                user = newUser;
                 isNewUser = true;
             }
 
             // Initialize user data (subscription and usage)
             const initResult = await userInitializationService.initializeUserData(user._id.toString());
             
-            // Generate JWT token
+            // Generate JWT tokens
             const token = tokenService.generateToken(
                 user._id.toString(),
                 user.email,
                 user.provider
             );
 
+            const refreshToken = tokenService.generateRefreshToken(user._id.toString());
+
+            // Reset failed login attempts on successful login and update security tracking
+            if (user.failedLoginAttempts > 0) {
+                user.failedLoginAttempts = 0;
+                user.lockoutUntil = null;
+                user.lastFailedLoginAt = null;
+            }
+
+            // Update successful login tracking
+            user.lastSuccessfulLoginAt = new Date();
+            user.loginCount = (user.loginCount || 0) + 1;
+
+            await user.save();
+
             // Build response
             const result: LoginResult = {
                 token,
+                refreshToken,
                 message: isNewUser ? "Signup successful" : "Login successful",
                 status: true,
+                expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // 1 hour from now
                 user: {
                     id: user._id.toString(),
                     email: user.email,
@@ -103,10 +133,14 @@ export class LoginService {
     /**
      * 🔄 REFRESH USER TOKEN
      */
-    async refreshUserToken(oldToken: string): Promise<{ token: string }> {
+    async refreshUserToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }> {
         try {
-            const newToken = tokenService.refreshToken(oldToken);
-            return { token: newToken };
+            const tokens = tokenService.refreshToken(refreshToken);
+            return {
+                accessToken: tokens.accessToken,
+                refreshToken: tokens.refreshToken || refreshToken, // Return new refresh token or keep old one
+                expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() // 1 hour from now
+            };
         } catch (error: any) {
             logger.error('Token refresh error:', error);
             throw new Error('Failed to refresh token');

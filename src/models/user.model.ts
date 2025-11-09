@@ -53,6 +53,32 @@ const userSchema = new mongoose.Schema({
     lastLoginAt: {
         type: Date,
         default: Date.now
+    },
+    // Security fields for account protection
+    failedLoginAttempts: {
+        type: Number,
+        default: 0
+    },
+    lockoutUntil: {
+        type: Date,
+        default: null
+    },
+    lastFailedLoginAt: {
+        type: Date,
+        default: null
+    },
+    // Additional security tracking
+    lastSuccessfulLoginAt: {
+        type: Date,
+        default: null
+    },
+    loginCount: {
+        type: Number,
+        default: 0
+    },
+    suspiciousActivityCount: {
+        type: Number,
+        default: 0
     }
 }, {timestamps: true})
 

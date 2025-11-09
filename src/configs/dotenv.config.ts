@@ -20,9 +20,9 @@ const buildRedisUrl = (): string => {
 };
 
 export const keys: Record<string, string | number | string[]> = {
-  
-  // 🚀 Server Configuration
-  port: process.env.PORT ? Number(process.env.PORT) : 8080,
+
+   // 🚀 Server Configuration
+   port: process.env.PORT ? Number(process.env.PORT) : 3001,
   nodeEnv: process.env.NODE_ENV || 'development',
   APILiveVersion: process.env.VERSION || 'v1',
   corsOrigins: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : [],
