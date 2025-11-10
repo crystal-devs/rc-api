@@ -26,6 +26,10 @@ const bulkDownloadSchema = new mongoose.Schema({
         default: 'original',
         index: true
     },
+
+    // Content versioning for smart caching
+    content_hash: { type: String, index: true }, // MD5 hash of approved media IDs + timestamps
+    media_count: { type: Number, default: 0 }, // Number of media files in this ZIP
     include_videos: { type: Boolean, default: true },
     include_images: { type: Boolean, default: true },
     file_format: { type: String, enum: ['zip'], default: 'zip' },

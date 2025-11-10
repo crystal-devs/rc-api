@@ -50,4 +50,7 @@ const statusLimiter = rateLimit({
 bulkDownloadRouter.post('/bulk', createDownloadLimiter, createBulkDownloadController as RequestHandler);
 bulkDownloadRouter.get('/status/:jobId', statusLimiter, getBulkDownloadStatusController as RequestHandler);
 
+// Guest bulk download route (with share token)
+bulkDownloadRouter.post('/guest/:shareToken/bulk', createDownloadLimiter, createBulkDownloadController as RequestHandler);
+
 export default bulkDownloadRouter;
