@@ -6,7 +6,7 @@ import { logger } from '@utils/logger';
 import { Media } from '@models/media.model';
 import { Event } from '@models/event.model';
 import { EventParticipant } from '@models/event-participants.model';
-import { mediaNotificationService } from '../websocket/notifications';
+import { mediaNotificationService } from '@services/websocket/notifications';
 import type { ServiceResponse, StatusUpdateOptions } from './media.types';
 import { getPhotoWallWebSocketService } from '@services/photoWallWebSocketService';
 import { S3Client } from '@aws-sdk/client-s3';
@@ -132,11 +132,14 @@ export const updateMediaStatusService = async (
             status: true,
             code: 200,
             message: 'Media status updated successfully',
-            data: updatedMedia,
+            data: {
+                mediaId: mediaId,
+                eventId: eventId,
+                newStatus: status,
+                previousStatus: previousStatus
+            },
             error: null,
             other: {
-                previousStatus,
-                newStatus: status,
                 websocketBroadcasted: true,
                 photoWallNotified: !!(shareToken && (status === 'approved' || status === 'auto_approved'))
             }
@@ -290,7 +293,10 @@ export const bulkUpdateMediaStatusService = async (
             message: `Successfully updated ${result.modifiedCount} media items`,
             data: {
                 modifiedCount: result.modifiedCount,
-                requestedCount: validMediaIds.length
+                requestedCount: validMediaIds.length,
+                updatedMediaIds: validMediaIds, // Return the list of successfully updated media IDs
+                eventId: eventId,
+                newStatus: status
             },
             error: null,
             other: {

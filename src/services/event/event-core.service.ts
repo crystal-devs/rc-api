@@ -10,6 +10,7 @@ import mongoose from "mongoose";
 import { ServiceResponse } from "@services/media";
 import { EventType } from "./event.types";
 import { getPhotoWallWebSocketService } from "@services/photoWallWebSocketService";
+import { Media } from "@models/media.model";
 
 // Role permissions template
 const ROLE_PERMISSIONS = {
@@ -192,6 +193,22 @@ export const deleteEventService = async (
 
         // Delete all event participants first
         await EventParticipant.deleteMany({ event_id: new mongoose.Types.ObjectId(eventId) }, { session });
+
+        // Delete all event medias first
+        const deleteGroup = `event-${eventId}-${Date.now()}`;
+        await Media.updateMany(
+            {
+                event_id: new mongoose.Types.ObjectId(eventId)
+            },
+            {
+                $set: {
+                    isDeleted: true,
+                    deletedAt: new Date(),
+                    approval: { status: 'deleted' },
+                    deleteGroup: deleteGroup
+                }
+            }
+        );
 
         // Delete event
         await Event.findOneAndDelete({ _id: new mongoose.Types.ObjectId(eventId) }, { session });

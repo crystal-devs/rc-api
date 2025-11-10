@@ -390,17 +390,32 @@ export const bulkUpdateMediaStatusController: RequestHandler = async (
         });
 
         // Call service
-        const response = await bulkUpdateMediaStatusService(event_id, media_ids, status, {
+        const serviceResponse = await bulkUpdateMediaStatusService(event_id, media_ids, status, {
             adminId: userId,
             reason,
             hideReason: hide_reason
         });
 
         logger.info('Bulk media status update completed:', {
-            success: response.status,
-            modifiedCount: response.data?.modifiedCount,
-            requestedCount: response.data?.requestedCount
+            success: serviceResponse.status,
+            modifiedCount: serviceResponse.data?.modifiedCount,
+            requestedCount: serviceResponse.data?.requestedCount
         });
+
+        // For bulk operations, return summary data instead of individual media objects
+        const response = {
+            status: serviceResponse.status,
+            code: serviceResponse.code,
+            message: serviceResponse.message,
+            data: {
+                modifiedCount: serviceResponse.data?.modifiedCount || 0,
+                requestedCount: serviceResponse.data?.requestedCount || 0,
+                eventId: event_id,
+                newStatus: status
+            },
+            error: serviceResponse.error,
+            other: serviceResponse.other
+        };
 
         res.status(response.code).json(response);
 

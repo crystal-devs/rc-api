@@ -15,6 +15,7 @@ export const authMiddleware = async (req: injectedRequest, res: Response, next: 
     const authHeader = req.headers.authorization;
 
     if (!authHeader) {
+        console.log('Authorization header missing')
         res.status(401).json({ message: "Authorization header missing" });
         return; // Ensure the function returns void
     }
