@@ -48,7 +48,8 @@ export class AccessControlService {
             case 'anyone_with_link':
                 return true;
             case 'invited_only':
-                return access.isOwner || access.isCoHost; // Simplified for now
+                // For invited_only, authenticated users can attempt to join (invitation check happens in middleware)
+                return access.isOwner || access.isCoHost || !!access.role; // role exists if authenticated
             case 'private':
                 return access.isOwner || access.isCoHost;
             default:

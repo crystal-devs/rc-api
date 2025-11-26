@@ -2,6 +2,9 @@
 
 import mongoose from "mongoose";
 import { Event } from "@models/event.model";
+import { EventInvitation } from "@models/event-invitations.model";
+import { EventParticipant } from "@models/event-participants.model";
+import { User } from "@models/user.model";
 import { logger } from "@utils/logger";
 
 // ============= TYPES =============
@@ -141,7 +144,7 @@ export const validateGuestShareToken = async (
         const visibility = event.visibility as EventVisibility;
 
         // Handle different visibility levels
-        const accessCheck = checkVisibilityAccess(visibility, authToken, userEmail);
+        const accessCheck = await checkVisibilityAccess(visibility, authToken, userEmail, event._id.toString());
         if (!accessCheck.valid) {
             return {
                 valid: false,
@@ -288,11 +291,12 @@ function buildEventResponse(event: any, userAccess: UserAccess): EventResponse {
     return baseResponse;
 }
 
-function checkVisibilityAccess(
-    visibility: EventVisibility, 
-    authToken?: string, 
-    userEmail?: string
-): { valid: boolean; reason?: string; requiresAuth?: boolean } {
+async function checkVisibilityAccess(
+    visibility: EventVisibility,
+    authToken?: string,
+    userEmail?: string,
+    eventId?: string
+): Promise<{ valid: boolean; reason?: string; requiresAuth?: boolean }> {
     switch (visibility) {
         case 'private':
             // Private events should not be accessible via share token for guests
@@ -311,8 +315,15 @@ function checkVisibilityAccess(
                 };
             }
 
-            // Check if user is invited (simplified - returns true for now)
-            const isInvited = checkIfUserIsInvited(userEmail);
+            if (!eventId) {
+                return {
+                    valid: false,
+                    reason: "Event ID is required for invitation validation."
+                };
+            }
+
+            // Check if user is invited
+            const isInvited = await checkIfUserIsInvited(userEmail, eventId);
             if (!isInvited) {
                 return {
                     valid: false,
@@ -330,11 +341,37 @@ function checkVisibilityAccess(
     return { valid: true };
 }
 
-// Simplified function - returns true for now as mentioned
-function checkIfUserIsInvited(userEmail: string): boolean {
-    // TODO: Add invited user logic later
-    // For now, any authenticated user can access invited_only events
-    return true;
+// Check if user is invited to the event or already a participant
+async function checkIfUserIsInvited(userEmail: string, eventId: string): Promise<boolean> {
+    try {
+        // Check if user is already a participant
+        const existingParticipant = await EventParticipant.findOne({
+            event_id: new mongoose.Types.ObjectId(eventId),
+            user_id: { $exists: true }, // Only check registered users
+            status: 'active'
+        });
+
+        if (existingParticipant) {
+            // Check if this participant's user email matches
+            const user = await User.findById(existingParticipant.user_id);
+            if (user && user.email === userEmail) {
+                return true;
+            }
+        }
+
+        // Check for pending/accepted invitations
+        const invitation = await EventInvitation.findOne({
+            event_id: new mongoose.Types.ObjectId(eventId),
+            invitee_email: userEmail,
+            status: { $in: ['pending', 'accepted'] },
+            expires_at: { $gt: new Date() }
+        });
+
+        return !!invitation;
+    } catch (error) {
+        logger.error(`Error checking user invitation for event ${eventId}:`, error);
+        return false;
+    }
 }
 
 // ============= LEGACY SUPPORT (if needed) =============

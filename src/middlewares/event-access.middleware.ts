@@ -6,6 +6,8 @@ import { sendResponse } from "@utils/express.util";
 import { logger } from "@utils/logger";
 import { Event } from "@models/event.model";
 import { EventParticipant } from "@models/event-participants.model";
+import { EventInvitation } from "@models/event-invitations.model";
+import { User } from "@models/user.model";
 
 // Clean role types
 export type EventRole = 'creator' | 'co_host' | 'moderator' | 'guest' | 'viewer' | 'authenticated_guest';
@@ -401,29 +403,98 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                 };
             }
 
-            console.log('✅ [handleEventVisibility] Authenticated access granted for invited_only');
-            return {
-                success: true,
-                eventAccess: {
-                    eventId,
-                    role: 'authenticated_guest' as EventRole,
-                    canView: true,
-                    canUpload: Boolean(event.permissions?.can_upload),
-                    canDownload: Boolean(event.permissions?.can_download),
-                    canEdit: false,
-                    canDelete: false,
-                    canManageParticipants: false,
-                    canInviteOthers: false,
-                    canModerateContent: false,
-                    canApproveContent: false,
-                    canExportData: false,
-                    canManageSettings: false,
-                    canViewAnalytics: false,
-                    canTransferOwnership: false,
-                    canManageGuests: false,
-                    canManageContent: false,
+            // Check if user is invited or already a participant
+            try {
+                const user = await User.findById(userId).select('email').lean();
+                if (!user?.email) {
+                    console.log('❌ [handleEventVisibility] User email not found');
+                    return {
+                        success: false,
+                        error: {
+                            status: false,
+                            code: 403,
+                            message: 'Access denied',
+                            data: null as any,
+                            error: { message: 'Unable to verify user identity' },
+                            other: null as any,
+                        }
+                    };
                 }
-            };
+
+                // Check if user is already a participant
+                const existingParticipant = await EventParticipant.findOne({
+                    user_id: new mongoose.Types.ObjectId(userId),
+                    event_id: new mongoose.Types.ObjectId(eventId),
+                    status: 'active'
+                }).lean();
+
+                let isInvited = false;
+                if (existingParticipant) {
+                    isInvited = true;
+                } else {
+                    // Check for pending/accepted invitations
+                    const invitation = await EventInvitation.findOne({
+                        event_id: new mongoose.Types.ObjectId(eventId),
+                        invitee_email: user.email,
+                        status: { $in: ['pending', 'accepted'] },
+                        expires_at: { $gt: new Date() }
+                    }).lean();
+
+                    isInvited = !!invitation;
+                }
+
+                if (!isInvited) {
+                    console.log(`❌ [handleEventVisibility] User ${userId} not invited to event ${eventId}`);
+                    return {
+                        success: false,
+                        error: {
+                            status: false,
+                            code: 403,
+                            message: 'Access denied',
+                            data: null as any,
+                            error: { message: 'You are not invited to this event' },
+                            other: null as any,
+                        }
+                    };
+                }
+
+                console.log(`✅ [handleEventVisibility] Invited access granted for user ${userId}`);
+                return {
+                    success: true,
+                    eventAccess: {
+                        eventId,
+                        role: 'authenticated_guest' as EventRole,
+                        canView: true,
+                        canUpload: Boolean(event.permissions?.can_upload),
+                        canDownload: Boolean(event.permissions?.can_download),
+                        canEdit: false,
+                        canDelete: false,
+                        canManageParticipants: false,
+                        canInviteOthers: false,
+                        canModerateContent: false,
+                        canApproveContent: false,
+                        canExportData: false,
+                        canManageSettings: false,
+                        canViewAnalytics: false,
+                        canTransferOwnership: false,
+                        canManageGuests: false,
+                        canManageContent: false,
+                    }
+                };
+            } catch (error) {
+                console.error('❌ [handleEventVisibility] Error checking invitation:', error);
+                return {
+                    success: false,
+                    error: {
+                        status: false,
+                        code: 500,
+                        message: 'Error checking access',
+                        data: null as any,
+                        error: { message: 'Internal server error' },
+                        other: null as any,
+                    }
+                };
+            }
 
         case 'private':
             if (!userId) {

@@ -3,6 +3,7 @@ import express, { RequestHandler } from "express";
 import * as eventController from "@controllers/event.controller";
 import * as cohostController from "@controllers/co-host.controller"
 import * as participantController from "@controllers/participant.controller";
+import * as invitationController from "@controllers/invitation.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import { checkEventLimitMiddleware } from "@middlewares/subscription-limit.middleware";
 import { eventAccessMiddleware } from "@middlewares/event-access.middleware";
@@ -103,6 +104,28 @@ eventRouter.get("/:event_id/participants/:participant_id/stats",
     eventAccessMiddleware,
     requireParticipantManagementAccess,
     participantController.getParticipantStatsController
+);
+
+// ============= INVITATION MANAGEMENT =============
+// Send invitations (simple format)
+eventRouter.post("/:event_id/invitations",
+    eventAccessMiddleware,
+    requireInviteAccess,
+    invitationController.sendInvitationsController
+);
+
+// Get event invitations
+eventRouter.get("/:event_id/invitations",
+    eventAccessMiddleware,
+    requireParticipantManagementAccess,
+    invitationController.getEventInvitationsController
+);
+
+// Revoke invitation
+eventRouter.delete("/:event_id/invitations/:invitation_id",
+    eventAccessMiddleware,
+    requireParticipantManagementAccess,
+    invitationController.revokeInvitationController
 );
 
 // ============= EVENT ALBUMS MANAGEMENT =============

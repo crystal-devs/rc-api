@@ -88,24 +88,28 @@ export async function getResponsiveImageUrls(
     full: string | null;
     original: string | null;
 }> {
+    // If we have a public_id, we can at least return the original
+    const originalUrl = mediaItem.public_id
+        ? await getCachedSignedUrl(mediaItem.public_id)
+        : null;
+
     if (!mediaItem?.image_variants || mediaItem.type !== 'image') {
+        // Fallback to original for all sizes if no variants
         return {
-            thumbnail: null,
-            display: null,
-            full: null,
-            original: null,
+            thumbnail: originalUrl,
+            display: originalUrl,
+            full: originalUrl,
+            original: originalUrl,
         };
     }
 
     const variants = mediaItem.image_variants;
 
     return {
-        thumbnail: await selectBestFormatUrl(variants.small),
-        display: await selectBestFormatUrl(variants.medium),
-        full: await selectBestFormatUrl(variants.large),
-        original: mediaItem.public_id
-            ? await getCachedSignedUrl(mediaItem.public_id)
-            : null,
+        thumbnail: await selectBestFormatUrl(variants.small) || originalUrl,
+        display: await selectBestFormatUrl(variants.medium) || originalUrl,
+        full: await selectBestFormatUrl(variants.large) || originalUrl,
+        original: originalUrl,
     };
 }
 
@@ -168,10 +172,17 @@ export interface MediaMetadata {
  * Calls getResponsiveImageUrls which uses your getCachedSignedUrl()
  */
 export async function getMediaMetadata(mediaItem: any): Promise<MediaMetadata> {
+    // Always regenerate signed URL if public_id exists
+    // This fixes the issue of expired URLs stored in the database
+    let mainUrl = mediaItem.url;
+    if (mediaItem.public_id) {
+        mainUrl = await getCachedSignedUrl(mediaItem.public_id);
+    }
+
     return {
         _id: mediaItem._id?.toString() || mediaItem._id,
         type: mediaItem.type,
-        url: mediaItem.url,
+        url: mainUrl,
         processing_status: mediaItem.processing?.status || 'unknown',
         approval_status: mediaItem.approval?.status || 'pending',
         size_mb: mediaItem.size_mb || 0,
@@ -203,22 +214,3 @@ export async function transformMediaForResponse(
 ): Promise<MediaMetadata[]> {
     return Promise.all(mediaItems.map((item) => getMediaMetadata(item)));
 }
-
-/**
- * HOW IT WORKS:
- * 
- * 1. transformMediaForResponse() is called with media items from DB
- * 2. For each item, getMediaMetadata() is called
- * 3. getMediaMetadata() calls getResponsiveImageUrls()
- * 4. getResponsiveImageUrls() calls selectBestFormatUrl() for each size
- * 5. selectBestFormatUrl() calls getCachedSignedUrl() ← YOUR FUNCTION
- * 6. getCachedSignedUrl() returns:
- *    - Cache hit: Same URL (fast, ~1-2ms)
- *    - Cache miss: New URL (first time, ~100-150ms)
- * 
- * RESULT:
- * - First request: ~200ms (generates URL, caches it)
- * - Subsequent requests within 5 mins: ~10-20ms (cache hits)
- * - No 403 errors (always fresh URLs)
- * - 90% fewer S3 calls
- */

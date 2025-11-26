@@ -84,10 +84,10 @@ export const uploadCompleteController = async (
 
     // ────────────────────── SAVE TO MONGODB ──────────────────────
     const media = new Media({
-      url: originalUrl,                    // ← Presigned for 7 days
-      public_id: key,                      // ← Raw S3 key (permanent reference)
+      url: key, // Store key instead of signed URL
+      public_id: key,
       type: 'image',
-      upload_id,                           // ← Unique UUID
+      upload_id,
       event_id: eventId,
       album_id: eventId,
       original_filename: originalFileName,
