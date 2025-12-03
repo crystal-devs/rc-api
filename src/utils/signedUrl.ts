@@ -1,43 +1,16 @@
 // utils/signedUrl.ts
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+// DEPRECATED: Use cloudfront-url.util.ts instead
+// This file is kept for backward compatibility
 
-const s3 = new S3Client();
+import { getCachedSignedUrl as getRedisSignedUrl } from './cloudfront-url.util';
 
-const URL_CACHE = new Map<string, { url: string; expiresAt: number }>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
+/**
+ * @deprecated Use getCachedSignedUrl from cloudfront-url.util.ts instead
+ * This wrapper is kept for backward compatibility
+ */
 export const getCachedSignedUrl = async (
     key: string,
-    expiresIn = 3600 // 1 hour
+    expiresIn = 3600
 ): Promise<string> => {
-    const cacheKey = `${key}:${expiresIn}`;
-    const cached = URL_CACHE.get(cacheKey);
-
-    if (cached && cached.expiresAt > Date.now()) {
-        return cached.url;
-    }
-
-    const url = await getSignedUrl(
-        s3,
-        new GetObjectCommand({
-            Bucket: process.env.AWS_S3_BUCKET!,
-            Key: key,
-        }),
-        { expiresIn }
-    );
-
-    URL_CACHE.set(cacheKey, {
-        url,
-        expiresAt: Date.now() + (expiresIn * 1000 - 60 * 1000), // 1 min buffer
-    });
-
-    // Clean old entries
-    if (URL_CACHE.size > 10_000) {
-        for (const [k, v] of URL_CACHE.entries()) {
-            if (v.expiresAt < Date.now()) URL_CACHE.delete(k);
-        }
-    }
-
-    return url;
+    return getRedisSignedUrl(key, expiresIn);
 };

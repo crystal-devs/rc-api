@@ -1,7 +1,7 @@
-// utils/file.util.ts - Updated to use your existing getCachedSignedUrl()
+// utils/file.util.ts - Updated with Redis-backed signed URL cache and batch operations
 
 import { logger } from './logger';
-import { getCachedSignedUrl } from './signedUrl'; // ← Import your existing function
+import { getCachedSignedUrl, getCachedSignedUrlsBatch } from './cloudfront-url.util';
 
 /**
  * Determine file type based on MIME type
@@ -59,61 +59,6 @@ export function mbToBytes(mb: number): number {
 }
 
 /**
- * Select best format URL using your getCachedSignedUrl function
- * Prefers WebP (97% browser support) and falls back to JPEG
- */
-async function selectBestFormatUrl(variant: any): Promise<string | null> {
-    // Prefer WebP
-    if (variant.webp?.public_id) {
-        return await getCachedSignedUrl(variant.webp.public_id);
-    }
-
-    // Fallback to JPEG
-    if (variant.jpeg?.public_id) {
-        return await getCachedSignedUrl(variant.jpeg.public_id);
-    }
-
-    return null;
-}
-
-/**
- * Get responsive image URLs for a media item
- * Returns WebP or JPEG URLs with signed access, all cached
- */
-export async function getResponsiveImageUrls(
-    mediaItem: any
-): Promise<{
-    thumbnail: string | null;
-    display: string | null;
-    full: string | null;
-    original: string | null;
-}> {
-    // If we have a public_id, we can at least return the original
-    const originalUrl = mediaItem.public_id
-        ? await getCachedSignedUrl(mediaItem.public_id)
-        : null;
-
-    if (!mediaItem?.image_variants || mediaItem.type !== 'image') {
-        // Fallback to original for all sizes if no variants
-        return {
-            thumbnail: originalUrl,
-            display: originalUrl,
-            full: originalUrl,
-            original: originalUrl,
-        };
-    }
-
-    const variants = mediaItem.image_variants;
-
-    return {
-        thumbnail: await selectBestFormatUrl(variants.small) || originalUrl,
-        display: await selectBestFormatUrl(variants.medium) || originalUrl,
-        full: await selectBestFormatUrl(variants.large) || originalUrl,
-        original: originalUrl,
-    };
-}
-
-/**
  * Check if media item has completed variants
  */
 export function hasImageVariants(mediaItem: any): boolean {
@@ -168,16 +113,62 @@ export interface MediaMetadata {
 }
 
 /**
- * Get media metadata for API response
- * Calls getResponsiveImageUrls which uses your getCachedSignedUrl()
+ * Get responsive image URLs using pre-generated cache
  */
-export async function getMediaMetadata(mediaItem: any): Promise<MediaMetadata> {
-    // Always regenerate signed URL if public_id exists
-    // This fixes the issue of expired URLs stored in the database
+async function getResponsiveImageUrlsWithCache(
+    mediaItem: any,
+    urlCache: Map<string, string>
+): Promise<{
+    thumbnail: string | null;
+    display: string | null;
+    full: string | null;
+    original: string | null;
+}> {
+    const originalUrl = mediaItem.public_id
+        ? (urlCache.get(mediaItem.public_id) || await getCachedSignedUrl(mediaItem.public_id))
+        : null;
+
+    if (!mediaItem?.image_variants || mediaItem.type !== 'image') {
+        return {
+            thumbnail: originalUrl,
+            display: originalUrl,
+            full: originalUrl,
+            original: originalUrl,
+        };
+    }
+
+    const variants = mediaItem.image_variants;
+
+    const getVariantUrl = async (variant: any): Promise<string | null> => {
+        if (variant?.webp?.public_id) {
+            return urlCache.get(variant.webp.public_id) || await getCachedSignedUrl(variant.webp.public_id);
+        }
+        if (variant?.jpeg?.public_id) {
+            return urlCache.get(variant.jpeg.public_id) || await getCachedSignedUrl(variant.jpeg.public_id);
+        }
+        return null;
+    };
+
+    return {
+        thumbnail: await getVariantUrl(variants.small) || originalUrl,
+        display: await getVariantUrl(variants.medium) || originalUrl,
+        full: await getVariantUrl(variants.large) || originalUrl,
+        original: originalUrl,
+    };
+}
+
+/**
+ * Get media metadata using pre-generated URL cache
+ */
+async function getMediaMetadataWithCache(mediaItem: any, urlCache: Map<string, string>): Promise<MediaMetadata> {
+    // Get main URL from cache or generate
     let mainUrl = mediaItem.url;
     if (mediaItem.public_id) {
-        mainUrl = await getCachedSignedUrl(mediaItem.public_id);
+        mainUrl = urlCache.get(mediaItem.public_id) || await getCachedSignedUrl(mediaItem.public_id);
     }
+
+    // Get responsive URLs using cache
+    const responsiveUrls = await getResponsiveImageUrlsWithCache(mediaItem, urlCache);
 
     return {
         _id: mediaItem._id?.toString() || mediaItem._id,
@@ -201,16 +192,79 @@ export async function getMediaMetadata(mediaItem: any): Promise<MediaMetadata> {
             comments_count: 0
         },
         created_at: mediaItem.created_at,
-        responsive_urls: await getResponsiveImageUrls(mediaItem), // ← Uses cached URLs
+        responsive_urls: responsiveUrls,
     };
 }
 
 /**
- * Transform media array for API response
- * Each item gets responsive_urls from cache
+ * Transform media array for API response with batch URL generation
+ * Optimized to generate all URLs in a single batch operation
  */
 export async function transformMediaForResponse(
     mediaItems: any[]
 ): Promise<MediaMetadata[]> {
-    return Promise.all(mediaItems.map((item) => getMediaMetadata(item)));
+    if (mediaItems.length === 0) return [];
+
+    // Collect all unique public_ids for batch URL generation
+    const urlsToGenerate: Array<{ s3Key: string; expiresIn: number }> = [];
+    const seenKeys = new Set<string>();
+
+    mediaItems.forEach(item => {
+        if (item.public_id && !seenKeys.has(item.public_id)) {
+            urlsToGenerate.push({ s3Key: item.public_id, expiresIn: 3600 });
+            seenKeys.add(item.public_id);
+        }
+
+        // Also collect variant public_ids
+        if (item.image_variants) {
+            ['small', 'medium', 'large'].forEach(size => {
+                const variant = item.image_variants[size];
+                if (variant?.webp?.public_id && !seenKeys.has(variant.webp.public_id)) {
+                    urlsToGenerate.push({ s3Key: variant.webp.public_id, expiresIn: 3600 });
+                    seenKeys.add(variant.webp.public_id);
+                }
+                if (variant?.jpeg?.public_id && !seenKeys.has(variant.jpeg.public_id)) {
+                    urlsToGenerate.push({ s3Key: variant.jpeg.public_id, expiresIn: 3600 });
+                    seenKeys.add(variant.jpeg.public_id);
+                }
+            });
+        }
+    });
+
+    // Batch generate all URLs at once
+    let urlCache = new Map<string, string>();
+    if (urlsToGenerate.length > 0) {
+        try {
+            urlCache = await getCachedSignedUrlsBatch(urlsToGenerate);
+            logger.debug(`Batch generated ${urlCache.size} signed URLs for ${mediaItems.length} media items`);
+        } catch (error) {
+            logger.error('Error in batch URL generation, falling back to individual generation:', error);
+        }
+    }
+
+    // Transform each item using the cached URLs
+    return Promise.all(mediaItems.map((item) => getMediaMetadataWithCache(item, urlCache)));
+}
+
+/**
+ * Get media metadata for API response (single item)
+ * For backward compatibility
+ */
+export async function getMediaMetadata(mediaItem: any): Promise<MediaMetadata> {
+    return getMediaMetadataWithCache(mediaItem, new Map());
+}
+
+/**
+ * Get responsive image URLs for a media item (single item)
+ * For backward compatibility
+ */
+export async function getResponsiveImageUrls(
+    mediaItem: any
+): Promise<{
+    thumbnail: string | null;
+    display: string | null;
+    full: string | null;
+    original: string | null;
+}> {
+    return getResponsiveImageUrlsWithCache(mediaItem, new Map());
 }
