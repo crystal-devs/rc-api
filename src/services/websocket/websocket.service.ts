@@ -9,10 +9,22 @@ import { websocketAuthMiddleware, websocketRateLimit, websocketLogger } from '@m
 // Import our management services
 import { authenticateConnection, handleSubscription } from './management/websocket-auth.service';
 import { WebSocketHealthService } from './management/websocket-health.service';
+import { getRedisClient } from '@configs/redis.config';
+import { RedisClientType } from 'redis';
+
+export interface BulkOperationState {
+    operationId: string;
+    type: string;
+    status: 'pending' | 'in_progress' | 'completed' | 'failed';
+    progress: { completed: number; total: number; errors: number };
+    startTime: number;
+    userId: string;
+    eventId: string;
+}
 
 import type {
     ClientConnectionState,
-    AuthData,   
+    AuthData,
     StatusUpdatePayload,
     ConnectionStats,
     ConnectionHealth,
@@ -60,6 +72,7 @@ interface BulkStatusBatchPayload {
 }
 
 interface BulkProgressPayload {
+    operationId: string;
     eventId: string;
     operationType: 'status_update' | 'delete' | 'move';
     progress: {
@@ -101,13 +114,8 @@ class SimpleWebSocketService {
     private eventSubscriptions: Map<string, Set<string>> = new Map(); // eventId -> Set(socketIds)
     private clientSubscriptions: Map<string, Set<string>> = new Map(); // socketId -> Set(eventIds)
 
-    // New: Track active bulk operations for rate limiting and monitoring
-    private activeBulkOperations: Map<string, {
-        operationType: string;
-        startTime: Date;
-        totalItems: number;
-        userId: string;
-    }> = new Map();
+    private redis: RedisClientType | null = getRedisClient();
+    private readonly BULK_OP_TTL = 3600; // 1 hour
 
     constructor(httpServer: HttpServer) {
         this.io = new Server(httpServer, {
@@ -189,18 +197,84 @@ class SimpleWebSocketService {
             });
 
             // NEW: Bulk operation event handlers
-            socket.on('bulk_operation_status', (data: { operationId: string }) => {
-                const operation = this.activeBulkOperations.get(data.operationId);
-                if (operation) {
-                    socket.emit('bulk_operation_info', {
-                        operationId: data.operationId,
-                        ...operation,
-                        duration: Date.now() - operation.startTime.getTime()
-                    });
-                } else {
-                    socket.emit('bulk_operation_not_found', { operationId: data.operationId });
+            socket.on('bulk_operation_status', async (data: { operationId: string }) => {
+                if (!this.redis) return;
+
+                try {
+                    const opKey = `bulk_op:${data.operationId}`;
+                    const operationStr = await this.redis.get(opKey);
+
+                    if (operationStr) {
+                        const operation = JSON.parse(operationStr as string);
+                        socket.emit('bulk_operation_info', {
+                            operationId: data.operationId,
+                            ...operation,
+                            duration: Date.now() - operation.startTime
+                        });
+                    } else {
+                        socket.emit('bulk_operation_not_found', { operationId: data.operationId });
+                    }
+                } catch (error) {
+                    logger.error('Error fetching bulk op status:', error);
                 }
             });
+            // NEW: Subscription synchronization
+            socket.on('sync_subscriptions', async (data: { subscriptions: string[] }) => {
+                if (!socket.data?.authenticated) {
+                    logger.warn(` Unauthenticated sync attempt from ${socket.id}`);
+                    return;
+                }
+
+                try {
+                    const serverSubs = Array.from(this.clientSubscriptions.get(socket.id) || []);
+                    const clientSubs = data.subscriptions || [];
+
+                    logger.info(` Syncing subscriptions for ${socket.id}:`, {
+                        server: serverSubs,
+                        client: clientSubs
+                    });
+
+                    // Find differences
+                    const toAdd = clientSubs.filter(e => !serverSubs.includes(e));
+                    const toRemove = serverSubs.filter(e => !clientSubs.includes(e));
+
+                    // Reconcile: Add missing subscriptions
+                    for (const eventId of toAdd) {
+                        logger.info(` Adding subscription: ${eventId}`);
+                        await this.handleEventSubscription(socket, { eventId });
+                    }
+
+                    // Reconcile: Remove extra subscriptions
+                    for (const eventId of toRemove) {
+                        logger.info(` Removing subscription: ${eventId}`);
+                        await this.handleEventUnsubscription(socket, { eventId });
+                    }
+
+                    // Get final state
+                    const finalSubs = Array.from(this.clientSubscriptions.get(socket.id) || []);
+
+                    // Send confirmation
+                    socket.emit('sync_complete', {
+                        synced: finalSubs,
+                        added: toAdd,
+                        removed: toRemove,
+                        timestamp: new Date()
+                    });
+
+                    logger.info(` Sync complete for ${socket.id}:`, {
+                        synced: finalSubs.length,
+                        added: toAdd.length,
+                        removed: toRemove.length
+                    });
+
+                } catch (error: any) {
+                    logger.error(` Sync failed for ${socket.id}:`, error);
+                    socket.emit('sync_error', {
+                        message: error.message || 'Sync failed'
+                    });
+                }
+            });
+
 
             // Enhanced heartbeat handling
             socket.on('heartbeat', (data: { timestamp: number }) => {
@@ -428,15 +502,24 @@ class SimpleWebSocketService {
             const guestRoom = `guest_${eventId}`;
 
             // Create operation ID for tracking
+            // Create operation ID for tracking
             const operationId = `bulk_${eventId}_${Date.now()}`;
 
-            // Track the operation
-            this.activeBulkOperations.set(operationId, {
-                operationType: 'status_update',
-                startTime: payload.operation.timestamp,
-                totalItems: payload.operation.mediaIds.length,
-                userId: payload.operation.updatedBy.id
-            });
+            // Track the operation in Redis
+            const opState: BulkOperationState = {
+                operationId,
+                type: 'status_update',
+                status: 'completed',
+                progress: {
+                    completed: payload.operation.mediaIds.length,
+                    total: payload.operation.mediaIds.length,
+                    errors: payload.operation.summary.totalFailed
+                },
+                startTime: payload.operation.timestamp.getTime(),
+                userId: payload.operation.updatedBy.id,
+                eventId
+            };
+            await this.startBulkOperation(opState);
 
             const emitPayload = {
                 ...payload,
@@ -483,10 +566,7 @@ class SimpleWebSocketService {
                 modifiedCount: payload.operation.summary.totalModified
             });
 
-            // Clean up operation tracking after 5 minutes
-            setTimeout(() => {
-                this.activeBulkOperations.delete(operationId);
-            }, 5 * 60 * 1000);
+            // Redis TTL handles cleanup
 
         } catch (error: any) {
             logger.error('❌ Failed to emit bulk status update:', {
@@ -567,7 +647,7 @@ class SimpleWebSocketService {
                 const adminChunkPayload = {
                     type: 'bulk_individual_updates',
                     eventId,
-                    updates: chunk.map((update:any) => ({
+                    updates: chunk.map((update: any) => ({
                         ...update,
                         timestamp: update.timestamp.toISOString()
                     })),
@@ -630,10 +710,10 @@ class SimpleWebSocketService {
             };
 
             // Emit to admin room
-            this.io.to(adminRoom).emit('bulk_operation_progress', progressPayload);
+            this.io.to(adminRoom).volatile.emit('bulk_operation_progress', progressPayload);
 
             // Emit simplified progress to guest room
-            this.io.to(guestRoom).emit('bulk_operation_progress', {
+            this.io.to(guestRoom).volatile.emit('bulk_operation_progress', {
                 type: 'bulk_progress',
                 eventId,
                 operationType: payload.operationType,
@@ -654,6 +734,14 @@ class SimpleWebSocketService {
                     status: payload.status,
                     errors: payload.progress.errors
                 });
+            }
+
+            // Update Redis state
+            if (this.redis) {
+                const opKey = `bulk_op:${payload.operationId || 'unknown'}`;
+                // We assume operation exists, if not we skip (or could create)
+                // For performance, we might not want to read-modify-write every progress event
+                // So we might just set specific fields if using hash, or skip frequent updates
             }
 
         } catch (error: any) {
@@ -786,10 +874,20 @@ class SimpleWebSocketService {
         this.broadcastSubscriptionCounts(eventId);
     }
 
-    public getConnectionStats(): ConnectionStats {
+    public async getConnectionStats(): Promise<ConnectionStats> {
         const baseStats = this.healthService.getConnectionStats();
         const totalSubs = Array.from(this.eventSubscriptions.values())
             .reduce((total, subscribers) => total + subscribers.size, 0);
+
+        // Fetch active bulk operation count from Redis
+        let activeBulkOpCount = 0;
+        if (this.redis) {
+            try {
+                activeBulkOpCount = await this.redis.sCard('active_bulk_ops');
+            } catch (error) {
+                logger.error('Error fetching bulk op count:', error);
+            }
+        }
 
         return {
             totalConnections: baseStats.totalConnections,
@@ -800,7 +898,7 @@ class SimpleWebSocketService {
             averageSubscriptionsPerClient: baseStats.totalConnections > 0
                 ? totalSubs / baseStats.totalConnections
                 : 0,
-            activeBulkOperations: this.activeBulkOperations.size // NEW
+            activeBulkOperations: activeBulkOpCount
         };
     }
 
@@ -821,23 +919,57 @@ class SimpleWebSocketService {
     }
 
     // NEW: Get active bulk operations
-    public getActiveBulkOperations(): Array<{
-        operationId: string;
-        operationType: string;
-        startTime: Date;
-        totalItems: number;
-        userId: string;
-        duration: number;
-    }> {
-        const operations: any[] = [];
-        this.activeBulkOperations.forEach((operation, operationId) => {
-            operations.push({
-                operationId,
-                ...operation,
-                duration: Date.now() - operation.startTime.getTime()
-            });
-        });
-        return operations;
+    public async getActiveBulkOperations(): Promise<Array<BulkOperationState>> {
+        if (!this.redis) return [];
+
+        try {
+            const activeOps = await this.redis.sMembers('active_bulk_ops');
+            const operations: BulkOperationState[] = [];
+
+            for (const opId of activeOps) {
+                const opData = await this.redis.get(`bulk_op:${opId}`);
+                if (opData) {
+                    const op = JSON.parse(opData as string);
+                    operations.push({
+                        ...op,
+                        duration: Date.now() - op.startTime
+                    });
+                }
+            }
+            return operations;
+        } catch (error) {
+            logger.error('Error fetching active bulk ops:', error);
+            return [];
+        }
+    }
+
+    public async startBulkOperation(op: BulkOperationState): Promise<void> {
+        if (!this.redis) return;
+        try {
+            const opKey = `bulk_op:${op.operationId}`;
+            await this.redis.setEx(opKey, this.BULK_OP_TTL, JSON.stringify(op));
+            await this.redis.sAdd('active_bulk_ops', op.operationId);
+        } catch (error) {
+            logger.error('Error starting bulk op:', error);
+        }
+    }
+
+    public async completeBulkOperation(operationId: string, result: any): Promise<void> {
+        if (!this.redis) return;
+        try {
+            const opKey = `bulk_op:${operationId}`;
+            const opData = await this.redis.get(opKey);
+            if (opData) {
+                const op = JSON.parse(opData as string);
+                op.status = 'completed';
+                op.progress.completed = op.progress.total;
+                op.result = result;
+                await this.redis.setEx(opKey, this.BULK_OP_TTL, JSON.stringify(op));
+            }
+            await this.redis.sRem('active_bulk_ops', operationId);
+        } catch (error) {
+            logger.error('Error completing bulk op:', error);
+        }
     }
 
     public async cleanup(): Promise<void> {
@@ -855,7 +987,7 @@ class SimpleWebSocketService {
         this.connectedClients.clear();
         this.eventSubscriptions.clear();
         this.clientSubscriptions.clear();
-        this.activeBulkOperations.clear(); // NEW
+        // this.activeBulkOperations.clear(); // Redis handles its own state
         logger.info('✅ WebSocket service cleaned up');
     }
 }

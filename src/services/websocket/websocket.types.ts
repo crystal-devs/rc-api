@@ -350,6 +350,18 @@ export interface CountEvents {
     subscription_counts: (data: RoomUserCounts) => void; // Alias for backward compatibility
 }
 
+
+// Subscription synchronization events
+export interface SyncEvents {
+    sync_subscriptions: (data: { subscriptions: string[] }) => void;
+    sync_complete: (data: {
+        synced: string[];
+        added: string[];
+        removed: string[];
+        timestamp: Date;
+    }) => void;
+}
+
 // Legacy events for backward compatibility
 export interface LegacyEvents {
     join_event: (eventId: string) => void;
@@ -379,6 +391,8 @@ export interface WebSocketEvents extends
     BulkOperationEvents, // NEW
     CountEvents,
     LegacyEvents,
+    SyncEvents, // NEW: Subscription reconciliation
+
     ServerEvents { }
 
 // Event subscription validation interface
@@ -502,3 +516,4 @@ export const isBulkProgressPayload = (payload: any): payload is BulkProgressPayl
            payload?.progress && 
            typeof payload.progress.percentage === 'number';
 };
+
