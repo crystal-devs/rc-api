@@ -97,7 +97,8 @@ app.use(`/api/${VERSION}/event`, eventRouter);
 app.use(`/api/${VERSION}/album`, albumRouter);
 app.use(`/api/${VERSION}/media`, mediaRouter);
 app.use(`/api/${VERSION}/user`, userRouter);
-app.use(`/api/${VERSION}/token`, shareTokenRouter);
+app.use(`/api/${VERSION}/share`, shareTokenRouter);  // Primary semantic route
+app.use(`/api/${VERSION}/token`, shareTokenRouter);  // Legacy support
 app.use(`/api/${VERSION}/photo-wall`, photoWallRouter);
 app.use(`/api/${VERSION}/upload-queue`, uploadQueueRouter);
 app.use(`/api/${VERSION}/guest-sessions`, guestRouter);

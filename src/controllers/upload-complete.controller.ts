@@ -102,6 +102,7 @@ export const uploadCompleteController = async (
         last_updated: new Date(),
       },
       approval: approvalResult,
+      approval_status: approvalResult.status === 'approved',
       uploader_type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
       created_at: new Date(),
       updated_at: new Date(),
@@ -120,6 +121,8 @@ export const uploadCompleteController = async (
       originalUrl,
       fileName: originalFileName,
       status: 'uploaded',
+      approval: savedMedia.approval,
+      approval_status: savedMedia.approval?.status === 'approved' || savedMedia.approval?.status === 'auto_approved',
       timestamp: new Date(),
       uploader: {
         type: media.uploader_type,
@@ -136,15 +139,21 @@ export const uploadCompleteController = async (
     logger.info(`WebSocket 'photo-uploading' emitted for event ${eventId}`);
 
     // ────────────────────── RESPONSE ──────────────────────
+    const responseData = {
+      mediaId: savedMedia._id.toString(),
+      originalUrl,
+      upload_id,
+      status: 'uploaded',
+      approval: savedMedia.approval,
+      approval_status: savedMedia.approval?.status === 'approved' || savedMedia.approval?.status === 'auto_approved',
+    };
+
+    console.log('🔍 UPLOAD-COMPLETE RESPONSE DATA:', JSON.stringify(responseData, null, 2));
+
     return res.status(200).json({
       status: true,
       message: 'Upload completed',
-      data: {
-        mediaId: savedMedia._id.toString(),
-        originalUrl,
-        upload_id,
-        status: 'uploaded',
-      },
+      data: responseData,
     });
   } catch (error: any) {
     logger.error('Upload complete failed:', error);
@@ -161,13 +170,36 @@ const validatePermissionsAndGetApproval = async (eventId: string, userId: string
     .select('permissions created_by')
     .lean();
 
-  console.log(event, userId, eventId, 'Event from validatePermissionsAndGetApproval');
   if (!event) {
     throw new Error('Event not found');
   }
-  if (event.created_by.toString() === userId.toString()) {
-    return { status: 'approved', auto_approval_reason: 'authenticated_user', approved_by: userId, approved_at: new Date() };
+
+  const creatorId = event.created_by?.toString();
+  const uploaderId = userId?.toString();
+
+  logger.info('🔍 Media Upload Permission Check:', {
+    eventId,
+    creatorId,
+    uploaderId,
+    isMatch: creatorId === uploaderId
+  });
+
+  // Auto-approve if uploader is the event creator
+  if (creatorId && uploaderId && creatorId === uploaderId) {
+    logger.info(`✅ Auto-approving upload for event creator: ${uploaderId}`);
+    return {
+      status: 'approved',
+      auto_approval_reason: 'event_creator',
+      approved_by: userId,
+      approved_at: new Date()
+    };
   }
 
-  return { status: 'pending', auto_approval_reason: null, approved_by: null, approved_at: null };
+  logger.info(`⏳ Setting upload status to pending for user: ${uploaderId}`);
+  return {
+    status: 'pending',
+    auto_approval_reason: null,
+    approved_by: null,
+    approved_at: null
+  };
 };

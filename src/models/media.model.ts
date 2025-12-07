@@ -108,7 +108,7 @@ const approvalSchema = new mongoose.Schema({
     rejection_reason: { type: String, default: "" },
     auto_approval_reason: {
         type: String,
-        enum: ['authenticated_user', 'guest_auto_approve', 'ai_safe', 'host_setting'],
+        enum: ['authenticated_user', 'guest_auto_approve', 'ai_safe', 'host_setting', 'event_creator'],
         default: null
     }
 }, { _id: false });

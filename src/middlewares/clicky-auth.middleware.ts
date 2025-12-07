@@ -11,7 +11,7 @@ export const authMiddleware = async (req: injectedRequest, res: Response, next: 
         next();
         return;
     }
-    
+
     const authHeader = req.headers.authorization;
 
     if (!authHeader) {
@@ -38,7 +38,7 @@ export const authMiddleware = async (req: injectedRequest, res: Response, next: 
         console.log(user);
         next(); // Pass control to the next middleware
     } catch (error) {
-        res.status(403).json({ message: "Invalid or expired token" });
+        res.status(401).json({ message: "Invalid or expired token" });
         return; // Ensure the function returns void
     }
 }
