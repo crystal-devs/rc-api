@@ -66,7 +66,7 @@ export const registerController: RequestHandler = async (req, res, next) => {
         const response = await loginService.login({
             email,
             name,
-            provider: 'email',
+            provider: req.body.provider || 'email',
             profile_pic: ""
         });
 
@@ -229,6 +229,7 @@ export const loginController: RequestHandler = async (req, res, next) => {
             name: loginName,
             profile_pic: loginProfilePic,
             provider: loginProvider,
+            password: password
         });
 
         res.status(200).json(response);
@@ -406,7 +407,7 @@ export const googleAuthCallbackController: RequestHandler = async (req, res, nex
 export const verifyUserController: RequestHandler = async (req, res, next) => {
     try {
         // if album id , then register the user as a viewer against the album
-          res.status(200).json({
+        res.status(200).json({
             status: true,
             message: "User verified successfully",
         });

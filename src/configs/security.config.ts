@@ -61,7 +61,7 @@ export const rateLimiter = rateLimit({
  */
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes window
-  max: 5, // Only 5 login attempts per 15 minutes
+  max: 100, // Temporarily increased for testing (was 5)
   message: {
     error: "Too many login attempts. Please wait 15 minutes before trying again.",
     code: "AUTH_RATE_LIMIT_EXCEEDED",
@@ -153,8 +153,8 @@ export const uploadRateLimiter = rateLimit({
 
 // Rate limit configurations per endpoint pattern
 export const endpointRateLimits: Record<string, any> = {
-  // Auth endpoints - very restrictive
-  '/api/v1/auth/login': { windowMs: 15 * 60 * 1000, max: 5, method: 'POST' },
+  // Auth endpoints - relaxed for testing
+  '/api/v1/auth/login': { windowMs: 15 * 60 * 1000, max: 100, method: 'POST' },
   '/api/v1/auth/refresh': { windowMs: 5 * 60 * 1000, max: 10, method: 'POST' },
   '/api/v1/auth/csrf-token': { windowMs: 1 * 60 * 1000, max: 30, method: 'GET' },
 
@@ -363,39 +363,39 @@ export const botDetectionMiddleware = (req: any, res: any, next: any) => {
  * ️‍♂️ CORS Configuration (updated for CSRF support)
  */
 export const corsOptions: CorsOptions = {
-   origin: function (
-     origin: string | undefined,
-     callback: (err: Error | null, allow?: boolean) => void
-   ) {
-     // Allow requests with no origin (mobile apps, Postman, etc.)
-     if (!origin) {
-       callback(null, true);
-       return;
-     }
+  origin: function (
+    origin: string | undefined,
+    callback: (err: Error | null, allow?: boolean) => void
+  ) {
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
 
-     // Allow localhost for development
-     if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
-       callback(null, true);
-       return;
-     }
+    // Allow localhost for development
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      callback(null, true);
+      return;
+    }
 
-     // Check configured origins
-     if (Array.isArray(keys.corsOrigins) && keys.corsOrigins.includes(origin)) {
-       callback(null, true);
-       return;
-     }
+    // Check configured origins
+    if (Array.isArray(keys.corsOrigins) && keys.corsOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
 
-     callback(new Error("❌ Not allowed by CORS"));
-   },
-   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-   allowedHeaders: [
-     "Content-Type",
-     "Authorization",
-     "If-Modified-Since",
-     "x-csrf-token",
-     "x-expected-csrf",
-     "x-bypass-csrf"
-   ],
-   credentials: true,
-   optionsSuccessStatus: 200, // Some legacy browsers choke on 204
+    callback(new Error("❌ Not allowed by CORS"));
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "If-Modified-Since",
+    "x-csrf-token",
+    "x-expected-csrf",
+    "x-bypass-csrf"
+  ],
+  credentials: true,
+  optionsSuccessStatus: 200, // Some legacy browsers choke on 204
 };

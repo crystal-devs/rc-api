@@ -5,11 +5,24 @@ import { User, UserType } from "@models/user.model";
 import { logger } from "@utils/logger";
 import type { ServiceResponse, UserProfile } from './user.types';
 
+import { userCacheService } from '@services/cache/user-cache.service';
+
 export const getUserByIdService = async (user_id: string): Promise<UserType> => {
+    // 1. Check cache
+    const cachedUser = await userCacheService.getUser(user_id);
+    if (cachedUser) {
+        return cachedUser;
+    }
+
+    // 2. Fetch from DB
     const user = await User.findById(user_id);
     if (!user) {
         throw new Error("User not found");
     }
+
+    // 3. Cache result
+    await userCacheService.setUser(user);
+
     return user;
 };
 

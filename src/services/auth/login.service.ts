@@ -12,19 +12,21 @@ import { userInitializationService } from './user-initialization.service';
 
 import type { LoginData, LoginResult } from './auth.types';
 
+import bcrypt from 'bcryptjs';
+
 export class LoginService {
     /**
      * 🚀 MAIN LOGIN/SIGNUP FLOW
      */
     async login(loginData: LoginData): Promise<LoginResult> {
         try {
-            const { email, phone_number, name, profile_pic, provider, country_code } = loginData;
+            const { email, phone_number, name, profile_pic, provider, country_code, password } = loginData;
 
             // Build query to find existing user
             const query: any = {};
             if (email) query.email = email;
             if (phone_number) query.phone_number = phone_number;
-            
+
             // Find existing user
             let user = await User.findOne(query);
             let isNewUser = false;
@@ -44,16 +46,60 @@ export class LoginService {
                 await user.save();
             }
 
+            if (user) {
+                // If user exists and provider is email, verify password
+                if (provider === 'email') {
+                    if (!user.password) {
+                        // Legacy user without password or social user trying to login via email
+                        // For security, we might want to prevent this or force password set
+                        // For now, if no password set, we can't verify, so deny or allow (implementation choice).
+                        // Plan said "Verify password". If missin, it's an issue.
+                        // However, if user registered via social, they have no password.
+                        // If they try to login via email, they should set one.
+                        // Let's assume strict check: if email provider, password MUST match.
+                        // If user has no password (social account), they cannot login via email/password directly without reset.
+                        throw new Error("Invalid credentials");
+                    }
+
+                    if (!password) {
+                        throw new Error("Password is required");
+                    }
+
+                    const isMatch = await bcrypt.compare(password, user.password);
+                    if (!isMatch) {
+                        // Increment failed attempts
+                        user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
+                        user.lastFailedLoginAt = new Date();
+
+                        // Lockout policy: 5 failed attempts = 15 min lockout
+                        if (user.failedLoginAttempts >= 5) {
+                            user.lockoutUntil = new Date(Date.now() + 15 * 60 * 1000);
+                            await user.save();
+                            throw new Error("Account is temporarily locked due to too many failed attempts. Try again in 15 minutes.");
+                        }
+
+                        await user.save();
+                        throw new Error("Invalid credentials");
+                    }
+                }
+            }
+
             if (!user) {
                 // **SIGNUP FLOW**: Create new user
                 logger.info(`Creating new user: ${email || phone_number}`);
-                
+
+                let hashedPassword = undefined;
+                if (provider === 'email' && password) {
+                    hashedPassword = await bcrypt.hash(password, 10);
+                }
+
                 const newUserData = {
                     email,
                     phone_number,
                     country_code,
                     role_id: userInitializationService.getDefaultRoleId(),
                     provider,
+                    password: hashedPassword,
                     name: name || "Clicky",
                     profile_pic: profile_pic || "",
                     preferences: userInitializationService.createDefaultPreferences(),
@@ -67,7 +113,7 @@ export class LoginService {
 
             // Initialize user data (subscription and usage)
             const initResult = await userInitializationService.initializeUserData(user._id.toString());
-            
+
             // Generate JWT tokens
             const token = tokenService.generateToken(
                 user._id.toString(),
@@ -77,7 +123,7 @@ export class LoginService {
 
             const refreshToken = tokenService.generateRefreshToken(user._id.toString());
 
-            // Reset failed login attempts on successful login and update security tracking
+            // Reset failed login attempts on successful login
             if (user.failedLoginAttempts > 0) {
                 user.failedLoginAttempts = 0;
                 user.lockoutUntil = null;
@@ -126,7 +172,7 @@ export class LoginService {
         const query: any = {};
         if (email) query.email = email;
         if (phone) query.phone_number = phone;
-        
+
         return await User.findOne(query).lean();
     }
 

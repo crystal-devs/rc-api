@@ -9,6 +9,7 @@ export interface LoginData {
     name?: string;
     profile_pic?: string;
     country_code?: string;
+    password?: string;
 }
 
 export interface LoginResult {

@@ -35,7 +35,7 @@ export const authMiddleware = async (req: injectedRequest, res: Response, next: 
         }
         const user = await getUserByIdService(decoded.user_id);
         req.user = user;
-        console.log(user);
+
         next(); // Pass control to the next middleware
     } catch (error) {
         res.status(401).json({ message: "Invalid or expired token" });
