@@ -234,6 +234,16 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             return;
         }
 
+        // Block guest users
+        if ((req.user as any)?.role === 'guest') {
+            res.status(403).json({
+                status: false,
+                message: "Guests are not allowed to update events",
+                data: null
+            });
+            return;
+        }
+
         // Validate update permissions
         const hasPermission = await checkUpdatePermission(event_id, userId);
         if (!hasPermission) {
@@ -296,6 +306,16 @@ export const deleteEventController = async (req: injectedRequest, res: Response,
 
         if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
             throw new Error("Valid event ID is required");
+        }
+
+        // Block guest users
+        if ((req.user as any)?.role === 'guest') {
+            res.status(403).json({
+                status: false,
+                message: "Guests are not allowed to delete events",
+                data: null
+            });
+            return;
         }
 
         const response = await deleteEventService(event_id, userId);

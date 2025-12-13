@@ -58,10 +58,16 @@ export const getUserEventsService = async (
                     preserveNullAndEmptyArrays: false
                 }
             },
-            // Add user_role from EventParticipant
+            // Add user_role from EventParticipant or Creator status
             {
                 $addFields: {
-                    'event.user_role': '$role'
+                    'event.user_role': {
+                        $cond: {
+                            if: { $eq: ["$event.created_by", new mongoose.Types.ObjectId(userId)] },
+                            then: "creator",
+                            else: "$role"
+                        }
+                    }
                 }
             },
             // Replace root with event document + user_role
@@ -74,8 +80,21 @@ export const getUserEventsService = async (
 
         // Apply filters on event fields
         const matchConditions = buildMatchConditions(status, privacy, template, search, tags);
+
+        // Security Check: Filter out private events where user is NOT a creator or co-host
+        // If the event is private, ONLY creators and co-hosts should see it.
+        // Guests and Viewers (even if they have a participant record) should NOT see it if it's strictly private.
+        const securityMatch = {
+            $or: [
+                { 'user_role': { $in: ['creator', 'co_host'] } },
+                { 'visibility': { $ne: 'private' } }
+            ]
+        };
+
         if (Object.keys(matchConditions).length > 0) {
-            pipeline.push({ $match: matchConditions });
+            pipeline.push({ $match: { $and: [matchConditions, securityMatch] } });
+        } else {
+            pipeline.push({ $match: securityMatch });
         }
 
         // Add sorting
@@ -423,14 +442,20 @@ const buildEventDetailPipeline = (matchCondition: any, userId: string): mongoose
             }
         },
 
-        // Add user_role from participation
+        // Add user_role from participation or creator status
         {
             $addFields: {
                 user_role: {
-                    $ifNull: [
-                        { $arrayElemAt: ["$user_participation.role", 0] },
-                        "viewer" // Default role if no participation found
-                    ]
+                    $cond: {
+                        if: { $eq: ["$created_by", new mongoose.Types.ObjectId(userId)] },
+                        then: "creator",
+                        else: {
+                            $ifNull: [
+                                { $arrayElemAt: ["$user_participation.role", 0] },
+                                "viewer" // Default role if no participation found
+                            ]
+                        }
+                    }
                 },
                 user_permissions: {
                     $ifNull: [
@@ -447,9 +472,20 @@ const buildEventDetailPipeline = (matchCondition: any, userId: string): mongoose
                 $or: [
                     // User is creator
                     { created_by: new mongoose.Types.ObjectId(userId) },
-                    // User has active/pending participation
-                    { "user_participation.0": { $exists: true } },
-                    // Event has public visibility with active share settings
+
+                    // User is co-host (active/pending) - Explicitly checking role from user_participation
+                    {
+                        "user_participation.role": "co_host",
+                        "user_participation.status": { $in: ["active", "pending"] }
+                    },
+
+                    // User is guest/viewer AND event is NOT private
+                    {
+                        "user_participation.0": { $exists: true }, // Has participation
+                        "visibility": { $ne: "private" }    // But must not be private
+                    },
+
+                    // Event has public visibility (anyone with link) - standard public access
                     {
                         $and: [
                             { visibility: "anyone_with_link" },

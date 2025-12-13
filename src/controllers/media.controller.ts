@@ -199,6 +199,18 @@ export const updateMediaStatusController: RequestHandler = async (
             return;
         }
 
+        // Block guest users
+        if (req.user?.role === 'guest') {
+            res.status(403).json({
+                status: false,
+                code: 403,
+                message: 'Guest users are not allowed to update media status',
+                data: null,
+                error: { message: 'Permission denied' }
+            });
+            return;
+        }
+
         if (!status) {
             res.status(400).json({
                 status: false,
@@ -528,6 +540,19 @@ export const deleteMediaController: RequestHandler = async (
                 message: "Invalid media ID",
                 data: null,
                 error: { message: "A valid media ID is required" },
+                other: null
+            });
+            return;
+        }
+
+        // Block guest users
+        if (req.user?.role === 'guest') {
+            res.status(403).json({
+                status: false,
+                code: 403,
+                message: "Guest users are not allowed to delete media",
+                data: null,
+                error: { message: "Permission denied" },
                 other: null
             });
             return;
