@@ -60,12 +60,12 @@ export const rateLimiter = rateLimit({
  * - Prevents brute force attacks
  */
 export const authRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes window
-  max: 100, // Temporarily increased for testing (was 5)
+  windowMs: 1 * 60 * 1000, // 1 minute window (relaxed)
+  max: 200, // 200/min for dev (prev was 15m/100)
   message: {
     error: "Too many login attempts. Please wait 15 minutes before trying again.",
     code: "AUTH_RATE_LIMIT_EXCEEDED",
-    retryAfter: 900 // 15 minutes in seconds
+    retryAfter: 60 // 1 minute
   },
   headers: true,
   standardHeaders: true,

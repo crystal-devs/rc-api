@@ -1,8 +1,7 @@
-import jwt from "jsonwebtoken";
 import { Response, NextFunction } from "express";
-import { keys } from "@configs/dotenv.config";
 import { injectedRequest } from "types/injected-types";
 import { getUserByIdService } from "@services/user";
+import { tokenService } from "@services/auth";
 
 export const authMiddleware = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     console.log('===== AUTH MIDDLEWARE =====');
@@ -28,18 +27,19 @@ export const authMiddleware = async (req: injectedRequest, res: Response, next: 
     }
 
     try {
-        const decoded: { user_id?: string } = jwt.verify(token, keys.jwtSecret as string) as { user_id?: string };
-        if (!decoded || !decoded.user_id) {
-            res.status(401).json({ message: "Invalid token" });
-            return; // Ensure the function returns void
+        const tokenResult = await tokenService.verifyToken(token);
+        if (!tokenResult.valid || !tokenResult.user) {
+            res.status(401).json({ message: tokenResult.error || "Invalid token" });
+            return;
         }
-        const user = await getUserByIdService(decoded.user_id);
+
+        const user = await getUserByIdService(tokenResult.user.id);
         req.user = user;
 
-        next(); // Pass control to the next middleware
+        next();
     } catch (error) {
-        res.status(401).json({ message: "Invalid or expired token" });
-        return; // Ensure the function returns void
+        res.status(401).json({ message: "Authentication failed" });
+        return;
     }
 }
 

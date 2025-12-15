@@ -2,19 +2,27 @@ import mongoose, { InferSchemaType } from "mongoose";
 import { MODEL_NAMES } from "./names";
 
 const refreshSessionSchema = new mongoose.Schema({
+    // Session identifier (UUID, not token-related)
+    sessionId: {
+        type: String,
+        required: true,
+        unique: true,
+        index: true
+    },
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: MODEL_NAMES.USER,
-        required: true
-    },
-    tokenHash: {
-        type: String,
         required: true,
-        unique: true
+        index: true
     },
-    deviceId: {
-        type: String, // Optional: User-Agent or Fingerprint
-        default: 'unknown'
+    // Device information
+    deviceFingerprint: {
+        type: String,
+        default: null
+    },
+    deviceName: {
+        type: String,
+        default: 'Unknown Device'
     },
     ip: {
         type: String,
@@ -24,18 +32,33 @@ const refreshSessionSchema = new mongoose.Schema({
         type: String,
         default: 'unknown'
     },
+    location: {
+        country: String,
+        region: String,
+        city: String,
+        timezone: String
+    },
+    // Session status
+    isActive: {
+        type: Boolean,
+        default: true,
+        index: true
+    },
     expiresAt: {
         type: Date,
         required: true,
         index: { expires: 0 } // TTL Index: Auto-delete document when expiresAt is reached
     },
-    createdByIp: {
-        type: String
+    lastActivityAt: {
+        type: Date,
+        default: Date.now,
+        index: true
     },
-    isRevoked: {
-        type: Boolean,
-        default: false
-    }
+    // Audit fields
+    revokedAt: Date,
+    revocationReason: String,
+    rotatedAt: Date,
+    rotatedToSessionId: String
 }, { timestamps: true });
 
 // Check if model exists before compiling to avoid OverwriteModelError in dev HMR

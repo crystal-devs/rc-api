@@ -10,6 +10,7 @@ import { bytesToMB } from '@utils/file.util';
 // Import shared services
 import { queueImageProcessing } from '../upload/shared/queue-processing.service';
 import { validateGuestFile, validateShareToken } from './guest-validation.service';
+import { GuestSessionService } from './guest-session.service';
 
 import type { GuestUploadResult, GuestUploadInfo } from './guest.types';
 import { getOrCreateDefaultAlbum } from '@services/album';
@@ -36,7 +37,29 @@ export const uploadGuestMedia = async (
         // 1. Validate share token and permissions
         const event = await validateShareToken(shareToken);
 
-        // 2. Validate file
+        // 2. Check upload rate limits for guest sessions
+        if (guestInfo.sessionId && !authenticatedUserId) {
+            const fileSizeMB = bytesToMB(file.size);
+            const rateLimitCheck = await GuestSessionService.checkUploadRateLimit(
+                guestInfo.sessionId,
+                fileSizeMB
+            );
+
+            if (!rateLimitCheck.allowed) {
+                logger.warn('Guest upload rate limit exceeded', {
+                    sessionId: guestInfo.sessionId.substring(0, 8) + '...',
+                    reason: rateLimitCheck.reason,
+                    currentStats: rateLimitCheck.currentStats
+                });
+
+                return {
+                    success: false,
+                    error: rateLimitCheck.reason || 'Upload limit exceeded'
+                };
+            }
+        }
+
+        // 3. Validate file
         const fileValidation = await validateGuestFile(file);
         if (!fileValidation.valid) {
             return {
