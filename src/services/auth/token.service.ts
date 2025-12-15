@@ -2,8 +2,10 @@
 // ====================================
 
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import { keys } from "@configs/dotenv.config";
 import { logger } from "@utils/logger";
+import { RefreshSession } from "@models/refresh-session.model";
 import type { TokenPayload, AuthValidationResult } from './auth.types';
 
 export class TokenService {
@@ -19,12 +21,12 @@ export class TokenService {
             };
 
             const token = jwt.sign(payload, keys.jwtSecret as string, {
-                expiresIn: "1h", // Reduced from 50 days to 1 hour for security
+                expiresIn: "15m", // Short-lived: 15 minutes
                 issuer: 'roseclick',
                 audience: 'roseclick-users'
             });
 
-            logger.debug(`Access token generated for user: ${userId}`);
+            // logger.debug(`Access token generated for user: ${userId}`);
             return token;
         } catch (error) {
             logger.error('Error generating access token:', error);
@@ -33,24 +35,20 @@ export class TokenService {
     }
 
     /**
-     * Generate refresh token (long-lived, used to get new access tokens)
+     * Generate opaque refresh token (long-lived stateful)
      */
-    generateRefreshToken(userId: string): string {
+    generateRefreshToken(): { token: string; hash: string; expiresAt: Date } {
         try {
-            const payload = {
-                user_id: userId,
-                type: 'refresh',
-                tokenId: this.generateTokenId() // Unique identifier for token tracking
-            };
+            // Generate random opaque string
+            const token = crypto.randomBytes(40).toString('hex');
 
-            const refreshToken = jwt.sign(payload, (keys.jwtRefreshSecret as string) || (keys.jwtSecret as string), {
-                expiresIn: "30d", // 30 days for refresh tokens
-                issuer: 'roseclick',
-                audience: 'roseclick-refresh'
-            });
+            // Hash it for storage
+            const hash = crypto.createHash('sha256').update(token).digest('hex');
 
-            logger.debug(`Refresh token generated for user: ${userId}`);
-            return refreshToken;
+            // Set expiry (7 days)
+            const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+            return { token, hash, expiresAt };
         } catch (error) {
             logger.error('Error generating refresh token:', error);
             throw new Error('Failed to generate refresh token');
@@ -58,19 +56,35 @@ export class TokenService {
     }
 
     /**
-     * Generate unique token ID for tracking
+     * Create a new refresh session in the database
      */
-    private generateTokenId(): string {
-        return require('crypto').randomBytes(16).toString('hex');
+    async createRefreshSession(userId: string, ip: string, userAgent: string, deviceId?: string): Promise<{ token: string; expiresAt: Date }> {
+        try {
+            const { token, hash, expiresAt } = this.generateRefreshToken();
+
+            await RefreshSession.create({
+                userId,
+                tokenHash: hash,
+                ip,
+                userAgent,
+                deviceId: deviceId || 'unknown',
+                expiresAt
+            });
+
+            return { token, expiresAt };
+        } catch (error) {
+            logger.error('Error creating refresh session:', error);
+            throw new Error('Failed to create refresh session');
+        }
     }
 
     /**
-     * Verify and decode JWT token
+     * Verify and decode JWT Access Token
      */
     verifyToken(token: string): AuthValidationResult {
         try {
             const decoded = jwt.verify(token, keys.jwtSecret as string) as TokenPayload;
-            
+
             return {
                 valid: true,
                 user: {
@@ -80,8 +94,8 @@ export class TokenService {
                 }
             };
         } catch (error: any) {
-            logger.warn(`Token verification failed: ${error.message}`);
-            
+            // logger.warn(`Token verification failed: ${error.message}`);
+
             let errorMessage = 'Invalid token';
             if (error.name === 'TokenExpiredError') {
                 errorMessage = 'Token has expired';
@@ -97,67 +111,85 @@ export class TokenService {
     }
 
     /**
-     * Refresh access token using refresh token
+     * Validate Opaque Refresh Token against Database
      */
-    refreshToken(refreshToken: string): { accessToken: string; refreshToken?: string } {
+    async validateRefreshToken(token: string): Promise<{ valid: boolean; userId?: string; sessionId?: string; error?: string }> {
         try {
-            // Verify refresh token
-            const decoded = jwt.verify(refreshToken, (keys.jwtRefreshSecret as string) || (keys.jwtSecret as string)) as any;
+            const hash = crypto.createHash('sha256').update(token).digest('hex');
 
-            if (!decoded || decoded.type !== 'refresh' || !decoded.user_id) {
-                throw new Error('Invalid refresh token');
+            const session = await RefreshSession.findOne({ tokenHash: hash }).populate('userId');
+
+            if (!session) {
+                logger.warn('Refresh session not found for hash', { token_partial: token.substring(0, 10) + '...' });
+                return { valid: false, error: 'Invalid refresh token' };
             }
 
-            // Generate new access token
-            const newAccessToken = this.generateToken(
-                decoded.user_id,
-                decoded.email,
-                decoded.provider
-            );
+            if (session.expiresAt < new Date()) {
+                logger.warn('Refresh session expired', { sessionId: session._id, expiresAt: session.expiresAt });
+                await RefreshSession.deleteOne({ _id: session._id }); // Cleanup
+                return { valid: false, error: 'Refresh token expired' };
+            }
 
-            // Optionally rotate refresh token for additional security
-            const newRefreshToken = this.generateRefreshToken(decoded.user_id);
-
-            logger.debug(`Tokens refreshed for user: ${decoded.user_id}`);
-
-            return {
-                accessToken: newAccessToken,
-                refreshToken: newRefreshToken // Send new refresh token to client
-            };
-        } catch (error) {
-            logger.error('Token refresh error:', error);
-            throw new Error('Failed to refresh token');
-        }
-    }
-
-    /**
-     * Verify refresh token specifically
-     */
-    verifyRefreshToken(token: string): { valid: boolean; userId?: string; error?: string } {
-        try {
-            const decoded = jwt.verify(token, (keys.jwtRefreshSecret as string) || (keys.jwtSecret as string)) as any;
-
-            if (decoded.type !== 'refresh') {
-                return { valid: false, error: 'Not a refresh token' };
+            if (session.isRevoked) {
+                logger.warn('Refresh session revoked', { sessionId: session._id });
+                await RefreshSession.deleteOne({ _id: session._id }); // Cleanup
+                return { valid: false, error: 'Refresh token revoked' };
             }
 
             return {
                 valid: true,
-                userId: decoded.user_id
+                userId: (session.userId as any)._id.toString(),
+                sessionId: session._id.toString()
             };
         } catch (error: any) {
-            logger.warn(`Refresh token verification failed: ${error.message}`);
+            logger.error(`Refresh verification error: ${error.message}`);
+            return { valid: false, error: `Token validation exception: ${error.message}` };
+        }
+    }
 
-            let errorMessage = 'Invalid refresh token';
-            if (error.name === 'TokenExpiredError') {
-                errorMessage = 'Refresh token has expired';
+    /**
+     * Rotate Refresh Token (Revoke old, Create new)
+     */
+    async rotateRefreshToken(oldToken: string, ip: string, userAgent: string): Promise<{ token: string; expiresAt: Date; userId: string } | null> {
+        try {
+            const hash = crypto.createHash('sha256').update(oldToken).digest('hex');
+
+            // Find and delete old session (Atomic rotation)
+            const session = await RefreshSession.findOneAndDelete({ tokenHash: hash });
+
+            if (!session) {
+                // Potential reuse attack detection could go here
+                return null;
             }
 
-            return {
-                valid: false,
-                error: errorMessage
-            };
+            // Create new session
+            const { token, expiresAt } = await this.createRefreshSession(
+                (session.userId as any).toString(),
+                ip,
+                userAgent,
+                session.deviceId
+            );
+
+            return { token, expiresAt, userId: (session.userId as any).toString() };
+        } catch (error) {
+            logger.error('Token rotation error:', error);
+            throw error;
         }
+    }
+
+    /**
+     * Revoke specifically one token
+     */
+    async revokeToken(token: string): Promise<void> {
+        const hash = crypto.createHash('sha256').update(token).digest('hex');
+        await RefreshSession.deleteOne({ tokenHash: hash });
+    }
+
+    /**
+     * Revoke all sessions for a user
+     */
+    async revokeAllUserSessions(userId: string): Promise<void> {
+        await RefreshSession.deleteMany({ userId });
     }
 
     /**

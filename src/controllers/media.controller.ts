@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 import { logger } from "@utils/logger";
 import { sendResponse } from "@utils/express.util";
 import { Event } from "@models/event.model";
+import { EventParticipant } from "@models/event-participants.model";
 import { Media } from "@models/media.model";
 import { getWebSocketService } from "@services/websocket/websocket.service";
 import {
@@ -49,6 +50,7 @@ export const getMediaByEventController: RequestHandler = async (
     try {
         const { eventId } = req.params;
         const { page, limit, status, quality } = req.query;
+        const userId = req.user?._id?.toString();
 
         if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
             res.status(400).json({
@@ -59,6 +61,44 @@ export const getMediaByEventController: RequestHandler = async (
                 error: { message: 'A valid event ID is required' }
             });
             return;
+        }
+
+        // Check if user is creator or co-host
+        const event = await Event.findById(eventId).select('created_by').lean();
+        if (!event) {
+            res.status(404).json({
+                status: false,
+                code: 404,
+                message: 'Event not found',
+                data: null,
+                error: { message: 'Event not found' }
+            });
+            return;
+        }
+
+        let isPrivilegedUser = false;
+        if (userId) {
+            // Check if user is creator
+            if (event.created_by.toString() === userId) {
+                isPrivilegedUser = true;
+            } else {
+                // Check if user is co-host
+                const participant = await EventParticipant.findOne({
+                    user_id: new mongoose.Types.ObjectId(userId),
+                    event_id: new mongoose.Types.ObjectId(eventId),
+                    role: 'co_host',
+                    status: 'active'
+                }).lean();
+                if (participant) {
+                    isPrivilegedUser = true;
+                }
+            }
+        }
+
+        // If not privileged user, force status to approved
+        let effectiveStatus = status as string;
+        if (!isPrivilegedUser) {
+            effectiveStatus = 'approved';
         }
 
         const qualityValue = quality as string;
@@ -72,7 +112,7 @@ export const getMediaByEventController: RequestHandler = async (
         const options: MediaQueryOptions = {
             page: parseInt(page as string) || 1,
             limit: parseInt(limit as string) || 20,
-            status: status as string,
+            status: effectiveStatus,
             quality: validatedQuality
         };
 

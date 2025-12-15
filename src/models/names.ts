@@ -14,7 +14,8 @@ export const MODEL_NAMES = {
     PHOTO_WALL: "photo_wall",
     BULK_DOWNLOAD: 'bulk_downloads',
     GUEST_SESSION: 'guest_sessions',
-    EVENT_INVITATION: 'event_invitation'
+    EVENT_INVITATION: 'event_invitation',
+    REFRESH_SESSION: 'refresh_sessions'
 } as const;
 
 export const getModelName = (model: keyof typeof MODEL_NAMES) => MODEL_NAMES[model];

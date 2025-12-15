@@ -29,7 +29,7 @@ const userSchema = new mongoose.Schema({
     },
     provider: {
         type: String,
-        enum: ["google", "apple", "instagram", "facebook"]
+        enum: ["google", "apple", "instagram", "facebook", "email"]
     },
     country_code: {
         type: String,
@@ -80,7 +80,7 @@ const userSchema = new mongoose.Schema({
         type: Number,
         default: 0
     }
-}, {timestamps: true})
+}, { timestamps: true })
 
 // 📊 Essential User Indexes for Authentication & Performance
 userSchema.index({ email: 1 }, { unique: true, sparse: true }); // Login queries

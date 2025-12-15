@@ -18,7 +18,7 @@ export class LoginService {
     /**
      * 🚀 MAIN LOGIN/SIGNUP FLOW
      */
-    async login(loginData: LoginData): Promise<LoginResult> {
+    async login(loginData: LoginData, ip: string = 'unknown', userAgent: string = 'unknown'): Promise<LoginResult> {
         try {
             const { email, phone_number, name, profile_pic, provider, country_code, password } = loginData;
 
@@ -50,14 +50,6 @@ export class LoginService {
                 // If user exists and provider is email, verify password
                 if (provider === 'email') {
                     if (!user.password) {
-                        // Legacy user without password or social user trying to login via email
-                        // For security, we might want to prevent this or force password set
-                        // For now, if no password set, we can't verify, so deny or allow (implementation choice).
-                        // Plan said "Verify password". If missin, it's an issue.
-                        // However, if user registered via social, they have no password.
-                        // If they try to login via email, they should set one.
-                        // Let's assume strict check: if email provider, password MUST match.
-                        // If user has no password (social account), they cannot login via email/password directly without reset.
                         throw new Error("Invalid credentials");
                     }
 
@@ -114,14 +106,15 @@ export class LoginService {
             // Initialize user data (subscription and usage)
             const initResult = await userInitializationService.initializeUserData(user._id.toString());
 
-            // Generate JWT tokens
+            // Generate JWT Token
             const token = tokenService.generateToken(
                 user._id.toString(),
                 user.email,
                 user.provider
             );
 
-            const refreshToken = tokenService.generateRefreshToken(user._id.toString());
+            // Generate Opaque Refresh Token & Session
+            const { token: refreshToken } = await tokenService.createRefreshSession(user._id.toString(), ip, userAgent);
 
             // Reset failed login attempts on successful login
             if (user.failedLoginAttempts > 0) {
@@ -142,7 +135,7 @@ export class LoginService {
                 refreshToken,
                 message: isNewUser ? "Signup successful" : "Login successful",
                 status: true,
-                expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // 1 hour from now
+                expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), // 15 minutes
                 user: {
                     id: user._id.toString(),
                     email: user.email,
@@ -179,17 +172,31 @@ export class LoginService {
     /**
      * 🔄 REFRESH USER TOKEN
      */
-    async refreshUserToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }> {
+    async refreshUserToken(refreshToken: string, ip: string = 'unknown', userAgent: string = 'unknown'): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }> {
         try {
-            const tokens = tokenService.refreshToken(refreshToken);
+            // Validate & Rotate Token
+            const rotationResult = await tokenService.rotateRefreshToken(refreshToken, ip, userAgent);
+
+            if (!rotationResult) {
+                throw new Error('Invalid or Expired Refresh Token');
+            }
+
+            const { token: newRefreshToken, userId } = rotationResult;
+
+            // Fetch User for Access Token Generation
+            const user = await User.findById(userId);
+            if (!user) throw new Error('User not found');
+
+            const accessToken = tokenService.generateToken(user._id.toString(), user.email, user.provider);
+
             return {
-                accessToken: tokens.accessToken,
-                refreshToken: tokens.refreshToken || refreshToken, // Return new refresh token or keep old one
-                expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() // 1 hour from now
+                accessToken,
+                refreshToken: newRefreshToken,
+                expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString() // 15 mins now
             };
         } catch (error: any) {
             logger.error('Token refresh error:', error);
-            throw new Error('Failed to refresh token');
+            throw new Error('Failed to refresh token: ' + error.message);
         }
     }
 
