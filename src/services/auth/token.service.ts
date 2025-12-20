@@ -79,6 +79,7 @@ export class TokenService {
             // Log to MongoDB asynchronously (comprehensive metadata)
             RefreshSession.create({
                 sessionId,
+                tokenHash: hash, // Store hash for potential future lookups
                 userId: new mongoose.Types.ObjectId(userId),
                 deviceFingerprint: deviceId || null,
                 deviceName: this.extractDeviceName(userAgent),

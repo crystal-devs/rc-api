@@ -69,27 +69,42 @@ export class AuditService {
    * Persist audit entry to MongoDB
    */
   private static async persistToMongoDB(entry: any): Promise<void> {
-    // Create a simple audit collection if it doesn't exist
-    const AuditLog = mongoose.model('AuditLog',
-      new mongoose.Schema({
-        eventType: String,
-        userId: String,
-        sessionId: String,
-        ip: String,
-        userAgent: String,
-        deviceFingerprint: String,
-        location: Object,
-        metadata: Object,
-        success: Boolean,
-        errorMessage: String,
-        timestamp: Date
-      }, { timestamps: true })
-    );
+    try {
+      // Check if model already exists to avoid OverwriteModelError
+      let AuditLog: mongoose.Model<any>;
+      try {
+        AuditLog = mongoose.model('AuditLog');
+      } catch (error) {
+        // Model doesn't exist, create it
+        const auditSchema = new mongoose.Schema({
+          eventType: String,
+          userId: String,
+          sessionId: String,
+          ip: String,
+          userAgent: String,
+          deviceFingerprint: String,
+          location: Object,
+          metadata: Object,
+          success: Boolean,
+          errorMessage: String,
+          timestamp: Date
+        }, { timestamps: true });
 
-    await AuditLog.create({
-      ...entry,
-      timestamp: new Date(entry.timestamp)
-    });
+        AuditLog = mongoose.model('AuditLog', auditSchema);
+      }
+
+      await AuditLog.create({
+        ...entry,
+        timestamp: new Date(entry.timestamp)
+      });
+    } catch (error: any) {
+      // If it's still a model overwrite error, just log and continue
+      if (error.message && error.message.includes('Cannot overwrite')) {
+        logger.debug('AuditLog model already exists, skipping MongoDB persistence');
+      } else {
+        throw error;
+      }
+    }
   }
 
   /**

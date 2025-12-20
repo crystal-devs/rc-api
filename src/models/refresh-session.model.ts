@@ -9,6 +9,13 @@ const refreshSessionSchema = new mongoose.Schema({
         unique: true,
         index: true
     },
+    // Token hash for database indexing (SHA-256 hash of refresh token)
+    tokenHash: {
+        type: String,
+        required: false,
+        index: true,
+        sparse: true // Allow null values
+    },
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: MODEL_NAMES.USER,
