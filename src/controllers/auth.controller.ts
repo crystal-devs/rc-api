@@ -14,18 +14,19 @@ import {
     validateRegistrationData
 } from "@utils/validation.util";
 import { logger } from "@utils/logger";
+import { googleAuthService } from "@services/auth/google-auth.service";
 
 const REFRESH_COOKIE_OPTIONS = {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production', // Localhost can be http
-    sameSite: (process.env.NODE_ENV === 'production' ? 'none' : 'lax') as 'none' | 'lax',
+    sameSite: 'strict' as const, // Changed from 'none' for better security
     path: '/',
     maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
 };
 
 export const registerController: RequestHandler = async (req, res, next) => {
     try {
-        const { name, email, password } = trimObject(req.body);
+        const { name, email, password, provider, profile_pic } = trimObject(req.body);
 
         // Comprehensive validation using centralized functions
         const nameValidation = validateName(name);
@@ -46,22 +47,89 @@ export const registerController: RequestHandler = async (req, res, next) => {
             return;
         }
 
-        const passwordValidation = validatePassword(password);
-        if (!passwordValidation.isValid) {
-            res.status(400).json({
-                status: false,
-                message: passwordValidation.error
-            });
-            return;
+        // Determine the provider (default to 'email' if not specified)
+        const authProvider = provider || 'email';
+
+        // Validate password only for email provider
+        if (authProvider === 'email') {
+            if (!password) {
+                res.status(400).json({
+                    status: false,
+                    message: 'Password is required for email registration'
+                });
+                return;
+            }
+            const passwordValidation = validatePassword(password);
+            if (!passwordValidation.isValid) {
+                res.status(400).json({
+                    status: false,
+                    message: passwordValidation.error
+                });
+                return;
+            }
+        }
+
+        // For Google OAuth, verify the access token with backend (optional for development)
+        let verifiedGoogleEmail: string | undefined;
+        let verifiedGoogleName: string | undefined;
+        let verifiedGooglePicture: string | undefined;
+
+        if (authProvider === 'google') {
+            const { googleAccessToken } = trimObject(req.body);
+
+            if (!googleAccessToken) {
+                res.status(400).json({
+                    status: false,
+                    message: 'Google access token is required for Google authentication'
+                });
+                return;
+            }
+
+            // Check if Google credentials are configured
+            if (process.env.GOOGLE_CLIENT_ID) {
+                try {
+                    const verifiedUser = await googleAuthService.verifyAccessToken(googleAccessToken);
+
+                    // Use verified data from Google for security
+                    verifiedGoogleEmail = verifiedUser.email;
+                    verifiedGoogleName = verifiedUser.name;
+                    verifiedGooglePicture = verifiedUser.picture;
+
+                    // Ensure the email from request matches verified email
+                    if (email && email !== verifiedGoogleEmail) {
+                        res.status(400).json({
+                            status: false,
+                            message: 'Email mismatch: provided email does not match Google account'
+                        });
+                        return;
+                    }
+
+                    logger.info('Google token verified successfully for registration', { email: verifiedUser.email });
+                } catch (error: any) {
+                    logger.error('Google token verification failed in register:', error);
+                    res.status(401).json({
+                        status: false,
+                        message: 'Invalid Google authentication token'
+                    });
+                    return;
+                }
+            } else {
+                // Development fallback: trust frontend verification
+                logger.warn('Google token verification skipped in register - GOOGLE_CLIENT_ID not configured');
+                verifiedGoogleEmail = email;
+                verifiedGoogleName = name;
+                verifiedGooglePicture = profile_pic;
+            }
         }
 
         // For now, we'll create a user with email/password provider
         // In production, you'd hash the password
         const response = await loginService.login({
-            email,
-            name,
-            provider: req.body.provider || 'email',
-            profile_pic: ""
+            email: authProvider === 'google' ? verifiedGoogleEmail : email,
+            name: authProvider === 'google' ? (verifiedGoogleName || name) : name,
+            provider: authProvider,
+            profile_pic: authProvider === 'google' ? (verifiedGooglePicture || "") : "",
+            password: authProvider === 'email' ? password : undefined
         }, req.ip, req.get('User-Agent'));
 
         // Set HttpOnly Cookie
@@ -195,6 +263,52 @@ export const loginController: RequestHandler = async (req, res, next) => {
                     message: urlValidation.error
                 });
                 return;
+            }
+        }
+
+        // For Google OAuth, verify the access token with backend (optional for development)
+        if (loginProvider === 'google') {
+            const { googleAccessToken } = trimObject(req.body);
+
+            if (!googleAccessToken) {
+                res.status(400).json({
+                    status: false,
+                    message: 'Google access token is required for Google authentication'
+                });
+                return;
+            }
+
+            // Check if Google credentials are configured
+            if (process.env.GOOGLE_CLIENT_ID) {
+                try {
+                    const verifiedUser = await googleAuthService.verifyAccessToken(googleAccessToken);
+
+                    // Override request data with verified Google data for security
+                    loginEmail = verifiedUser.email;
+                    loginName = verifiedUser.name;
+                    loginProfilePic = verifiedUser.picture;
+
+                    // Ensure the email from request matches verified email (if provided)
+                    if (email && email !== verifiedUser.email) {
+                        res.status(400).json({
+                            status: false,
+                            message: 'Email mismatch: provided email does not match Google account'
+                        });
+                        return;
+                    }
+
+                    logger.info('Google token verified successfully', { email: verifiedUser.email });
+                } catch (error: any) {
+                    logger.error('Google token verification failed:', error);
+                    res.status(401).json({
+                        status: false,
+                        message: 'Invalid Google authentication token'
+                    });
+                    return;
+                }
+            } else {
+                // Development fallback: trust frontend verification
+                logger.warn('Google token verification skipped - GOOGLE_CLIENT_ID not configured');
             }
         }
 
@@ -448,34 +562,81 @@ export const googleAuthCallbackController: RequestHandler = async (req, res, nex
             return;
         }
 
-        // This is a placeholder for Google OAuth callback
-        // In production, exchange code for tokens and create/update user
+        // Exchange authorization code for tokens
+        const tokenResponse = await googleAuthService.exchangeCodeForTokens(code, redirectUri);
 
-        // For now, return a mock response
+        if (!tokenResponse.access_token || !tokenResponse.id_token) {
+            res.status(400).json({
+                status: false,
+                message: "Failed to obtain tokens from Google"
+            });
+            return;
+        }
+
+        // Verify the ID token and get user info
+        const verifiedUser = await googleAuthService.verifyIdToken(tokenResponse.id_token);
+
+        // Create or update user account
+        const response = await loginService.login({
+            email: verifiedUser.email,
+            name: verifiedUser.name,
+            provider: 'google',
+            profile_pic: verifiedUser.picture || "",
+            password: undefined // Social login
+        }, req.ip, req.get('User-Agent'));
+
+        // Set HttpOnly refresh cookie
+        res.cookie('refresh_token', response.refreshToken, REFRESH_COOKIE_OPTIONS);
+
         res.status(200).json({
             status: true,
-            message: "Google OAuth callback - implement token exchange",
-            data: {
-                code,
-                redirectUri,
-                note: "Implement actual Google OAuth token exchange here"
-            }
+            message: "Google OAuth successful",
+            user: response.user,
+            token: response.token,
+            expiresAt: response.expiresAt
         });
         return;
     } catch (err: any) {
         logger.error('Google auth callback error:', err);
+
+        // Handle specific Google OAuth errors
+        if (err.code === 'invalid_grant') {
+            res.status(400).json({
+                status: false,
+                message: "Invalid authorization code"
+            });
+            return;
+        }
+
         next(err);
     }
 }
 
 export const verifyUserController: RequestHandler = async (req, res, next) => {
     try {
-        // if album id , then register the user as a viewer against the album
+        // req.user is populated by clicky-auth.middleware.ts
+        const user = (req as any).user;
+
+        if (!user) {
+            res.status(401).json({
+                status: false,
+                message: "User not found or not authenticated"
+            });
+            return;
+        }
+
         res.status(200).json({
             status: true,
             message: "User verified successfully",
+            user: {
+                id: user._id || user.id,
+                name: user.name,
+                email: user.email,
+                avatar: user.profile_pic || user.avatar,
+                provider: user.provider || 'email'
+            }
         });
-        return // the user will be verified by the middleware
+        return;
     } catch (err) {
         next(err);
     }

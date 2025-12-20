@@ -10,6 +10,7 @@ export interface LoginData {
     profile_pic?: string;
     country_code?: string;
     password?: string;
+    googleAccessToken?: string; // For Google OAuth verification
 }
 
 export interface LoginResult {

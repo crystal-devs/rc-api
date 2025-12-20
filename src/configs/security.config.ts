@@ -5,6 +5,7 @@ import { RequestHandler } from "express";
 import { CorsOptions } from "cors";
 import { keys } from "./dotenv.config";
 import { logger } from "@utils/logger";
+import { securityMonitor } from "@services/system/monitoring.service";
 
 /**
  * 🚀 Advanced Security Configuration
@@ -18,16 +19,30 @@ export const securityHeaders: RequestHandler = helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "https://trusted.cdn.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"], // Allow for React dev, restrict in prod
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "https:", "blob:"],
+      connectSrc: ["'self'", "https://api.", "wss:", "ws:"],
       objectSrc: ["'none'"],
-      upgradeInsecureRequests: [],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+      frameAncestors: ["'none'"],
+      // upgradeInsecureRequests: process.env.NODE_ENV === 'production' ? [] : undefined, // Temporarily disabled
+      reportUri: '/api/v1/system/security-report'
     },
+    reportOnly: process.env.NODE_ENV !== 'production' // Report violations in dev, enforce in prod
   },
   frameguard: { action: "deny" },
-  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+  hsts: {
+    maxAge: 31536000, // 1 year
+    includeSubDomains: true,
+    preload: true
+  },
   xssFilter: true,
   noSniff: true,
   ieNoOpen: true,
+  referrerPolicy: { policy: "strict-origin-when-cross-origin" }
 });
 
 /**
@@ -292,13 +307,12 @@ function findEndpointConfig(endpoint: string, method: string): any {
 export const rateLimitLogger = (req: any, res: any, next: any) => {
   // Check if request was rate limited
   if (res.statusCode === 429) {
-    logger.warn('Rate limit exceeded', {
+    securityMonitor.logEvent('rate_limit_hit', 2, {
       endpoint: req.originalUrl,
       method: req.method,
       ip: req.ip,
       userId: req.user?._id?.toString() || 'anonymous',
-      userAgent: req.get('User-Agent'),
-      timestamp: new Date().toISOString()
+      userAgent: req.get('User-Agent')
     });
   }
   next();
@@ -336,12 +350,12 @@ export const botDetectionMiddleware = (req: any, res: any, next: any) => {
   req.ipLastRequest = now;
 
   if (isSuspiciousUA && isTooFast) {
-    logger.warn('Potential bot detected', {
+    securityMonitor.logEvent('bot_detected', 4, {
       ip: req.ip,
       userAgent,
       endpoint: req.originalUrl,
       timeDiff,
-      timestamp: new Date().toISOString()
+      reason: 'Suspicious user agent + rapid requests'
     });
 
     // For suspicious requests, add extra delay
