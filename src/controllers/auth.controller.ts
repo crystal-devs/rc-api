@@ -434,16 +434,10 @@ export const refreshTokenController: RequestHandler = async (req, res, next) => 
             return;
         }
 
+        logger.info('[refreshTokenController] Refresh token found, calling loginService.refreshUserToken');
         const result = await loginService.refreshUserToken(refreshToken, req.ip, req.get('User-Agent'));
 
-        // Check if service threw an error that was caught but returned as failure?
-        // loginService.refreshUserToken typically throws on failure in typical implementations,
-        // but let's check its implementation or assume it throws.
-        // Actually looking at loginService (which I haven't seen fully but assumed), 
-        // if it returns, it's success. If it throws, it goes to catch.
-
-        // Wait, I need to check login.service.ts to see if it throws or returns null.
-        // If it throws, the catch block handles it.
+        logger.info('[refreshTokenController] Token refresh successful, setting new cookie');
 
         // Rotate cookie
         res.cookie('refresh_token', result.refreshToken, REFRESH_COOKIE_OPTIONS);
@@ -461,7 +455,10 @@ export const refreshTokenController: RequestHandler = async (req, res, next) => 
         // Clear cookie on failure
         res.clearCookie('refresh_token', { path: '/' });
 
-        logger.warn('Refresh token failed', { error: err.message });
+        logger.warn('[refreshTokenController] Refresh token failed:', {
+            error: err.message,
+            stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+        });
 
         // Return 401 with specific error message for debugging
         res.status(401).json({

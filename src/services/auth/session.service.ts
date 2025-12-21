@@ -174,7 +174,7 @@ export class SessionService {
         .map(s => s.deviceInfo.fingerprint)
         .filter(f => f);
       if (currentLogin.deviceFingerprint &&
-          !knownFingerprints.includes(currentLogin.deviceFingerprint)) {
+        !knownFingerprints.includes(currentLogin.deviceFingerprint)) {
         reasons.push('Login from unknown device');
         riskLevel = 'high';
       }
@@ -209,12 +209,16 @@ export class SessionService {
   }
 
   /**
-   * Helper: Get token hash for session (simplified)
+   * Helper: Get token hash for session
    */
   private static async getTokenHashForSession(sessionId: string): Promise<string | null> {
-    // This is a simplified implementation
-    // In production, you'd store token hash -> session ID mapping
-    return null;
+    try {
+      const session = await RefreshSession.findOne({ sessionId }).select('tokenHash').lean();
+      return session?.tokenHash || null;
+    } catch (error) {
+      logger.error('Error getting token hash for session:', error);
+      return null;
+    }
   }
 
   /**
