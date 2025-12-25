@@ -25,7 +25,7 @@ interface EventResponse {
     description: string;
     start_date: string;
     visibility: EventVisibility;
-    cover_image?: { url: string } | null;
+    cover_image?: { public_id: string } | null;
     location?: { name: string } | null;
     permissions?: {
         can_upload: boolean;
@@ -45,11 +45,11 @@ export const getShareTokenDetailsService = async ({
 }) => {
     try {
         // Find event by share_token - only select necessary fields
-        const event = await Event.findOne({ 
-            share_token: tokenId 
+        const event = await Event.findOne({
+            share_token: tokenId
         })
-        .select('_id title description start_date location cover_image visibility share_settings permissions created_by co_hosts')
-        .lean();
+            .select('_id title description start_date location cover_image visibility share_settings permissions created_by co_hosts')
+            .lean();
 
         if (!event) {
             return {
@@ -271,8 +271,8 @@ function buildEventResponse(event: any, userAccess: UserAccess): EventResponse {
         description: event.description || '',
         start_date: event.start_date,
         visibility: event.visibility,
-        cover_image: event.cover_image?.url ? {
-            url: event.cover_image.url
+        cover_image: event.cover_image?.public_id ? {
+            public_id: event.cover_image.public_id
         } : null,
         location: event.location?.name ? {
             name: event.location.name

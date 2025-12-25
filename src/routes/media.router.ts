@@ -64,7 +64,7 @@ const upload = multer({
 
 mediaRouter.post('/upload-url', authMiddleware, wrap(generateBatchUploadUrlsController))
 mediaRouter.post('/upload-complete', authMiddleware, wrap(uploadCompleteController))
-mediaRouter.post('/signed-url/key', authMiddleware, wrap(getSignedUrlForKeyController))
+mediaRouter.post('/signed-url/key', optionalAuthMiddleware, wrap(getSignedUrlForKeyController))
 mediaRouter.post('/update-photo', validateLambdaToken as RequestHandler, wrap(updateMediaController))
 
 // === GUEST UPLOADS ===
