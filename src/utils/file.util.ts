@@ -110,6 +110,7 @@ export interface MediaMetadata {
         full: string | null;
         original: string | null;
     };
+    image_variants?: any; // Include the full variants structure
 }
 
 /**
@@ -170,6 +171,35 @@ async function getMediaMetadataWithCache(mediaItem: any, urlCache: Map<string, s
     // Get responsive URLs using cache
     const responsiveUrls = await getResponsiveImageUrlsWithCache(mediaItem, urlCache);
 
+    // Construct authorized image_variants with signed URLs
+    // REMOVED to save bandwidth as per optimization request. 
+    // responsive_urls provides sufficient data for frontend display.
+    /* 
+    let authorizedVariants = null;
+    if (mediaItem.image_variants) {
+        authorizedVariants = JSON.parse(JSON.stringify(mediaItem.image_variants)); // Deep copy
+
+        // Helper to update variant URL
+        const updateVariantUrl = async (variant: any) => {
+            if (variant?.webp?.public_id) {
+                variant.webp.url = urlCache.get(variant.webp.public_id) || await getCachedSignedUrl(variant.webp.public_id);
+            }
+            if (variant?.jpeg?.public_id) {
+                variant.jpeg.url = urlCache.get(variant.jpeg.public_id) || await getCachedSignedUrl(variant.jpeg.public_id);
+            }
+        };
+
+        if (authorizedVariants.small) await updateVariantUrl(authorizedVariants.small);
+        if (authorizedVariants.medium) await updateVariantUrl(authorizedVariants.medium);
+        if (authorizedVariants.large) await updateVariantUrl(authorizedVariants.large);
+
+        // Also update original
+        if (authorizedVariants.original && mediaItem.public_id) {
+            authorizedVariants.original.url = mainUrl;
+        }
+    }
+    */
+
     return {
         _id: mediaItem._id?.toString() || mediaItem._id,
         type: mediaItem.type,
@@ -193,6 +223,7 @@ async function getMediaMetadataWithCache(mediaItem: any, urlCache: Map<string, s
         },
         created_at: mediaItem.created_at,
         responsive_urls: responsiveUrls,
+        // image_variants: authorizedVariants // Removed for bandwidth optimization
     };
 }
 

@@ -7,6 +7,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
 import { Event } from '@models/event.model';
+import { validatePermissionsAndGetApproval } from '@utils/media.utils';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -82,36 +83,116 @@ export const uploadCompleteController = async (
     const approvalResult = await validatePermissionsAndGetApproval(eventId, userId);
     console.log(approvalResult, 'Approval result');
 
-    // ────────────────────── SAVE TO MONGODB ──────────────────────
-    const media = new Media({
-      url: key, // Store key instead of signed URL
-      public_id: key,
-      type: 'image',
-      upload_id,
-      event_id: eventId,
-      album_id: eventId,
-      original_filename: originalFileName,
-      format: extension,
-      guest_session_id: req.user?.role === 'guest' ? req.user?._id : null,
-      uploaded_by: req.user?._id,
-      size_mb: 0, // You can get from S3 HeadObject if needed
-      processing: {
-        status: 'processing',
-        current_stage: 'uploading',
-        progress_percentage: 100,
-        last_updated: new Date(),
-      },
-      approval: approvalResult,
-      approval_status: approvalResult.status === 'approved',
-      uploader_type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
-      created_at: new Date(),
-      updated_at: new Date(),
-      deleteGroup: `event-${eventId}-upload-${upload_id}`
-    });
+    // ────────────────────── SAVE/UPDATE MONGODB ──────────────────────
+    let savedMedia;
 
-    const savedMedia = await media.save();
+    // Use atomic update with pipeline to prevent race conditions with Lambda
+    // This ensures we don't overwrite 'completed' status/variants if Lambda beat us to it
+    const existingMedia = await Media.findOneAndUpdate(
+      { upload_id },
+      [
+        {
+          $set: {
+            // Update approval only if it's not already set
+            approval: {
+              $cond: {
+                if: {
+                  $or: [
+                    { $not: ["$approval"] },
+                    { $not: ["$approval.status"] },
+                    { $eq: ["$approval.status", "pending"] } // Optional: Update if pending? Prefer safe update.
+                  ]
+                },
+                then: {
+                  status: approvalResult.status,
+                  approved_by: approvalResult.approved_by,
+                  approved_at: approvalResult.approved_at,
+                  rejection_reason: '',
+                  auto_approval_reason: approvalResult.auto_approval_reason || null
+                },
+                else: "$approval"
+              }
+            },
+            approval_status: {
+              $cond: {
+                if: {
+                  $or: [
+                    { $not: ["$approval"] },
+                    { $not: ["$approval.status"] },
+                    { $eq: ["$approval.status", "pending"] }
+                  ]
+                },
+                then: approvalResult.status === 'approved',
+                else: "$approval_status"
+              }
+            },
+            // Update processing status ONLY if variants haven't been generated yet
+            "processing.status": {
+              $cond: {
+                if: { $eq: ["$processing.variants_generated", true] },
+                then: "completed",
+                else: "processing"
+              }
+            },
+            "processing.current_stage": {
+              $cond: {
+                if: { $eq: ["$processing.variants_generated", true] },
+                then: "completed",
+                else: "processing"
+              }
+            },
+            // Ensure other processing fields are set if we are in processing mode
+            "processing.progress_percentage": {
+              $cond: {
+                if: { $eq: ["$processing.variants_generated", true] },
+                then: "$processing.progress_percentage",
+                else: 10
+              }
+            }
+          }
+        }
+      ],
+      { new: true }
+    );
 
-    logger.info(`Media saved: ${savedMedia._id}, upload_id: ${upload_id}, key: ${key}`);
+    if (existingMedia) {
+      savedMedia = existingMedia;
+      logger.info(`Media updated: ${savedMedia._id}, upload_id: ${upload_id}`);
+    } else {
+      // Fallback: Create new media if not found (old behavior)
+      const media = new Media({
+        url: key, // Store key instead of signed URL
+        public_id: key,
+        type: 'image',
+        upload_id,
+        event_id: eventId,
+        album_id: eventId,
+        original_filename: originalFileName,
+        format: extension,
+        guest_session_id: req.user?.role === 'guest' ? req.user?._id : null,
+        uploaded_by: req.user?._id,
+        size_mb: 0,
+        processing: {
+          status: 'processing',
+          current_stage: 'processing',
+          progress_percentage: 10,
+          last_updated: new Date(),
+        },
+        approval: {
+          ...approvalResult,
+          rejection_reason: '', // Default
+          auto_approval_reason: (approvalResult.auto_approval_reason as any) || null // Ensure compatible type
+        } as any,
+        approval_status: approvalResult.status === 'approved',
+        uploader_type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
+        created_at: new Date(),
+        updated_at: new Date(),
+        deleteGroup: `event-${eventId}-upload-${upload_id}`
+      });
+
+      savedMedia = await media.save();
+      logger.info(`Media created (fallback): ${savedMedia._id}, upload_id: ${upload_id}`);
+    }
 
     // ────────────────────── WEBSOCKET: photo-uploading ──────────────────────
     const webSocketService = getWebSocketService();
@@ -125,7 +206,7 @@ export const uploadCompleteController = async (
       approval_status: savedMedia.approval?.status === 'approved' || savedMedia.approval?.status === 'auto_approved',
       timestamp: new Date(),
       uploader: {
-        type: media.uploader_type,
+        type: savedMedia.uploader_type,
         id: req.user?._id || null,
       },
     };
@@ -137,7 +218,6 @@ export const uploadCompleteController = async (
     webSocketService.io.to(guestRoom).emit('photo-uploading', payload);
 
     logger.info(`WebSocket 'photo-uploading' emitted for event ${eventId}`);
-
     // ────────────────────── RESPONSE ──────────────────────
     const responseData = {
       mediaId: savedMedia._id.toString(),
@@ -165,41 +245,3 @@ export const uploadCompleteController = async (
   }
 };
 
-const validatePermissionsAndGetApproval = async (eventId: string, userId: string) => {
-  const event = await Event.findById(eventId)
-    .select('permissions created_by')
-    .lean();
-
-  if (!event) {
-    throw new Error('Event not found');
-  }
-
-  const creatorId = event.created_by?.toString();
-  const uploaderId = userId?.toString();
-
-  logger.info('🔍 Media Upload Permission Check:', {
-    eventId,
-    creatorId,
-    uploaderId,
-    isMatch: creatorId === uploaderId
-  });
-
-  // Auto-approve if uploader is the event creator
-  if (creatorId && uploaderId && creatorId === uploaderId) {
-    logger.info(`✅ Auto-approving upload for event creator: ${uploaderId}`);
-    return {
-      status: 'approved',
-      auto_approval_reason: 'event_creator',
-      approved_by: userId,
-      approved_at: new Date()
-    };
-  }
-
-  logger.info(`⏳ Setting upload status to pending for user: ${uploaderId}`);
-  return {
-    status: 'pending',
-    auto_approval_reason: null,
-    approved_by: null,
-    approved_at: null
-  };
-};

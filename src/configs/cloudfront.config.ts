@@ -46,13 +46,14 @@ export function validateCloudFrontConfig(): boolean {
         errors.push('CLOUDFRONT_DOMAIN is required when CloudFront is enabled');
     }
 
-    if (!cloudFrontConfig.keyPairId) {
-        errors.push('CLOUDFRONT_KEY_PAIR_ID is required when CloudFront is enabled');
-    }
+    // Keys are NOT required for simple CDN usage with S3 signed URLs
+    // if (!cloudFrontConfig.keyPairId) {
+    //     errors.push('CLOUDFRONT_KEY_PAIR_ID is required when CloudFront is enabled');
+    // }
 
-    if (!cloudFrontConfig.privateKey) {
-        errors.push('CLOUDFRONT_PRIVATE_KEY is required when CloudFront is enabled');
-    }
+    // if (!cloudFrontConfig.privateKey) {
+    //     errors.push('CLOUDFRONT_PRIVATE_KEY is required when CloudFront is enabled');
+    // }
 
     if (errors.length > 0) {
         logger.error('CloudFront configuration errors:', errors);

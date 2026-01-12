@@ -5,6 +5,8 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { v4 as uuidv4 } from 'uuid';
 import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
+import { Media } from '@models/media.model';
+import { validatePermissionsAndGetApproval } from '@utils/media.utils';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -71,6 +73,38 @@ export const generateUploadUrlController = async (
     const signedUrl = await getSignedUrl(s3Client, command, {
       expiresIn: 600, // 10 minutes
     });
+
+    // Create Metadata Record (Pending Upload)
+    const userId = req.user?._id;
+    const approvalResult = await validatePermissionsAndGetApproval(eventId, userId);
+
+    const media = new Media({
+      url: key,
+      public_id: key,
+      type: 'image',
+      upload_id: uploadId,
+      event_id: eventId,
+      album_id: eventId,
+      original_filename: fileName,
+      format: fileExtension,
+      // Identify uploader
+      guest_session_id: req.user?.role === 'guest' ? req.user?._id : null,
+      uploaded_by: req.user?.role !== 'guest' ? req.user?._id : null,
+
+      processing: {
+        status: 'pending', // Pending upload
+        current_stage: 'uploading',
+        progress_percentage: 0,
+        last_updated: new Date(),
+      },
+      approval: approvalResult,
+      approval_status: approvalResult.status === 'approved',
+      uploader_type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
+      deleteGroup: `event-${eventId}-upload-${uploadId}`
+    });
+
+    await media.save();
+    logger.info(`Media placeholder created: ${media._id}, upload_id: ${uploadId}`);
 
     logger.info(`Generated presigned URL for event ${eventId}, file: ${fileName}, url: ${signedUrl}`);
 
@@ -157,6 +191,16 @@ export const generateBatchUploadUrlsController = async (
       expiresIn: number;
     }> = [];
 
+    // Fix: userId already defined at top of function? No, let's check.
+    // It was defined as `const userId = req.user`. Wait, that's an object?
+    // Let's look at line 108: `const userId = req.user`. That is WRONG typings if req.user is the object.
+    // We should use req.user?._id.
+
+    // Fetch approval result once for the entire batch
+    const uploaderId = req.user?._id;
+    // @ts-ignore - Handle possible type mismatch in req.user
+    const approvalResult = await validatePermissionsAndGetApproval(eventId, typeof uploaderId === 'string' ? uploaderId : uploaderId?._id);
+
     // Process files in batches to control concurrency
     for (let i = 0; i < files.length; i += CONCURRENT_LIMIT) {
       const batch = files.slice(i, i + CONCURRENT_LIMIT);
@@ -181,6 +225,33 @@ export const generateBatchUploadUrlsController = async (
           const signedUrl = await getSignedUrl(s3Client, command, {
             expiresIn: 600, // 10 minutes
           });
+
+
+          // Create Media Record
+          const media = new Media({
+            url: key,
+            public_id: key,
+            type: 'image',
+            upload_id: uploadId,
+            event_id: eventId,
+            album_id: eventId,
+            original_filename: file.fileName,
+            format: fileExtension,
+            guest_session_id: req.user?.role === 'guest' ? req.user?._id : null,
+            uploaded_by: req.user?.role !== 'guest' ? req.user?._id : null,
+            processing: {
+              status: 'pending',
+              current_stage: 'uploading',
+              progress_percentage: 0,
+              last_updated: new Date(),
+            },
+            approval: approvalResult, // We need to fetch this outside the loop
+            approval_status: approvalResult?.status === 'approved',
+            uploader_type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
+            deleteGroup: `event-${eventId}-upload-${uploadId}`
+          });
+
+          await media.save();
 
           return {
             uploadUrl: signedUrl,

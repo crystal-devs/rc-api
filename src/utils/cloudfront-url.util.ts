@@ -79,6 +79,12 @@ async function generateS3SignedUrl(
     const command = new GetObjectCommand({
         Bucket: process.env.AWS_S3_BUCKET!,
         Key: s3Key,
+        // 🚀 CRITICAL: Cache locally only for the duration of the signature.
+        // This prevents access after the signed URL expires.
+        // using 'private' to ensure it's not cached in shared proxies if that's a concern,
+        // though for signed URLs, the signature itself protects it.
+        // Matching max-age to expiresIn ensures the browser cache invalidates when the link does.
+        ResponseCacheControl: `private, max-age=${expiresIn}, immutable`,
     });
 
     const url = await getS3SignedUrl(s3Client, command, { expiresIn });
@@ -100,19 +106,28 @@ export async function getCachedSignedUrl(
             return cachedUrl;
         }
 
-        // Generate new URL based on configuration
-        let url: string;
+        // Generate S3 signed URL first (to get the signature and cache headers)
+        let url = await generateS3SignedUrl(s3Key, expiresIn);
 
         if (isCloudFrontEnabled()) {
-            // Use CloudFront (when enabled)
-            logger.debug('Using CloudFront for signed URL');
-            url = await generateCloudFrontSignedUrl(s3Key, expiresIn);
-        } else {
-            // Use S3 (current default)
-            url = await generateS3SignedUrl(s3Key, expiresIn);
+            // Use CloudFront as a CDN proxy for the signed S3 URL
+            logger.debug('Using CloudFront domain for S3 signed URL');
+
+            // Replace S3 host with CloudFront domain
+            // S3 URL format: https://bucket.s3.region.amazonaws.com/key?params...
+            // Target format: https://cloudfront-domain/key?params...
+
+            try {
+                const urlObj = new URL(url);
+                urlObj.hostname = cloudFrontConfig.distributionDomain;
+                url = urlObj.toString();
+            } catch (err) {
+                logger.error('Error replacing S3 host with CloudFront domain:', err);
+                // Fallback to original S3 URL if replacement fails
+            }
         }
 
-        // Cache the URL
+        // Cache the (possibly modified) URL
         await signedUrlCache.set(s3Key, url, expiresIn);
 
         return url;
@@ -156,12 +171,17 @@ export async function getCachedSignedUrlsBatch(
             const newUrls: Array<{ key: string; url: string; expiresIn: number }> = [];
 
             for (const { key, expiresIn } of missingKeys) {
-                let url: string;
+                // Generate S3 signed URL first
+                let url = await generateS3SignedUrl(key, expiresIn);
 
                 if (isCloudFrontEnabled()) {
-                    url = await generateCloudFrontSignedUrl(key, expiresIn);
-                } else {
-                    url = await generateS3SignedUrl(key, expiresIn);
+                    try {
+                        const urlObj = new URL(url);
+                        urlObj.hostname = cloudFrontConfig.distributionDomain;
+                        url = urlObj.toString();
+                    } catch (err) {
+                        logger.error('Error replacing S3 host with CloudFront domain in batch:', err);
+                    }
                 }
 
                 result.set(key, url);

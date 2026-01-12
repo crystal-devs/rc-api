@@ -582,7 +582,7 @@ async function getQueuePosition(jobId: string): Promise<number | undefined> {
         if (!imageQueue) return undefined;
 
         const waiting = await imageQueue.getWaiting();
-        const position = waiting.findIndex(job => job.id === jobId);
+        const position = waiting.findIndex((job: any) => job.id === jobId);
         return position >= 0 ? position + 1 : undefined;
     } catch (error) {
         logger.warn('Failed to get queue position:', error);
