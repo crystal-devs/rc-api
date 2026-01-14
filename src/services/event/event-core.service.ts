@@ -11,6 +11,7 @@ import { ServiceResponse } from "@services/media";
 import { EventType } from "./event.types";
 import { getPhotoWallWebSocketService } from "@services/photoWallWebSocketService";
 import { Media } from "@models/media.model";
+import { getEventDetailService } from "./event-query.service";
 
 // Role permissions template
 const ROLE_PERMISSIONS = {
@@ -350,13 +351,29 @@ export const updateEventService = async (
             }
         }
 
+        // Fetch the fully enriched event object to return (including user_role, stats, etc.)
+        // This ensures the frontend doesn't lose context after an update
+        const enrichedEventResponse = await getEventDetailService(eventId, userId, undefined, session);
+
         await session.commitTransaction();
+
+        if (!enrichedEventResponse.status || !enrichedEventResponse.data) {
+            // Fallback to updatedEvent if enrichment fails (should be rare)
+            return {
+                status: true,
+                code: 200,
+                message: 'Event updated successfully (partial details)',
+                data: updatedEvent,
+                error: null,
+                other: null
+            };
+        }
 
         return {
             status: true,
             code: 200,
             message: 'Event updated successfully',
-            data: updatedEvent,
+            data: enrichedEventResponse.data,
             error: null,
             other: null
         };

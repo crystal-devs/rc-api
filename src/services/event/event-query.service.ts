@@ -172,7 +172,8 @@ export const getUserEventsService = async (
 export const getEventDetailService = async (
     identifier: string,
     userId: string,
-    tokenType?: 'share_token' | 'co_host_invite_token'
+    tokenType?: 'share_token' | 'co_host_invite_token',
+    session?: mongoose.ClientSession
 ): Promise<ServiceResponse<EventWithExtras>> => {
     try {
         // Validate userId
@@ -188,7 +189,8 @@ export const getEventDetailService = async (
         }
 
         // Optional cache read when identifier is event ObjectId
-        if (mongoose.Types.ObjectId.isValid(identifier)) {
+        // Note: We skip cache read if we are in a transaction (session provided) to ensure fresh data
+        if (!session && mongoose.Types.ObjectId.isValid(identifier)) {
             try {
                 const cached = await eventCacheService.getEventDetail(identifier, userId);
                 if (cached) {
@@ -210,7 +212,14 @@ export const getEventDetailService = async (
         const matchCondition = buildIdentifierMatchCondition(identifier, tokenType);
 
         const pipeline = buildEventDetailPipeline(matchCondition, userId);
-        const result = await Event.aggregate(pipeline);
+
+        // Execute aggregation with optional session
+        let aggregation = Event.aggregate(pipeline);
+        if (session) {
+            aggregation = aggregation.session(session);
+        }
+
+        const result = await aggregation;
         const event = result[0];
 
         if (!event) {
