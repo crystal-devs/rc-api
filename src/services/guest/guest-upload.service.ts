@@ -149,28 +149,38 @@ const processGuestImageUpload = async (
         // const metadata = await getBasicImageMetadata(file.path);
 
         // Create database record
+        // Create database record
+        const uploadId = mediaId.toString(); // Use _id as upload_id
         const media = new Media({
             _id: mediaId,
-            url: 'previewUrl',
+            upload_id: uploadId,
             type: 'image',
             album_id: albumObjectId,
             event_id: eventObjectId,
-            uploaded_by: userObjectId,
-            guest_uploader: !authenticatedUserId ? guestUploaderInfo : null,
-            uploader_type: authenticatedUserId ? 'registered_user' : 'guest',
-            original_filename: file.originalname,
-            size_mb: fileSizeMB,
-            format: '',
-            metadata: {
-                width: '',
-                height: '',
-                aspect_ratio: ''
+
+            owner: {
+                type: authenticatedUserId ? 'registered_user' : 'guest',
+                user_id: userObjectId || undefined,
+                guest_id: !authenticatedUserId ? guestUploaderInfo.session_id : undefined
             },
+
+            original: {
+                public_id: `guest_upload_${uploadId}`, // Placeholder until processed
+                filename: file.originalname,
+                format: file.mimetype.split('/')[1] || '',
+                size_mb: fileSizeMB,
+                width: 0,
+                height: 0
+            },
+
             processing: {
                 status: 'processing',
+                stage: 'uploading',
+                progress: 0,
                 started_at: new Date(),
                 variants_generated: false,
             },
+
             approval: {
                 status: approvalConfig.status,
                 auto_approval_reason: approvalConfig.autoApprovalReason,
@@ -178,14 +188,8 @@ const processGuestImageUpload = async (
                 approved_by: approvalConfig.approvedBy,
                 rejection_reason: ''
             },
-            upload_context: {
-                method: 'guest_upload',
-                ip_address: guestUploaderInfo.session_id?.split('_')[0] || '',
-                user_agent: guestUploaderInfo.device_fingerprint || '',
-                upload_session_id: guestUploaderInfo.session_id || '',
-                referrer_url: guestUploaderInfo.platform_info?.referrer || '',
-                platform: 'web'
-            }
+
+            deleteGroup: `guest-upload-${guestUploaderInfo.session_id || 'anon'}`
         });
 
         await media.save();
@@ -264,29 +268,50 @@ const processGuestVideoUpload = async (
         const fileSizeMB = bytesToMB(file.size);
 
         // Create media record directly for videos
+        // Create media record directly for videos
+        const mediaId = new mongoose.Types.ObjectId();
+        const uploadId = mediaId.toString();
+
         const media = new Media({
-            url: '/placeholder-video.mp4',
+            _id: mediaId,
+            upload_id: uploadId,
             type: 'video',
             album_id: new mongoose.Types.ObjectId(albumId),
             event_id: new mongoose.Types.ObjectId(eventId),
-            uploaded_by: authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : null,
-            guest_uploader: !authenticatedUserId ? guestUploaderInfo : null,
-            uploader_type: authenticatedUserId ? 'registered_user' : 'guest',
-            original_filename: file.originalname,
-            size_mb: fileSizeMB,
-            format: file.mimetype.split('/')[1],
+
+            owner: {
+                type: authenticatedUserId ? 'registered_user' : 'guest',
+                user_id: authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : undefined,
+                guest_id: !authenticatedUserId ? guestUploaderInfo.session_id : undefined
+            },
+
+            original: {
+                public_id: `guest_video_${uploadId}`, // Placeholder
+                filename: file.originalname,
+                format: file.mimetype.split('/')[1] || 'mp4',
+                size_mb: fileSizeMB,
+                width: 0,
+                height: 0,
+                duration: 0
+            },
+
             processing: {
                 status: 'pending',
+                stage: 'uploading',
+                progress: 0,
                 started_at: new Date(),
                 variants_generated: false,
             },
+
             approval: {
                 status: approvalConfig.status,
                 auto_approval_reason: approvalConfig.autoApprovalReason,
                 approved_at: approvalConfig.approvedAt,
                 approved_by: approvalConfig.approvedBy,
                 rejection_reason: ''
-            }
+            },
+
+            deleteGroup: `guest-upload-${guestUploaderInfo.session_id || 'anon'}`
         });
 
         await media.save();
@@ -325,7 +350,7 @@ const processGuestVideoUpload = async (
         return {
             success: true,
             media_id: media._id.toString(),
-            url: media.url,
+            url: media.getOptimizedUrl(),
             approval_status: media.approval.status,
             processing_status: 'pending',
             message: 'Video uploaded successfully'

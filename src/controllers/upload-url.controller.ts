@@ -79,27 +79,34 @@ export const generateUploadUrlController = async (
     const approvalResult = await validatePermissionsAndGetApproval(eventId, userId);
 
     const media = new Media({
-      url: key,
-      public_id: key,
-      type: 'image',
       upload_id: uploadId,
+      type: 'image',
       event_id: eventId,
       album_id: eventId,
-      original_filename: fileName,
-      format: fileExtension,
-      // Identify uploader
-      guest_session_id: req.user?.role === 'guest' ? req.user?._id : null,
-      uploaded_by: req.user?.role !== 'guest' ? req.user?._id : null,
+
+      owner: {
+        type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
+        user_id: req.user?.role !== 'guest' ? req.user?._id : undefined,
+        guest_id: req.user?.role === 'guest' ? req.user?._id : undefined
+      },
+
+      original: {
+        public_id: key,
+        filename: fileName,
+        format: fileExtension,
+        width: 0,   // Placeholder, updated after processing
+        height: 0,  // Placeholder, updated after processing
+        size_mb: 0  // Placeholder, updated after upload
+      },
 
       processing: {
         status: 'pending', // Pending upload
-        current_stage: 'uploading',
-        progress_percentage: 0,
-        last_updated: new Date(),
+        stage: 'uploading',
+        progress: 0,
+        // job_id and others will be added by processing service
       },
+
       approval: approvalResult,
-      approval_status: approvalResult.status === 'approved',
-      uploader_type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
       deleteGroup: `event-${eventId}-upload-${uploadId}`
     });
 
@@ -229,25 +236,33 @@ export const generateBatchUploadUrlsController = async (
 
           // Create Media Record
           const media = new Media({
-            url: key,
-            public_id: key,
-            type: 'image',
             upload_id: uploadId,
+            type: 'image',
             event_id: eventId,
             album_id: eventId,
-            original_filename: file.fileName,
-            format: fileExtension,
-            guest_session_id: req.user?.role === 'guest' ? req.user?._id : null,
-            uploaded_by: req.user?.role !== 'guest' ? req.user?._id : null,
+
+            owner: {
+              type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
+              user_id: req.user?.role !== 'guest' ? req.user?._id : undefined,
+              guest_id: req.user?.role === 'guest' ? req.user?._id : undefined
+            },
+
+            original: {
+              public_id: key,
+              filename: file.fileName,
+              format: fileExtension,
+              width: 0,   // Placeholder
+              height: 0,  // Placeholder
+              size_mb: 0  // Placeholder
+            },
+
             processing: {
               status: 'pending',
-              current_stage: 'uploading',
-              progress_percentage: 0,
-              last_updated: new Date(),
+              stage: 'uploading',
+              progress: 0,
             },
+
             approval: approvalResult, // We need to fetch this outside the loop
-            approval_status: approvalResult?.status === 'approved',
-            uploader_type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
             deleteGroup: `event-${eventId}-upload-${uploadId}`
           });
 

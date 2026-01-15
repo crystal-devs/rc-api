@@ -100,7 +100,7 @@ guestSessionSchema.index({ event_id: 1, status: 1 });
 guestSessionSchema.index({ 'guest_info.email': 1, event_id: 1 }, { sparse: true });
 guestSessionSchema.index({ 'guest_info.phone': 1, event_id: 1 }, { sparse: true });
 guestSessionSchema.index({ claimed_by_user: 1 }, { sparse: true });
-guestSessionSchema.index({ expires_at: 1 });
+// guestSessionSchema.index({ expires_at: 1 }); // Commented out to fix duplicate index warning
 guestSessionSchema.index({ status: 1, last_activity_at: -1 });
 guestSessionSchema.index({ invitation_token: 1 }, { sparse: true });
 guestSessionSchema.index({ 'device_fingerprint.fingerprint_hash': 1, event_id: 1 });

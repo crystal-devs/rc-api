@@ -4,15 +4,21 @@
 import mongoose from 'mongoose';
 import { logger } from '@utils/logger';
 import { Media } from '@models/media.model';
+import { S3Client, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import { keys } from '@configs/dotenv.config';
+
+const s3Client = new S3Client({
+    region: keys.awsRegion as string,
+    credentials: {
+        accessKeyId: keys.awsAccessKeyId as string,
+        secretAccessKey: keys.awsSecretAccessKey as string
+    }
+});
 import { Event } from '@models/event.model';
 import { EventParticipant } from '@models/event-participants.model';
 import { mediaNotificationService } from '@services/websocket/notifications';
 import type { ServiceResponse, StatusUpdateOptions } from './media.types';
 import { getPhotoWallWebSocketService } from '@services/photoWallWebSocketService';
-import { S3Client } from '@aws-sdk/client-s3';
-import { keys } from '@configs/dotenv.config';
-// import { queueStorageCleanup } from 'workers/storageCleanupWorker';
-
 
 export const updateMediaStatusService = async (
     mediaId: string,
@@ -33,7 +39,7 @@ export const updateMediaStatusService = async (
 
         // Find the media item with additional fields for counter logic
         const media = await Media.findById(mediaId).select(
-            'approval event_id url image_variants original_filename type uploaded_by size_mb'
+            'approval event_id original variants type owner size_mb'
         );
 
         if (!media) {
@@ -48,8 +54,8 @@ export const updateMediaStatusService = async (
 
         const previousStatus = media.approval?.status;
         const eventId = media.event_id.toString();
-        const uploadedBy = media.uploaded_by;
-        const sizeMB = media.size_mb || 0;
+        const uploadedBy = media.owner?.user_id;
+        const sizeMB = media.original?.size_mb || 0;
 
         // Build update object
         const updateObj: any = {
@@ -191,7 +197,7 @@ export const bulkUpdateMediaStatusService = async (
         const mediaItems = await Media.find({
             _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
             event_id: new mongoose.Types.ObjectId(eventId)
-        }).select('approval.status uploaded_by size_mb type').lean();
+        }).select('approval.status owner size_mb type').lean();
 
         if (mediaItems.length === 0) {
             return {
@@ -341,7 +347,7 @@ export const deleteMediaService = async (
 
         // Find the media item
         const media = await Media.findById(mediaId)
-            .select('event_id url image_variants original_filename type approval.status uploaded_by size_mb')
+            .select('event_id original variants type approval.status owner size_mb')
             .populate('event_id', 'share_token')
             .lean();
 
@@ -358,8 +364,8 @@ export const deleteMediaService = async (
         const eventId = media.event_id._id?.toString() || media.event_id.toString();
         const shareToken = (media.event_id as any)?.share_token || null;
         const wasVisible = ['approved', 'auto_approved'].includes(media.approval?.status || '');
-        const uploadedBy = media.uploaded_by;
-        const sizeMB = media.size_mb || 0;
+        const uploadedBy = media.owner?.user_id;
+        const sizeMB = media.original?.size_mb || 0;
 
         // STEP 1: Delete from database IMMEDIATELY (for instant UI response)
         await Media.findByIdAndDelete(mediaId);
@@ -438,7 +444,7 @@ export const softDeleteMediaService = async (
 ): Promise<ServiceResponse<any>> => {
     try {
         const media = await Media.findById(mediaId)
-            .select('event_id url image_variants approval.status uploaded_by size_mb deleteGroup')
+            .select('event_id original variants approval.status owner size_mb deleteGroup')
             .populate('event_id', 'share_token')
             .lean();
 
@@ -455,8 +461,8 @@ export const softDeleteMediaService = async (
         const eventId = media.event_id._id?.toString() || media.event_id.toString();
         const shareToken = (media.event_id as any)?.share_token || null;
         const wasVisible = ['approved', 'auto_approved'].includes(media.approval?.status || '');
-        const uploadedBy = media.uploaded_by;
-        const sizeMB = media.size_mb || 0;
+        const uploadedBy = media.owner?.user_id;
+        const sizeMB = media.original?.size_mb || 0;
 
         // STEP 1: Soft-delete in DB IMMEDIATELY
         const updateResult = await Media.updateOne(
@@ -623,37 +629,88 @@ export const softDeleteMediaService = async (
 export const cleanupDeletedMedia = async () => {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
+    // Find media items that are soft-deleted and older than 30 days
     const toDelete = await Media.find({
         isDeleted: true,
         deletedAt: { $lt: thirtyDaysAgo }
-    }).select('deleteGroup public_id image_variants').lean();
+    }).select('original variants owner').lean();
 
     if (toDelete.length === 0) return;
 
-    // Group by deleteGroup
-    const groups: Record<string, any[]> = {};
-    toDelete.forEach(m => {
-        if (m.deleteGroup) {
-            groups[m.deleteGroup] = groups[m.deleteGroup] || [];
-            groups[m.deleteGroup].push(m);
+    logger.info(`Found ${toDelete.length} expired media items to cleanup.`);
+
+    // Collect all S3 keys to delete
+    const keysToDelete: string[] = [];
+
+    toDelete.forEach((media: any) => {
+        // 1. Original
+        if (media.original?.public_id) {
+            keysToDelete.push(media.original.public_id);
+        } else if (media.public_id) {
+            // Legacy support
+            keysToDelete.push(media.public_id);
+        }
+
+        // 2. Variants (Images)
+        if (media.variants?.images) {
+            const v = media.variants.images;
+            if (v.small?.public_id) keysToDelete.push(v.small.public_id);
+            if (v.medium?.public_id) keysToDelete.push(v.medium.public_id);
+            if (v.large?.public_id) keysToDelete.push(v.large.public_id);
+        }
+
+        // 3. Variants (Videos)
+        if (media.variants?.videos) {
+            const v = media.variants.videos;
+            if (v.p360?.public_id) keysToDelete.push(v.p360.public_id);
+            if (v.p720?.public_id) keysToDelete.push(v.p720.public_id);
+            if (v.p1080?.public_id) keysToDelete.push(v.p1080.public_id);
+        }
+
+        // 4. Thumbnails
+        if (media.variants?.thumbnails) {
+            const t = media.variants.thumbnails;
+            if (t.poster?.public_id) keysToDelete.push(t.poster.public_id);
+            if (t.preview?.public_id) keysToDelete.push(t.preview.public_id);
+        }
+
+        // 5. Legacy image_variants support
+        if (media.image_variants) {
+            const v = media.image_variants;
+            if (v.small?.public_id) keysToDelete.push(v.small.public_id);
+            if (v.medium?.public_id) keysToDelete.push(v.medium.public_id);
+            if (v.large?.public_id) keysToDelete.push(v.large.public_id);
         }
     });
 
-    // Delete per group
-    for (const [group, mediaList] of Object.entries(groups)) {
-        const uploadId = group.split('-upload-')[1];
-        // Note: This function seems incomplete - missing eventId and s3/BUCKET references
-        // This appears to be legacy code that should be removed or properly implemented
-        logger.warn('cleanupDeletedMedia function is incomplete - missing eventId and S3 references');
-        // TODO: Implement proper S3 cleanup logic here
+    if (keysToDelete.length > 0) {
+        // S3 DeleteObjects allows max 1000 keys per request
+        const chunkSize = 1000;
+        for (let i = 0; i < keysToDelete.length; i += chunkSize) {
+            const batch = keysToDelete.slice(i, i + chunkSize);
+            try {
+                const command = new DeleteObjectsCommand({
+                    Bucket: keys.s3BucketName as string,
+                    Delete: {
+                        Objects: batch.map(key => ({ Key: key })),
+                        Quiet: true
+                    }
+                });
+                await s3Client.send(command);
+                logger.info(`Deleted batch of ${batch.length} files from S3.`);
+            } catch (err) {
+                logger.error('Failed to delete batch from S3 during cleanup:', err);
+                // Continue to next batch even if one fails
+            }
+        }
     }
 
     // Hard-delete from DB
-    await Media.deleteMany({
+    const deleteResult = await Media.deleteMany({
         _id: { $in: toDelete.map(m => m._id) }
     });
 
-    logger.info(`Cleaned up ${toDelete.length} items`);
+    logger.info(`Cleanup complete. Permanently deleted ${deleteResult.deletedCount} media records.`);
 };
 /**
  * Bulk delete multiple media items
@@ -694,7 +751,7 @@ export const bulkSoftDeleteMediaService = async (
         const mediaItems = await Media.find({
             _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
             event_id: new mongoose.Types.ObjectId(eventId)
-        }).select('url image_variants approval.status uploaded_by size_mb deleteGroup')
+        }).select('original variants approval.status owner size_mb deleteGroup')
             .populate('event_id', 'share_token')
             .lean();
 
@@ -817,7 +874,7 @@ export const bulkSoftDeleteMediaService = async (
 // Helper function to update counters for individual status changes
 async function updateCountersForStatusChange(
     eventId: string,
-    uploadedBy: mongoose.Types.ObjectId | null,
+    uploadedBy: mongoose.Types.ObjectId | undefined,
     previousStatus: string | undefined,
     newStatus: string,
     sizeMB: number
@@ -881,8 +938,8 @@ async function updateBulkCountersForStatusChange(
             eventPhotoIncrement += increment;
 
             // Track participant increments
-            if (media.uploaded_by) {
-                const userId = media.uploaded_by.toString();
+            if (media.owner?.user_id) {
+                const userId = media.owner.user_id.toString();
                 participantIncrements.set(userId, (participantIncrements.get(userId) || 0) + increment);
             }
         }
@@ -925,7 +982,7 @@ async function updateBulkCountersForStatusChange(
 // Helper function to update counters for deletion
 async function updateCountersForDeletion(
     eventId: string,
-    uploadedBy: mongoose.Types.ObjectId | null,
+    uploadedBy: mongoose.Types.ObjectId | undefined,
     deletedStatus: string,
     sizeMB: number
 ): Promise<void> {
@@ -991,8 +1048,8 @@ async function updateBulkCountersForDeletion(
         }
 
         // Track participant decrements
-        if (media.uploaded_by) {
-            const userId = media.uploaded_by.toString();
+        if (media.owner?.user_id) {
+            const userId = media.owner.user_id.toString();
             const current = participantDecrements.get(userId) || { uploads: 0, approved: 0, size: 0 };
 
             current.uploads += 1;

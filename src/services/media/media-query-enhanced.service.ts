@@ -172,21 +172,31 @@ export const getMediaByEventServiceCached = async (
         // ✅ STEP 3: Cache individual photo metadata in Redis
         const photoMetadataList = mediaItems.map(item => ({
             id: item._id.toString(),
-            filename: item.filename || '',
-            url: item.url || '',
-            thumbnailUrl: item.thumbnail_url,
-            size: item.size_mb || 0,
-            format: item.format || '',
-            width: item.metadata?.width,
-            height: item.metadata?.height,
-            uploadedBy: item.uploaded_by?.toString() || '',
+            filename: item.original?.filename || item.upload_id || '', // Use filename or upload_id
+            url: item.original?.public_id || '',
+            thumbnailUrl: item.type === 'image'
+                ? (item.variants?.images?.small?.public_id || item.original?.public_id)
+                : (item.variants?.thumbnails?.poster?.public_id || item.original?.public_id),
+            size: item.original?.size_mb || 0,
+            format: item.original?.format || '',
+            width: item.original?.width,
+            height: item.original?.height,
+            duration: item.original?.duration,
+            uploadedBy: item.owner?.user_id?.toString() || item.owner?.guest_id || '',
             uploadedAt: item.created_at,
             eventId: eventId,
             processingStatus: item.processing?.status || 'unknown',
-            variants: item.image_variants ? {
-                thumbnail: item.image_variants.small?.webp?.url || item.image_variants.small?.jpeg?.url,
-                medium: item.image_variants.medium?.webp?.url || item.image_variants.medium?.jpeg?.url,
-                large: item.image_variants.large?.webp?.url || item.image_variants.large?.jpeg?.url
+            mediaType: item.type,
+            variants: item.type === 'image' && item.variants?.images ? {
+                thumbnail: item.variants.images.small?.public_id,
+                medium: item.variants.images.medium?.public_id,
+                large: item.variants.images.large?.public_id
+            } : item.type === 'video' && item.variants ? {
+                p360: item.variants.videos?.p360?.public_id,
+                p720: item.variants.videos?.p720?.public_id,
+                p1080: item.variants.videos?.p1080?.public_id,
+                poster: item.variants.thumbnails?.poster?.public_id,
+                preview: item.variants.thumbnails?.preview?.public_id
             } : undefined
         }));
 

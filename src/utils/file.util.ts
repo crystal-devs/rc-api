@@ -2,6 +2,19 @@
 
 import { logger } from './logger';
 import { getCachedSignedUrl, getCachedSignedUrlsBatch } from './cloudfront-url.util';
+import fs from 'fs';
+import { promisify } from 'util';
+
+const unlinkAsync = promisify(fs.unlink);
+
+export const cleanupFile = async (file: Express.Multer.File | { path: string }) => {
+    if (!file || !file.path) return;
+    try {
+        await unlinkAsync(file.path);
+    } catch (error) {
+        logger.warn(`Failed to delete temporary file: ${file.path}`, error);
+    }
+};
 
 /**
  * Determine file type based on MIME type
@@ -110,7 +123,7 @@ export interface MediaMetadata {
         full: string | null;
         original: string | null;
     };
-    image_variants?: any; // Include the full variants structure
+    // image_variants removed for optimization
 }
 
 /**
@@ -125,8 +138,9 @@ async function getResponsiveImageUrlsWithCache(
     full: string | null;
     original: string | null;
 }> {
-    const originalUrl = mediaItem.public_id
-        ? (urlCache.get(mediaItem.public_id) || await getCachedSignedUrl(mediaItem.public_id))
+    const publicId = mediaItem.public_id || mediaItem.original?.public_id;
+    const originalUrl = publicId
+        ? (urlCache.get(publicId) || await getCachedSignedUrl(publicId))
         : null;
 
     if (!mediaItem?.image_variants || mediaItem.type !== 'image') {
@@ -163,9 +177,12 @@ async function getResponsiveImageUrlsWithCache(
  */
 async function getMediaMetadataWithCache(mediaItem: any, urlCache: Map<string, string>): Promise<MediaMetadata> {
     // Get main URL from cache or generate
+    // Get main URL from cache or generate
     let mainUrl = mediaItem.url;
-    if (mediaItem.public_id) {
-        mainUrl = urlCache.get(mediaItem.public_id) || await getCachedSignedUrl(mediaItem.public_id);
+    const publicId = mediaItem.public_id || mediaItem.original?.public_id;
+
+    if (publicId) {
+        mainUrl = urlCache.get(publicId) || await getCachedSignedUrl(publicId);
     }
 
     // Get responsive URLs using cache
@@ -241,9 +258,10 @@ export async function transformMediaForResponse(
     const seenKeys = new Set<string>();
 
     mediaItems.forEach(item => {
-        if (item.public_id && !seenKeys.has(item.public_id)) {
-            urlsToGenerate.push({ s3Key: item.public_id, expiresIn: 3600 });
-            seenKeys.add(item.public_id);
+        const publicId = item.public_id || item.original?.public_id;
+        if (publicId && !seenKeys.has(publicId)) {
+            urlsToGenerate.push({ s3Key: publicId, expiresIn: 3600 });
+            seenKeys.add(publicId);
         }
 
         // Also collect variant public_ids

@@ -308,9 +308,9 @@ export const updateMediaStatusController: RequestHandler = async (
                     },
                     timestamp: new Date(),
                     mediaData: {
-                        url: response.data.url,
-                        thumbnail: response.data.thumbnail_url,
-                        filename: response.data.filename
+                        url: response.data.original?.public_id || response.data.url,
+                        thumbnail: (response.data.type === 'image' ? response.data.variants?.images?.small?.public_id : response.data.variants?.thumbnails?.preview?.public_id) || response.data.original?.public_id,
+                        filename: response.data.original?.filename || response.data.upload_id
                     }
                 };
 
@@ -788,7 +788,7 @@ export const getMediaVariantsController: RequestHandler = async (
         }
 
         const media = await Media.findById(mediaId)
-            .select('image_variants processing type url')
+            .select('variants processing type original')
             .lean();
 
         if (!media) {
@@ -807,29 +807,31 @@ export const getMediaVariantsController: RequestHandler = async (
         const variantInfo = {
             media_id: media._id,
             type: media.type,
-            original_url: media.url,
-            has_variants: !!media.image_variants,
+            original_url: media.original?.public_id || '',
+            has_variants: !!media.variants,
             processing_status: media.processing?.status,
-            variants_generated: media.processing?.variants_generated,
+            variants_generated: media.processing?.status === 'completed',
             variants: null as any
         };
 
-        if (media.image_variants) {
-            variantInfo.variants = {
-                original: media.image_variants.original,
-                small: {
-                    webp: media.image_variants.small?.webp || null,
-                    jpeg: media.image_variants.small?.jpeg || null
-                },
-                medium: {
-                    webp: media.image_variants.medium?.webp || null,
-                    jpeg: media.image_variants.medium?.jpeg || null
-                },
-                large: {
-                    webp: media.image_variants.large?.webp || null,
-                    jpeg: media.image_variants.large?.jpeg || null
-                }
-            };
+        if (media.variants) {
+            if (media.type === 'image' && media.variants.images) {
+                variantInfo.variants = {
+                    original: media.original,
+                    small: media.variants.images.small || null,
+                    medium: media.variants.images.medium || null,
+                    large: media.variants.images.large || null
+                };
+            } else if (media.type === 'video' && media.variants.videos) {
+                variantInfo.variants = {
+                    original: media.original,
+                    p360: media.variants.videos.p360 || null,
+                    p720: media.variants.videos.p720 || null,
+                    p1080: media.variants.videos.p1080 || null,
+                    poster: media.variants.thumbnails?.poster || null,
+                    preview: media.variants.thumbnails?.preview || null
+                };
+            }
         }
 
         res.status(200).json({
@@ -859,7 +861,7 @@ export const getUploadStatusController: RequestHandler = async (
         const { mediaId } = req.params;
 
         const media = await Media.findById(mediaId)
-            .select('processing original_filename image_variants url')
+            .select('processing upload_id variants original')
             .lean();
 
         if (!media) {
@@ -880,17 +882,17 @@ export const getUploadStatusController: RequestHandler = async (
             message: 'Upload status retrieved successfully',
             data: {
                 mediaId,
-                filename: media.original_filename,
+                filename: media.upload_id,
                 processingStatus: media.processing?.status || 'unknown',
-                stage: media.processing?.current_stage || 'queued',
-                progress: media.processing?.progress_percentage || 0,
-                variantsGenerated: media.processing?.variants_generated || false,
-                url: media.url,
-                variants: media.image_variants ? {
-                    small: !!media.image_variants.small,
-                    medium: !!media.image_variants.medium,
-                    large: !!media.image_variants.large,
-                    original: !!media.image_variants.original
+                stage: media.processing?.stage || 'uploading',
+                progress: media.processing?.progress || 0,
+                variantsGenerated: media.processing?.status === 'completed',
+                url: media.original?.public_id || '',
+                variants: media.variants ? {
+                    small: media.type === 'image' ? !!media.variants.images?.small : !!media.variants.thumbnails?.preview,
+                    medium: media.type === 'image' ? !!media.variants.images?.medium : !!media.variants.videos?.p720,
+                    large: media.type === 'image' ? !!media.variants.images?.large : !!media.variants.videos?.p1080,
+                    original: !!media.original
                 } : null
             },
             error: null,
@@ -938,15 +940,15 @@ export const getBatchUploadStatusController: RequestHandler = async (
         }
 
         const mediaList = await Media.find({ _id: { $in: mediaIds } })
-            .select('_id processing original_filename url')
+            .select('_id processing upload_id original')
             .lean();
 
         const statusMap = mediaList.reduce((acc, media) => {
             acc[media._id.toString()] = {
-                filename: media.original_filename,
+                filename: media.upload_id,
                 status: media.processing?.status || 'unknown',
-                progress: media.processing?.progress_percentage || 0,
-                url: media.url
+                progress: media.processing?.progress || 0,
+                url: media.original?.public_id || ''
             };
             return acc;
         }, {} as Record<string, any>);
@@ -1096,24 +1098,22 @@ export const retryUploadController: RequestHandler = async (
 
         // Reset processing status
         media.processing.status = 'pending';
-        media.processing.progress_percentage = 0;
-        media.processing.error_message = undefined;
-        media.processing.retry_count = (media.processing.retry_count || 0) + 1;
+        media.processing.progress = 0;
+        media.processing.error = '';
         await media.save();
 
         // TODO: Re-queue the processing job
         // const queue = getImageQueue();
         // await queue.add('retry-processing', { mediaId, ... });
 
-        logger.info(`Upload retry initiated for media ${mediaId} (attempt ${media.processing.retry_count})`);
+        logger.info(`Upload retry initiated for media ${mediaId}`);
 
         res.status(200).json({
             status: true,
             code: 200,
             message: 'Upload retry initiated successfully',
             data: {
-                mediaId,
-                retryCount: media.processing.retry_count
+                mediaId
             },
             error: null,
             other: null

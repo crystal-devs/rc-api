@@ -64,7 +64,7 @@ export class ResponseCacheService {
 
             if (cached) {
                 logger.debug(`Cache HIT: Response for ${endpoint}`);
-                return JSON.parse(cached) as T;
+                return JSON.parse(cached as string) as T;
             }
 
             logger.debug(`Cache MISS: Response for ${endpoint}`);

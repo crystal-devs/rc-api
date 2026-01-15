@@ -1,6 +1,6 @@
 import { getCachedSignedUrl } from '@utils/signedUrl';
 import { Media } from "@models/media.model";
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { mediaNotificationService } from '@services/websocket/notifications';
 
 interface AuthenticatedRequest extends Request {
@@ -12,12 +12,17 @@ interface AuthenticatedRequest extends Request {
 
 interface UpdateMediaRequest {
     uploadId: string;
+    original?: {
+        width: number;
+        height: number;
+        aspectRatio: number;
+    };
     variants: {
-        original?: string;
         small: string;
         medium: string;
         large: string;
     };
+    processedAt: string;
 }
 
 export const updateMediaController = async (
@@ -25,13 +30,14 @@ export const updateMediaController = async (
     res: Response,
 ) => {
     try {
-        const { uploadId, variants } = req.body as unknown as UpdateMediaRequest;
+        const { uploadId, original, variants, processedAt } = req.body as UpdateMediaRequest;
 
-        console.log(uploadId, variants, 'Received updateMediaController request');
+        console.log('🔍 LAMBDA PAYLOAD RECEIVED:', JSON.stringify(req.body, null, 2));
+        console.log('📏 Original dimensions:', original ? `width: ${original.width}, height: ${original.height}, aspectRatio: ${original.aspectRatio}` : 'No original data');
 
         // 1. Validate input
-        if (typeof uploadId !== 'string' || !variants || typeof variants !== 'object') {
-            return res.status(400).json({ error: 'Missing or invalid uploadId or variants' });
+        if (!uploadId || !variants || !processedAt) {
+            return res.status(400).json({ error: 'Missing required fields: uploadId, variants, processedAt' });
         }
 
         // 2. Find Media document
@@ -41,71 +47,73 @@ export const updateMediaController = async (
             return res.status(404).json({ error: 'Media not found' });
         }
 
-        // 3. Update variants (WebP only)
-        media.image_variants = {
-            original: media.image_variants?.original || {
-                public_id: media.public_id,
-                width: media.metadata?.width || 0,
-                height: media.metadata?.height || 0,
-                size_mb: media.size_mb,
-                format: media.format,
-            },
-            small: {
-                webp: {
-                    public_id: variants.small,
-                    width: 300,
-                    height: Math.round(300 * (media.metadata?.aspect_ratio || 1)),
-                    size_mb: 0.05, // approximate
-                    format: 'webp',
-                },
-                jpeg: null,
-            },
-            medium: {
-                webp: {
-                    public_id: variants.medium,
-                    width: 1080,
-                    height: Math.round(1080 * (media.metadata?.aspect_ratio || 1)),
-                    size_mb: 0.2,
-                    format: 'webp',
-                },
-                jpeg: null,
-            },
-            large: {
-                webp: {
-                    public_id: variants.large,
-                    width: 1920,
-                    height: Math.round(1920 * (media.metadata?.aspect_ratio || 1)),
-                    size_mb: 0.5,
-                    format: 'webp',
-                },
-                jpeg: null,
-            },
-        };
+        // 3. Update original metadata if provided
+        if (original) {
+            media.original = {
+                public_id: media.original?.public_id || '',
+                filename: media.original?.filename || '',
+                width: original.width,
+                height: original.height,
+                format: media.original?.format || 'jpeg',
+                size_mb: media.original?.size_mb || 0,
+            };
+        }
 
-        // 4. Update processing
+        // 4. Update variants based on media type
+        if (media.type === 'image') {
+            if (!media.variants.images) media.variants.images = {};
+            if (variants.small) {
+                media.variants.images.small = { public_id: variants.small };
+            }
+            if (variants.medium) {
+                media.variants.images.medium = { public_id: variants.medium };
+            }
+            if (variants.large) {
+                media.variants.images.large = { public_id: variants.large };
+            }
+        } else if (media.type === 'video') {
+            // For videos, assume the variants are transcodes
+            if (!media.variants.videos) media.variants.videos = {};
+            // Map small/medium/large to p360/p720/p1080
+            if (variants.small) {
+                media.variants.videos.p360 = { public_id: variants.small };
+            }
+            if (variants.medium) {
+                media.variants.videos.p720 = { public_id: variants.medium };
+            }
+            if (variants.large) {
+                media.variants.videos.p1080 = { public_id: variants.large };
+            }
+        }
+
+        // 5. Update processing
         media.processing = {
             ...media.processing,
             status: 'completed',
-            current_stage: 'completed',
-            progress_percentage: 100,
-            variants_generated: true,
-            variants_count: 3,
-            completed_at: new Date(),
-            last_updated: new Date(),
+            stage: 'completed',
+            progress: 100,
         };
 
         await media.save();
 
-        // 5. Emit WebSocket using MediaNotificationService
+        // 6. Emit WebSocket using MediaNotificationService
         const eventId = media.event_id.toString();
-        const smallUrl = await getCachedSignedUrl(media.image_variants.small.webp!.public_id);
-        const mediumUrl = await getCachedSignedUrl(media.image_variants.medium.webp!.public_id);
-        const largeUrl = await getCachedSignedUrl(media.image_variants.large.webp!.public_id);
+        let smallUrl = '', mediumUrl = '', largeUrl = '';
+
+        if (media.type === 'image' && media.variants.images) {
+            smallUrl = media.variants.images.small ? await getCachedSignedUrl(media.variants.images.small.public_id) : '';
+            mediumUrl = media.variants.images.medium ? await getCachedSignedUrl(media.variants.images.medium.public_id) : '';
+            largeUrl = media.variants.images.large ? await getCachedSignedUrl(media.variants.images.large.public_id) : '';
+        } else if (media.type === 'video' && media.variants.videos) {
+            smallUrl = media.variants.videos.p360 ? await getCachedSignedUrl(media.variants.videos.p360.public_id) : '';
+            mediumUrl = media.variants.videos.p720 ? await getCachedSignedUrl(media.variants.videos.p720.public_id) : '';
+            largeUrl = media.variants.videos.p1080 ? await getCachedSignedUrl(media.variants.videos.p1080.public_id) : '';
+        }
 
         mediaNotificationService.broadcastProcessingComplete({
             mediaId: media._id.toString(),
             eventId,
-            newUrl: mediumUrl,
+            newUrl: mediumUrl || media.original.public_id,
             variants: {
                 thumbnail: smallUrl,
                 display: mediumUrl,

@@ -86,108 +86,50 @@ export const uploadCompleteController = async (
     // ────────────────────── SAVE/UPDATE MONGODB ──────────────────────
     let savedMedia;
 
-    // Use atomic update with pipeline to prevent race conditions with Lambda
-    // This ensures we don't overwrite 'completed' status/variants if Lambda beat us to it
-    const existingMedia = await Media.findOneAndUpdate(
-      { upload_id },
-      [
-        {
-          $set: {
-            // Update approval only if it's not already set
-            approval: {
-              $cond: {
-                if: {
-                  $or: [
-                    { $not: ["$approval"] },
-                    { $not: ["$approval.status"] },
-                    { $eq: ["$approval.status", "pending"] } // Optional: Update if pending? Prefer safe update.
-                  ]
-                },
-                then: {
-                  status: approvalResult.status,
-                  approved_by: approvalResult.approved_by,
-                  approved_at: approvalResult.approved_at,
-                  rejection_reason: '',
-                  auto_approval_reason: approvalResult.auto_approval_reason || null
-                },
-                else: "$approval"
-              }
-            },
-            approval_status: {
-              $cond: {
-                if: {
-                  $or: [
-                    { $not: ["$approval"] },
-                    { $not: ["$approval.status"] },
-                    { $eq: ["$approval.status", "pending"] }
-                  ]
-                },
-                then: approvalResult.status === 'approved',
-                else: "$approval_status"
-              }
-            },
-            // Update processing status ONLY if variants haven't been generated yet
-            "processing.status": {
-              $cond: {
-                if: { $eq: ["$processing.variants_generated", true] },
-                then: "completed",
-                else: "processing"
-              }
-            },
-            "processing.current_stage": {
-              $cond: {
-                if: { $eq: ["$processing.variants_generated", true] },
-                then: "completed",
-                else: "processing"
-              }
-            },
-            // Ensure other processing fields are set if we are in processing mode
-            "processing.progress_percentage": {
-              $cond: {
-                if: { $eq: ["$processing.variants_generated", true] },
-                then: "$processing.progress_percentage",
-                else: 10
-              }
-            }
-          }
-        }
-      ],
-      { new: true }
-    );
+    // Check if media already exists
+    const existingMedia = await Media.findOne({ upload_id });
 
     if (existingMedia) {
-      savedMedia = existingMedia;
+      // Update approval if still pending
+      if (existingMedia.approval.status === 'pending') {
+        existingMedia.approval = {
+          status: approvalResult.status as 'pending' | 'approved' | 'rejected' | 'hidden',
+          reason: '',
+        };
+      }
+      savedMedia = await existingMedia.save();
       logger.info(`Media updated: ${savedMedia._id}, upload_id: ${upload_id}`);
     } else {
-      // Fallback: Create new media if not found (old behavior)
+      // Fallback: Create new media if not found (universal schema)
+      const owner = req.user?.role === 'guest'
+        ? { type: 'guest' as const, guest_id: req.user._id }
+        : { type: 'registered_user' as const, user_id: req.user?._id };
+
       const media = new Media({
-        url: key, // Store key instead of signed URL
-        public_id: key,
-        type: 'image',
         upload_id,
+        type: extension.match(/^(mp4|mov|avi|mkv)$/i) ? 'video' : 'image',
         event_id: eventId,
         album_id: eventId,
-        original_filename: originalFileName,
-        format: extension,
-        guest_session_id: req.user?.role === 'guest' ? req.user?._id : null,
-        uploaded_by: req.user?._id,
-        size_mb: 0,
+        owner,
+        original: {
+          public_id: key,
+          filename: originalFileName,
+          width: extension.match(/^(mp4|mov|avi|mkv)$/i) ? undefined : 0, // Images only
+          height: extension.match(/^(mp4|mov|avi|mkv)$/i) ? undefined : 0, // Images only
+          duration: extension.match(/^(mp4|mov|avi|mkv)$/i) ? 0 : undefined, // Videos only
+          format: extension as 'jpeg' | 'webp' | 'heic' | 'mp4' | 'mov' | 'avi' | 'mkv',
+          size_mb: 0,
+        },
+        variants: {}, // Empty initially
         processing: {
           status: 'processing',
-          current_stage: 'processing',
-          progress_percentage: 10,
-          last_updated: new Date(),
+          stage: 'uploading',
+          progress: 10,
         },
         approval: {
-          ...approvalResult,
-          rejection_reason: '', // Default
-          auto_approval_reason: (approvalResult.auto_approval_reason as any) || null // Ensure compatible type
-        } as any,
-        approval_status: approvalResult.status === 'approved',
-        uploader_type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
-        created_at: new Date(),
-        updated_at: new Date(),
-        deleteGroup: `event-${eventId}-upload-${upload_id}`
+          status: approvalResult.status,
+          reason: '',
+        },
       });
 
       savedMedia = await media.save();
@@ -203,10 +145,10 @@ export const uploadCompleteController = async (
       fileName: originalFileName,
       status: 'uploaded',
       approval: savedMedia.approval,
-      approval_status: savedMedia.approval?.status === 'approved' || savedMedia.approval?.status === 'auto_approved',
+      approval_status: savedMedia.approval?.status === 'approved',
       timestamp: new Date(),
       uploader: {
-        type: savedMedia.uploader_type,
+        type: savedMedia.owner.type,
         id: req.user?._id || null,
       },
     };
@@ -225,7 +167,7 @@ export const uploadCompleteController = async (
       upload_id,
       status: 'uploaded',
       approval: savedMedia.approval,
-      approval_status: savedMedia.approval?.status === 'approved' || savedMedia.approval?.status === 'auto_approved',
+      approval_status: savedMedia.approval?.status === 'approved',
     };
 
     console.log('🔍 UPLOAD-COMPLETE RESPONSE DATA:', JSON.stringify(responseData, null, 2));

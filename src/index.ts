@@ -37,6 +37,7 @@ import http from "http";
 import { HealthService } from "@services/system";
 import { InitializationService, ProductionMonitoringService } from "@services/system";
 import guestRouter from "@routes/guest-session.router";
+import { cronService } from "@services/system/cron.service";
 
 const app = express();
 const PORT = keys.port;
@@ -119,9 +120,13 @@ async function initializeApplication() {
     const redisConnected = await InitializationService.initializeRedis();
 
     // Initialize image processing (requires Redis)
+    // Initialize image processing (requires Redis)
     if (redisConnected) {
       await InitializationService.initializeBulkDownload();
     }
+
+    // Initialize Cron Service (Scheduled Tasks)
+    cronService.initialize();
 
     // Initialize S3 connection
     const s3Connected = await InitializationService.initializeS3();
