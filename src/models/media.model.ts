@@ -51,7 +51,8 @@ const mediaVariantsSchema = new mongoose.Schema({
 const ownerSchema = new mongoose.Schema({
     type: { type: String, enum: ['registered_user', 'guest'], required: true },
     user_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: false },
-    guest_id: { type: String, required: false }
+    guest_id: { type: String, required: false },
+    display_name: { type: String, required: false } // Snapshot for guests
 }, { _id: false });
 
 // Enhanced processing schema
@@ -206,6 +207,7 @@ mediaSchema.methods.getProgressInfo = function (this: MediaDocument) {
 
 // Indexes
 mediaSchema.index({ event_id: 1, album_id: 1 });
+mediaSchema.index({ event_id: 1, created_at: -1 }); // Optimized for Event Feed
 mediaSchema.index({ album_id: 1, created_at: -1 }); // Optimized for album view
 mediaSchema.index({ "owner.user_id": 1, created_at: -1 });
 mediaSchema.index({ "owner.guest_id": 1, event_id: 1 });

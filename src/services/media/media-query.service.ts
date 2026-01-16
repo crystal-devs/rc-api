@@ -123,6 +123,7 @@ export const getMediaByEventService = async (
 
         // Execute query
         const mediaItems = await Media.find(query)
+            .select('_id type event_id album_id original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)
@@ -199,6 +200,7 @@ export const getMediaByAlbumService = async (
 
         // Get media with pagination
         const mediaItems = await Media.find(query)
+            .select('_id type event_id album_id original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)

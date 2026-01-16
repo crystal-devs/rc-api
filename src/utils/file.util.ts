@@ -86,7 +86,26 @@ export function hasImageVariants(mediaItem: any): boolean {
 /**
  * Get uploader display name
  */
+/**
+ * Get uploader display name
+ */
 function getUploaderDisplayName(mediaItem: any): string {
+    // Check for owner field (Schema compliant)
+    if (mediaItem.owner) {
+        if (mediaItem.owner.type === 'registered_user') {
+            // Note: Since we are using lean(), populated user data might not be here.
+            // If user_id is populated as an object with name:
+            if (mediaItem.owner.user_id && typeof mediaItem.owner.user_id === 'object' && mediaItem.owner.user_id.name) {
+                return mediaItem.owner.user_id.name;
+            }
+            return 'User';
+        } else if (mediaItem.owner.type === 'guest') {
+            // Priority: Snapshot display_name (new) > guest_id (fallback)
+            return mediaItem.owner.display_name || 'Anonymous Guest';
+        }
+    }
+
+    // Fallback for legacy or loose objects
     if (mediaItem.uploader_type === 'registered_user' && mediaItem.uploaded_by) {
         if (typeof mediaItem.uploaded_by === 'object' && mediaItem.uploaded_by.name) {
             return mediaItem.uploaded_by.name;
@@ -106,14 +125,22 @@ export interface MediaMetadata {
     type: string;
     url: string;
     processing_status: string;
+    processing?: {
+        status: string;
+        stage?: string;
+        progress?: number;
+        error?: string;
+    };
     approval_status: string;
     size_mb: number;
     format: string;
+    uploaded_by?: string;
+    uploader_type?: string;
+    guest_uploader?: any;
     uploader_display_name: string;
     dimensions: {
         width: number;
         height: number;
-        aspect_ratio: number;
     } | null;
     stats: any;
     created_at: string;
@@ -143,6 +170,42 @@ async function getResponsiveImageUrlsWithCache(
         ? (urlCache.get(publicId) || await getCachedSignedUrl(publicId))
         : null;
 
+    // Unified Schema Support (variants.images OR variants.thumbnails for videos)
+    if (mediaItem.variants) {
+        // VIDEO HANDLING
+        if (mediaItem.type === 'video' && mediaItem.variants.thumbnails) {
+            const thumbs = mediaItem.variants.thumbnails;
+
+            // Prefer poster for static grid, preview for hover
+            const posterUrl = thumbs.poster?.public_id ? (urlCache.get(thumbs.poster.public_id) || await getCachedSignedUrl(thumbs.poster.public_id)) : null;
+            const previewUrl = thumbs.preview?.public_id ? (urlCache.get(thumbs.preview.public_id) || await getCachedSignedUrl(thumbs.preview.public_id)) : null;
+
+            return {
+                thumbnail: posterUrl || previewUrl || originalUrl, // Lightweight preview
+                display: posterUrl || previewUrl || originalUrl,   // Lightweight preview
+                full: originalUrl, // Click to play full video
+                original: originalUrl,
+            };
+        }
+
+        // IMAGE HANDLING
+        if (mediaItem.variants.images) {
+            const images = mediaItem.variants.images;
+            const getUrl = async (variant: any) => {
+                if (!variant?.public_id) return null;
+                return urlCache.get(variant.public_id) || await getCachedSignedUrl(variant.public_id);
+            };
+
+            return {
+                thumbnail: await getUrl(images.small) || originalUrl,
+                display: await getUrl(images.medium) || originalUrl,
+                full: await getUrl(images.large) || originalUrl,
+                original: originalUrl,
+            };
+        }
+    }
+
+    // Legacy Schema Support (image_variants)
     if (!mediaItem?.image_variants || mediaItem.type !== 'image') {
         return {
             thumbnail: originalUrl,
@@ -222,15 +285,27 @@ async function getMediaMetadataWithCache(mediaItem: any, urlCache: Map<string, s
         type: mediaItem.type,
         url: mainUrl,
         processing_status: mediaItem.processing?.status || 'unknown',
+        processing: {
+            status: mediaItem.processing?.status || 'unknown',
+            stage: mediaItem.processing?.stage,
+            progress: mediaItem.processing?.progress,
+            error: mediaItem.processing?.error
+        },
         approval_status: mediaItem.approval?.status || 'pending',
-        size_mb: mediaItem.size_mb || 0,
-        format: mediaItem.format || '',
+        size_mb: mediaItem.original?.size_mb || mediaItem.size_mb || 0,
+        format: mediaItem.original?.format || mediaItem.format || '',
+
+        // Owner / Uploader mapping
+        uploaded_by: mediaItem.owner?.user_id?.toString() || mediaItem.uploaded_by,
+        uploader_type: mediaItem.owner?.type || mediaItem.uploader_type,
+        guest_uploader: mediaItem.owner?.type === 'guest' ? { guest_id: mediaItem.owner.guest_id } : mediaItem.guest_uploader,
         uploader_display_name: getUploaderDisplayName(mediaItem),
-        dimensions: mediaItem.metadata ? {
-            width: mediaItem.metadata.width || 0,
-            height: mediaItem.metadata.height || 0,
-            aspect_ratio: mediaItem.metadata.aspect_ratio || 1
-        } : null,
+
+        dimensions: {
+            // Priority: original schema > metadata logic > default
+            width: mediaItem.original?.width || mediaItem.metadata?.width || 0,
+            height: mediaItem.original?.height || mediaItem.metadata?.height || 0
+        },
         stats: mediaItem.stats || {
             views: 0,
             downloads: 0,
@@ -264,7 +339,31 @@ export async function transformMediaForResponse(
             seenKeys.add(publicId);
         }
 
-        // Also collect variant public_ids
+        // Collect unified variants (variants.images AND variants.thumbnails)
+        if (item.variants) {
+            // Images
+            if (item.variants.images) {
+                ['small', 'medium', 'large'].forEach(size => {
+                    const variant = item.variants.images[size];
+                    if (variant?.public_id && !seenKeys.has(variant.public_id)) {
+                        urlsToGenerate.push({ s3Key: variant.public_id, expiresIn: 3600 });
+                        seenKeys.add(variant.public_id);
+                    }
+                });
+            }
+            // Video Thumbnails
+            if (item.variants.thumbnails) {
+                ['poster', 'preview'].forEach(type => {
+                    const variant = item.variants.thumbnails[type];
+                    if (variant?.public_id && !seenKeys.has(variant.public_id)) {
+                        urlsToGenerate.push({ s3Key: variant.public_id, expiresIn: 3600 });
+                        seenKeys.add(variant.public_id);
+                    }
+                });
+            }
+        }
+
+        // Collect legacy variants (image_variants)
         if (item.image_variants) {
             ['small', 'medium', 'large'].forEach(size => {
                 const variant = item.image_variants[size];

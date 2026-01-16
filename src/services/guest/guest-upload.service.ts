@@ -161,7 +161,8 @@ const processGuestImageUpload = async (
             owner: {
                 type: authenticatedUserId ? 'registered_user' : 'guest',
                 user_id: userObjectId || undefined,
-                guest_id: !authenticatedUserId ? guestUploaderInfo.session_id : undefined
+                guest_id: !authenticatedUserId ? guestUploaderInfo.session_id : undefined,
+                display_name: !authenticatedUserId ? (guestUploaderInfo.name || 'Anonymous Guest') : undefined
             },
 
             original: {
@@ -282,7 +283,8 @@ const processGuestVideoUpload = async (
             owner: {
                 type: authenticatedUserId ? 'registered_user' : 'guest',
                 user_id: authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : undefined,
-                guest_id: !authenticatedUserId ? guestUploaderInfo.session_id : undefined
+                guest_id: !authenticatedUserId ? guestUploaderInfo.session_id : undefined,
+                display_name: !authenticatedUserId ? (guestUploaderInfo.name || 'Anonymous Guest') : undefined
             },
 
             original: {
