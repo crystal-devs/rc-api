@@ -126,9 +126,9 @@ mediaRouter.delete(
     deleteMediaController
 );
 
-// Bulk soft delete media
-mediaRouter.delete(
-    "/event/:event_id/media/bulk-delete",
+// Bulk soft delete media (POST used for reliable body support)
+mediaRouter.post(
+    "/event/:event_id/bulk-delete",
     authMiddleware,
     bulkSoftDeleteMediaController
 );
