@@ -67,6 +67,7 @@ export const generateUploadUrlController = async (
       Bucket: keys.s3BucketName as string,
       Key: key,
       ContentType: fileType,
+      CacheControl: 'max-age=31536000, immutable' // Enable aggressive caching
     });
 
     // Generate presigned URL (expires in 10 minutes)
@@ -226,6 +227,7 @@ export const generateBatchUploadUrlsController = async (
             Bucket: keys.s3BucketName as string,
             Key: key,
             ContentType: file.fileType,
+            CacheControl: 'max-age=31536000, immutable' // Enable aggressive caching
           });
 
           // Generate presigned URL (expires in 10 minutes)
