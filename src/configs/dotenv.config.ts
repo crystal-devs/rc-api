@@ -19,41 +19,41 @@ const buildRedisUrl = (): string => {
   }
 };
 
-export const keys: Record<string, string | number | string[]> = {
+export const keys: Record<string, string | number | string[] | boolean> = {
 
-   // 🚀 Server Configuration
-   port: process.env.PORT ? Number(process.env.PORT) : 3001,
+  // 🚀 Server Configuration
+  port: process.env.PORT ? Number(process.env.PORT) : 3001,
   nodeEnv: process.env.NODE_ENV || 'development',
   APILiveVersion: process.env.VERSION || 'v1',
   corsOrigins: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : [],
-  
+
   // 🔐 Security
   jwtSecret: process.env.JWT_SECRET || '',
-  
+
   // 📊 MongoDB Configuration
   mongoURI: process.env.MONGO_URI || '',
   mongoDBName: process.env.MONGO_DB_NAME || '',
-  
+
   // 📈 MongoDB Connection Pool Settings (with defaults)
-  mongoMaxPoolSize: process.env.MONGO_MAX_POOL_SIZE 
-    ? Number(process.env.MONGO_MAX_POOL_SIZE) 
+  mongoMaxPoolSize: process.env.MONGO_MAX_POOL_SIZE
+    ? Number(process.env.MONGO_MAX_POOL_SIZE)
     : (process.env.NODE_ENV === 'production' ? 50 : 10),
-  mongoMinPoolSize: process.env.MONGO_MIN_POOL_SIZE 
-    ? Number(process.env.MONGO_MIN_POOL_SIZE) 
+  mongoMinPoolSize: process.env.MONGO_MIN_POOL_SIZE
+    ? Number(process.env.MONGO_MIN_POOL_SIZE)
     : (process.env.NODE_ENV === 'production' ? 5 : 2),
-  mongoMaxIdleTimeMS: process.env.MONGO_MAX_IDLE_TIME_MS 
-    ? Number(process.env.MONGO_MAX_IDLE_TIME_MS) 
+  mongoMaxIdleTimeMS: process.env.MONGO_MAX_IDLE_TIME_MS
+    ? Number(process.env.MONGO_MAX_IDLE_TIME_MS)
     : 30000,
-  mongoServerSelectionTimeoutMS: process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS 
-    ? Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS) 
+  mongoServerSelectionTimeoutMS: process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS
+    ? Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS)
     : 10000,
-  mongoSocketTimeoutMS: process.env.MONGO_SOCKET_TIMEOUT_MS 
-    ? Number(process.env.MONGO_SOCKET_TIMEOUT_MS) 
+  mongoSocketTimeoutMS: process.env.MONGO_SOCKET_TIMEOUT_MS
+    ? Number(process.env.MONGO_SOCKET_TIMEOUT_MS)
     : 45000,
-  mongoConnectTimeoutMS: process.env.MONGO_CONNECT_TIMEOUT_MS 
-    ? Number(process.env.MONGO_CONNECT_TIMEOUT_MS) 
+  mongoConnectTimeoutMS: process.env.MONGO_CONNECT_TIMEOUT_MS
+    ? Number(process.env.MONGO_CONNECT_TIMEOUT_MS)
     : 10000,
-  
+
   // 🔴 Redis Configuration
   redisUrl: process.env.REDIS_URL || buildRedisUrl(),
   redisHost: process.env.REDIS_HOST || 'localhost',
@@ -65,6 +65,10 @@ export const keys: Record<string, string | number | string[]> = {
   awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
   awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
   s3BucketName: process.env.AWS_S3_BUCKET || '',
+
+  // 🌩️ CloudFront Configuration
+  useCloudFront: process.env.USE_CLOUDFRONT === 'true',
+  cloudFrontDomain: process.env.CLOUDFRONT_DOMAIN || '',
 };
 
 // Validate environment variables
@@ -100,7 +104,7 @@ logger.info(`   - Max Idle Time: ${keys.mongoMaxIdleTimeMS}ms`);
 logger.info(`   - Socket Timeout: ${keys.mongoSocketTimeoutMS}ms`);
 
 // Log Redis connection info (without sensitive data)
-const redisInfo = keys.redisPassword 
+const redisInfo = keys.redisPassword
   ? `${keys.redisHost}:${keys.redisPort} (with auth)`
   : `${keys.redisHost}:${keys.redisPort} (no auth)`;
 logger.info(`🔴 Redis Connection: ${redisInfo}`);

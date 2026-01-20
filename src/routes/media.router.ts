@@ -25,7 +25,7 @@ import {
 import { optionalAuthMiddleware } from "@middlewares/conditional-auth.middleware";
 import { checkFileSizeLimitMiddleware } from "@middlewares/upload.middleware";
 import { generateBatchUploadUrlsController, generateUploadUrlController } from "@controllers/upload-url.controller";
-import { uploadCompleteController } from "@controllers/upload-complete.controller";
+import { uploadCompleteController, uploadBatchCompleteController } from "@controllers/upload-complete.controller";
 import { getSignedUrlForKeyController } from "@controllers/signed-url.controller";
 import { validateLambdaToken } from "@middlewares/validateLambdaToken.middleware";
 import { updateMediaController } from "@controllers/update-media.controller";
@@ -64,6 +64,7 @@ const upload = multer({
 
 mediaRouter.post('/upload-url', authMiddleware, wrap(generateBatchUploadUrlsController))
 mediaRouter.post('/upload-complete', authMiddleware, wrap(uploadCompleteController))
+mediaRouter.post('/upload-complete/batch', authMiddleware, wrap(uploadBatchCompleteController))
 mediaRouter.post('/signed-url/key', optionalAuthMiddleware, wrap(getSignedUrlForKeyController))
 mediaRouter.post('/update-photo', validateLambdaToken as RequestHandler, wrap(updateMediaController))
 

@@ -22,6 +22,8 @@ interface UploadCompleteRequest {
   key: string;
   eventId: string;
   upload_id: string;
+  width?: number;
+  height?: number;
 }
 
 interface AuthenticatedRequest extends Request {
@@ -42,9 +44,9 @@ export const uploadCompleteController = async (
   try {
     const userId = req.user?._id;
     console.log(userId, 'User ID');
-    const { key, eventId, upload_id }: UploadCompleteRequest = req.body;
+    const { key, eventId, upload_id, width, height }: UploadCompleteRequest = req.body;
 
-    console.log('key:', key, 'eventId:', eventId, 'upload_id:', upload_id);
+    console.log('key:', key, 'eventId:', eventId, 'upload_id:', upload_id, 'dims:', width, 'x', height);
     // ────────────────────── VALIDATION ──────────────────────
     if (!key || !eventId || !upload_id) {
       return res.status(400).json({
@@ -97,6 +99,13 @@ export const uploadCompleteController = async (
           reason: '',
         };
       }
+
+      // Update dimensions if provided and currently missing
+      if (width && height && (existingMedia.original.width === 0 || !existingMedia.original.width)) {
+        existingMedia.original.width = width;
+        existingMedia.original.height = height;
+      }
+
       savedMedia = await existingMedia.save();
       logger.info(`Media updated: ${savedMedia._id}, upload_id: ${upload_id}`);
     } else {
@@ -114,8 +123,8 @@ export const uploadCompleteController = async (
         original: {
           public_id: key,
           filename: originalFileName,
-          width: extension.match(/^(mp4|mov|avi|mkv)$/i) ? undefined : 0, // Images only
-          height: extension.match(/^(mp4|mov|avi|mkv)$/i) ? undefined : 0, // Images only
+          width: width || (extension.match(/^(mp4|mov|avi|mkv)$/i) ? undefined : 0), // Use provided width or default
+          height: height || (extension.match(/^(mp4|mov|avi|mkv)$/i) ? undefined : 0), // Use provided height or default
           duration: extension.match(/^(mp4|mov|avi|mkv)$/i) ? 0 : undefined, // Videos only
           format: extension as 'jpeg' | 'webp' | 'heic' | 'mp4' | 'mov' | 'avi' | 'mkv',
           size_mb: 0,
@@ -187,3 +196,172 @@ export const uploadCompleteController = async (
   }
 };
 
+/**
+ * Handle batch upload completion
+ * Reduces API calls and WebSocket chatter
+ * POST /api/batch-upload-complete
+ */
+export const uploadBatchCompleteController = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { eventId, uploads } = req.body as {
+      eventId: string;
+      uploads: Array<{
+        key: string;
+        upload_id: string;
+        width?: number;
+        height?: number;
+      }>
+    };
+
+    if (!eventId || !uploads || !Array.isArray(uploads) || uploads.length === 0) {
+      return res.status(400).json({
+        status: false,
+        message: 'Event ID and uploads array are required'
+      });
+    }
+
+    const userId = req.user?._id;
+    const approvalResult = await validatePermissionsAndGetApproval(eventId, userId);
+
+    const completedMedia: any[] = [];
+    const eventsToEmit: any[] = [];
+
+    // Process all uploads in parallel
+    await Promise.all(uploads.map(async (uploadData) => {
+      try {
+        const { key, upload_id, width, height } = uploadData;
+
+        // 🚀 FIXED: Use CloudFront or Presigned URL instead of raw S3
+        let finalUrl = '';
+
+        if (keys.useCloudFront && keys.cloudFrontDomain) {
+          finalUrl = `https://${keys.cloudFrontDomain}/${key}`;
+        } else {
+          // Fallback to S3 Presigned URL (7 days)
+          finalUrl = await getSignedUrl(
+            s3Client,
+            new GetObjectCommand({
+              Bucket: keys.s3BucketName as string,
+              Key: key,
+            }),
+            { expiresIn: 604800 }
+          );
+        }
+
+        const s3Url = finalUrl; // Keep variable name for minimal diff, but it holds the accessible URL now
+
+        // Find and update media
+        let savedMedia;
+        const existingMedia = await Media.findOne({
+          $or: [
+            { upload_id },
+            { 'original.public_id': key }
+          ]
+        });
+
+        if (existingMedia) {
+          // Update dimensions if provided
+          if (width && height) {
+            existingMedia.original.width = width;
+            existingMedia.original.height = height;
+          }
+
+          // Ensure URL is set
+          if (!('url' in existingMedia.original) || !(existingMedia.original as any).url) {
+            (existingMedia.original as any).url = s3Url;
+          }
+
+          // Update approval if currently pending (batch approval logic)
+          if (existingMedia.approval.status === 'pending') {
+            existingMedia.approval = {
+              status: approvalResult.status as 'pending' | 'approved' | 'rejected' | 'hidden',
+              reason: '',
+            };
+            existingMedia.markModified('approval'); // Ensure mongoose tracks the change
+          }
+
+          existingMedia.markModified('original');
+          savedMedia = await existingMedia.save();
+        } else {
+          // Fallback logic for safety, though typically existingMedia should exist
+          return;
+        }
+
+        if (savedMedia) {
+          completedMedia.push({
+            mediaId: savedMedia._id,
+            originalUrl: s3Url,
+            upload_id: savedMedia.upload_id,
+            status: 'uploaded',
+            width: savedMedia.original.width,
+            height: savedMedia.original.height,
+            // 🚀 ADDED: Approval status for frontend
+            approval: savedMedia.approval,
+            approval_status: savedMedia.approval?.status === 'approved',
+          });
+
+          // Prepare event data
+          eventsToEmit.push({
+            mediaId: savedMedia._id,
+            eventId: savedMedia.event_id,
+            media: {
+              url: s3Url,
+              thumbnailUrl: s3Url,
+              filename: savedMedia.original.filename,
+              width: savedMedia.original.width,
+              height: savedMedia.original.height
+            },
+            uploadedBy: {
+              id: req.user?._id || 'guest',
+              name: 'User', // Simplified for mass upload
+              type: req.user?.role === 'guest' ? 'guest' : 'admin'
+            },
+            processingStatus: 'processing',
+            isInstantPreview: true,
+            // 🚀 ADDED: Approval status for WebSocket
+            approval: savedMedia.approval,
+            approval_status: savedMedia.approval?.status === 'approved',
+          });
+        }
+      } catch (err) {
+        logger.error(`Failed to process item in batch upload: ${uploadData.upload_id}`, err);
+      }
+    }));
+
+    // Emit SINGLE batch event to WebSocket
+    if (eventsToEmit.length > 0) {
+      const webSocketService = getWebSocketService();
+
+      const adminRoom = `admin_${eventId}`;
+      const guestRoom = `guest_${eventId}`;
+
+      const batchPayload = {
+        eventId,
+        count: eventsToEmit.length,
+        items: eventsToEmit
+      };
+
+      webSocketService.io.to(adminRoom).emit('batch_media_uploaded', batchPayload);
+      webSocketService.io.to(guestRoom).emit('batch_media_uploaded', batchPayload);
+
+      logger.info(`WebSocket 'batch_media_uploaded' emitted for event ${eventId} with ${eventsToEmit.length} items`);
+    }
+
+    return res.status(200).json({
+      status: true,
+      message: `Batch upload completed for ${completedMedia.length} items`,
+      data: {
+        completedCount: completedMedia.length,
+        results: completedMedia
+      }
+    });
+
+  } catch (error: any) {
+    logger.error('Error in batch upload completion:', error);
+    return res.status(500).json({
+      status: false,
+      message: 'Internal server error',
+      error: error.message
+    });
+  }
+};
