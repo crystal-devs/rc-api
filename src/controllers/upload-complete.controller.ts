@@ -8,6 +8,7 @@ import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
 import { Event } from '@models/event.model';
 import { validatePermissionsAndGetApproval } from '@utils/media.utils';
+import { rekognitionService } from '@services/aws/rekognition.service';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -143,6 +144,16 @@ export const uploadCompleteController = async (
 
       savedMedia = await media.save();
       logger.info(`Media created (fallback): ${savedMedia._id}, upload_id: ${upload_id}`);
+    }
+
+    // ────────────────────── ASYNC: INDEX FACES ──────────────────────
+    if (savedMedia.type === 'image') {
+      rekognitionService.indexFaces(
+        keys.s3BucketName as string,
+        key,
+        savedMedia._id.toString(),
+        eventId
+      ).catch(err => logger.error(`Background indexing failed for ${savedMedia._id}:`, err));
     }
 
     // ────────────────────── WEBSOCKET: photo-uploading ──────────────────────
@@ -299,6 +310,16 @@ export const uploadBatchCompleteController = async (req: AuthenticatedRequest, r
             approval: savedMedia.approval,
             approval_status: savedMedia.approval?.status === 'approved',
           });
+
+          // 🚀 Background Indexing
+          if (savedMedia.type === 'image') {
+            rekognitionService.indexFaces(
+              keys.s3BucketName as string,
+              key,
+              savedMedia._id.toString(),
+              eventId
+            ).catch(err => logger.error(`Batch indexing failed for ${savedMedia._id}:`, err));
+          }
 
           // Prepare event data
           eventsToEmit.push({

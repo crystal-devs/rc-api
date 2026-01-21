@@ -29,6 +29,7 @@ import { uploadCompleteController, uploadBatchCompleteController } from "@contro
 import { getSignedUrlForKeyController } from "@controllers/signed-url.controller";
 import { validateLambdaToken } from "@middlewares/validateLambdaToken.middleware";
 import { updateMediaController } from "@controllers/update-media.controller";
+import { searchFacesController } from "@controllers/media/search-faces.controller";
 
 const mediaRouter = express.Router();
 const wrap = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -163,6 +164,18 @@ mediaRouter.post(
     "/upload/:mediaId/retry",
     authMiddleware,
     retryUploadController
+);
+
+// retryUploadController
+// );
+
+// === SEARCH ENDPOINTS ===
+// Search for faces in event photos
+mediaRouter.post(
+    "/search/faces",
+    optionalAuthMiddleware,
+    upload.single('image'),
+    wrap(searchFacesController)
 );
 
 export default mediaRouter;
