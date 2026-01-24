@@ -123,11 +123,14 @@ export const getMediaByEventServiceCached = async (
         // ✅ STEP 2: Query database
         const query = buildMediaQuery(eventId, 'event_id', options);
 
-        // Get counts
+        // Get counts with optimized queries
         const totalCount = await Media.countDocuments({
             event_id: new mongoose.Types.ObjectId(eventId)
+        }, { hint: { event_id: 1 } });
+
+        const filteredCount = await Media.countDocuments(query, {
+            hint: query['approval.status'] ? { event_id: 1, 'approval.status': 1 } : { event_id: 1 }
         });
-        const filteredCount = await Media.countDocuments(query);
 
         logger.info('Media query debug:', {
             eventId,
@@ -162,8 +165,33 @@ export const getMediaByEventServiceCached = async (
         const page = options.page || 1;
         const skip = (page - 1) * limit;
 
-        // Execute query
-        const mediaItems = await Media.find(query)
+        // Execute query with optimized projection
+        const mediaItems = await Media.find(query, {
+            // Only select fields we need for the response
+            _id: 1,
+            'original.filename': 1,
+            'original.public_id': 1,
+            'original.size_mb': 1,
+            'original.format': 1,
+            'original.width': 1,
+            'original.height': 1,
+            'original.duration': 1,
+            'variants.images.small.public_id': 1,
+            'variants.images.medium.public_id': 1,
+            'variants.images.large.public_id': 1,
+            'variants.videos.p360.public_id': 1,
+            'variants.videos.p720.public_id': 1,
+            'variants.videos.p1080.public_id': 1,
+            'variants.thumbnails.poster.public_id': 1,
+            'variants.thumbnails.preview.public_id': 1,
+            'approval.status': 1,
+            'processing.status': 1,
+            type: 1,
+            created_at: 1,
+            'owner.user_id': 1,
+            'owner.guest_id': 1,
+            event_id: 1
+        })
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)
