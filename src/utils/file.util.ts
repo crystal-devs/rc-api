@@ -166,8 +166,10 @@ async function getResponsiveImageUrlsWithCache(
     original: string | null;
 }> {
     const publicId = mediaItem.public_id || mediaItem.original?.public_id;
+    const isExternal = publicId && (publicId.startsWith('http://') || publicId.startsWith('https://'));
+
     const originalUrl = publicId
-        ? (urlCache.get(publicId) || await getCachedSignedUrl(publicId))
+        ? (isExternal ? publicId : (urlCache.get(publicId) || await getCachedSignedUrl(publicId)))
         : null;
 
     // Unified Schema Support (variants.images OR variants.thumbnails for videos)
@@ -245,7 +247,11 @@ async function getMediaMetadataWithCache(mediaItem: any, urlCache: Map<string, s
     const publicId = mediaItem.public_id || mediaItem.original?.public_id;
 
     if (publicId) {
-        mainUrl = urlCache.get(publicId) || await getCachedSignedUrl(publicId);
+        if (publicId.startsWith('http://') || publicId.startsWith('https://')) {
+            mainUrl = publicId;
+        } else {
+            mainUrl = urlCache.get(publicId) || await getCachedSignedUrl(publicId);
+        }
     }
 
     // Get responsive URLs using cache
@@ -334,7 +340,11 @@ export async function transformMediaForResponse(
 
     mediaItems.forEach(item => {
         const publicId = item.public_id || item.original?.public_id;
-        if (publicId && !seenKeys.has(publicId)) {
+
+        // Skip signing if already a full URL (e.g. Unsplash, External)
+        if (publicId && (publicId.startsWith('http://') || publicId.startsWith('https://'))) {
+            // No action needed, will be used as-is
+        } else if (publicId && !seenKeys.has(publicId)) {
             urlsToGenerate.push({ s3Key: publicId, expiresIn: 3600 });
             seenKeys.add(publicId);
         }

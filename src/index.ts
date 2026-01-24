@@ -36,7 +36,8 @@ import express from "express";
 import http from "http";
 import { HealthService } from "@services/system";
 import { InitializationService, ProductionMonitoringService } from "@services/system";
-import guestRouter from "@routes/guest-session.router";
+import guestSessionRouter from "@routes/guest-session.router";
+import guestRouter from "@routes/guest.router";
 import { cronService } from "@services/system/cron.service";
 
 const app = express();
@@ -102,7 +103,8 @@ app.use(`/api/${VERSION}/share`, shareTokenRouter);  // Primary semantic route
 app.use(`/api/${VERSION}/token`, shareTokenRouter);  // Legacy support
 app.use(`/api/${VERSION}/photo-wall`, photoWallRouter);
 app.use(`/api/${VERSION}/upload-queue`, uploadQueueRouter);
-app.use(`/api/${VERSION}/guest-sessions`, guestRouter);
+app.use(`/api/${VERSION}/guest-sessions`, guestSessionRouter);
+app.use(`/api/${VERSION}/guest`, guestRouter);
 
 // NEW: Dedicated bulk operations router with its own rate limiting
 app.use(`/api/${VERSION}/bulk`, bulkOperationsRouter);

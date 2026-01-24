@@ -4,6 +4,7 @@ import * as eventController from "@controllers/event.controller";
 import * as cohostController from "@controllers/co-host.controller"
 import * as participantController from "@controllers/participant.controller";
 import * as invitationController from "@controllers/invitation.controller";
+import { getEventGuestSessionsController, revokeGuestSessionController } from "@controllers/event/guest-management.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import { checkEventLimitMiddleware } from "@middlewares/subscription-limit.middleware";
 import { eventAccessMiddleware } from "@middlewares/event-access.middleware";
@@ -197,6 +198,21 @@ eventRouter.get('/:event_id/cohosts',
 eventRouter.patch('/:event_id/cohosts/:user_id',
     authMiddleware,
     cohostController.manageCoHostController
+);
+
+// ============= GUEST SESSION MANAGEMENT =============
+// Get active guest sessions (Host Dashboard)
+eventRouter.get("/:eventId/guest-sessions",
+    eventAccessMiddleware,
+    requireParticipantManagementAccess,
+    getEventGuestSessionsController as unknown as express.RequestHandler
+);
+
+// Revoke guest session
+eventRouter.patch("/:eventId/guest-sessions/:sessionId/revoke",
+    eventAccessMiddleware,
+    requireParticipantManagementAccess,
+    revokeGuestSessionController as unknown as express.RequestHandler
 );
 
 export default eventRouter;

@@ -44,6 +44,14 @@ const userSchema = new mongoose.Schema({
         type: String,
         default: null
     },
+    // Global Face Identity
+    aws_face_id: {
+        type: String,
+        index: true, // Sparse index defined below
+    },
+    selfie_url: {
+        type: String, // Reference image
+    },
     preferences: {
         emailNotifications: {
             type: Boolean,
@@ -89,6 +97,7 @@ userSchema.index({ stripeCustomerId: 1 }, { sparse: true }); // Stripe integrati
 userSchema.index({ provider: 1, email: 1 }, { sparse: true }); // Social auth queries
 userSchema.index({ subscriptionId: 1 }); // Subscription lookups
 userSchema.index({ lastLoginAt: -1 }); // Recent activity queries
+userSchema.index({ aws_face_id: 1 }, { unique: true, sparse: true }); // Face Identity
 userSchema.index({ createdAt: -1 }); // User registration analytics
 
 export const User = mongoose.model(MODEL_NAMES.USER, userSchema, MODEL_NAMES.USER);
