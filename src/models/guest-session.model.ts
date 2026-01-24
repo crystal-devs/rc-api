@@ -15,6 +15,17 @@ const guestSessionSchema = new mongoose.Schema({
         unique: true
     },
 
+    // Facial Identity (Phase 2)
+    aws_face_id: {
+        type: String,
+        default: null,
+        index: true // Key for "Login" lookup
+    },
+    selfie_url: {
+        type: String,
+        default: null
+    },
+
     event_id: {
         type: mongoose.Schema.Types.ObjectId,
         ref: MODEL_NAMES.EVENT,
@@ -23,7 +34,7 @@ const guestSessionSchema = new mongoose.Schema({
 
     access_method: {
         type: String,
-        enum: ['qr_code', 'share_link', 'invitation_link', 'direct_link'],
+        enum: ['qr_code', 'share_link', 'invitation_link', 'direct_link', 'face_login'],
         required: true
     },
 

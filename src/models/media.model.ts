@@ -101,6 +101,19 @@ const mediaSchema = new mongoose.Schema({
     // Approval
     approval: { type: approvalSchema, default: () => ({}) },
 
+    // Face Metadata (Local Cache)
+    faces: [{
+        faceId: { type: String, required: true },
+        confidence: { type: Number, required: true },
+        boundingBox: {
+            Width: Number,
+            Height: Number,
+            Left: Number,
+            Top: Number
+        },
+        userId: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: false } // Linked User
+    }],
+
     // Timestamps
     created_at: { type: Date, default: Date.now },
     updated_at: { type: Date, default: Date.now },

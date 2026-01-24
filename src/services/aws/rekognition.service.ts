@@ -1,4 +1,4 @@
-import { RekognitionClient, CreateCollectionCommand, IndexFacesCommand, SearchFacesByImageCommand, FaceMatch } from "@aws-sdk/client-rekognition";
+import { RekognitionClient, CreateCollectionCommand, IndexFacesCommand, SearchFacesByImageCommand, FaceMatch, SearchFacesCommand, SearchFacesCommandOutput } from "@aws-sdk/client-rekognition";
 import { keys } from "@configs/dotenv.config";
 import { logger } from "@utils/logger";
 
@@ -105,5 +105,104 @@ export const rekognitionService = {
             logger.error(`Failed to search faces in ${collectionId}:`, error);
             throw error;
         }
-    }
+    },
+    /**
+     * Search for faces and return the AWS FaceID (Identity)
+     * Used for logging in with a face.
+     */
+    searchFaceId: async (imageBuffer: Buffer, eventId: string) => {
+        const collectionId = `event_${eventId}`;
+        try {
+            const command = new SearchFacesByImageCommand({
+                CollectionId: collectionId,
+                Image: { Bytes: imageBuffer },
+                FaceMatchThreshold: 95, // Very high confidence for identity
+                MaxFaces: 1,
+            });
+
+            const response = await rekognitionClient.send(command);
+            const match = response.FaceMatches?.[0];
+
+            if (match && match.Face?.FaceId) {
+                logger.info(`Found existing face identity: ${match.Face.FaceId}`);
+                return match.Face.FaceId;
+            }
+            return null;
+        } catch (error: any) {
+            if (error.name === 'ResourceNotFoundException') {
+                return null;
+            }
+            logger.error(`Failed to search face identity in ${collectionId}:`, error);
+            throw error;
+        }
+    },
+
+    /**
+     * Index a face directly from buffer (for new guest identity)
+     */
+    indexFaceBuffer: async (imageBuffer: Buffer, eventId: string) => {
+        const collectionId = `event_${eventId}`;
+
+        // Ensure collection exists
+        await rekognitionService.createCollection(eventId);
+
+        try {
+            const command = new IndexFacesCommand({
+                CollectionId: collectionId,
+                Image: { Bytes: imageBuffer },
+                DetectionAttributes: ["DEFAULT"],
+                MaxFaces: 1, // We only want the main face
+                QualityFilter: "AUTO",
+            });
+
+            const response = await rekognitionClient.send(command);
+            const faceRecord = response.FaceRecords?.[0];
+
+            if (faceRecord && faceRecord.Face?.FaceId) {
+                logger.info(`Created new face identity: ${faceRecord.Face.FaceId}`);
+                return faceRecord.Face.FaceId;
+            }
+            return null;
+        } catch (error: any) {
+            logger.error(`Failed to index face from buffer:`, error);
+            throw error;
+        }
+    },
+
+    /**
+     * Search for photos containing a specific FaceID
+     */
+    searchByFaceId: async (faceId: string, eventId: string) => {
+        const collectionId = `event_${eventId}`;
+        try {
+            // We use the AWS SDK's SearchFaces command
+
+            const command = new SearchFacesCommand({
+                CollectionId: collectionId,
+                FaceId: faceId,
+                FaceMatchThreshold: 90,
+                MaxFaces: 4096, // Retrieve as many as possible
+            });
+
+            const response = await rekognitionClient.send(command) as SearchFacesCommandOutput;
+
+            // Extract unique media IDs
+            const mediaIds = new Set<string>();
+            response.FaceMatches?.forEach((match: any) => {
+                if (match.Face?.ExternalImageId) {
+                    mediaIds.add(match.Face.ExternalImageId);
+                }
+            });
+
+            logger.info(`Found ${mediaIds.size} photos for face ${faceId}`);
+            return Array.from(mediaIds);
+        } catch (error: any) {
+            logger.error(`Failed to search by faceId ${faceId}:`, error);
+            // If face doesn't exist (e.g. deleted or transient), return empty
+            if (error.name === 'InvalidParameterException' || error.name === 'ResourceNotFoundException') {
+                return [];
+            }
+            throw error;
+        }
+    },
 };
