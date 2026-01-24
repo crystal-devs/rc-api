@@ -408,7 +408,11 @@ export const corsOptions: CorsOptions = {
     "If-Modified-Since",
     "x-csrf-token",
     "x-expected-csrf",
-    "x-bypass-csrf"
+    "x-bypass-csrf",
+    "Cache-Control", // Allow cache control headers
+    "Pragma",        // Allow pragma headers
+    "X-Requested-With", // Allow standard AJAX header
+    "Accept-Encoding" // Allow explicit encoding requests
   ],
   credentials: true,
   optionsSuccessStatus: 200, // Some legacy browsers choke on 204
