@@ -2,6 +2,7 @@ import express from "express";
 import * as userController from "@controllers/user.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import { claimFaceIdentityController, getGlobalMemoriesController, deleteFaceIdentityController } from "@controllers/user/user-identity.controller";
+import { getActiveSessionsController, revokeSessionController, revokeAllSessionsController } from "@controllers/user/session.controller";
 import multer from "multer";
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -18,9 +19,15 @@ userRouter.get("/statistics", authMiddleware, userController.getUserStatisticsCo
 userRouter.post("/subscription/upgrade", authMiddleware, userController.upgradeSubscriptionController);
 userRouter.get("/subscription/plans", userController.getSubscriptionPlansController); // Public endpoint
 
+// Session management routes (Industry-standard security feature)
+userRouter.get("/sessions", authMiddleware, getActiveSessionsController);
+userRouter.delete("/sessions/:sessionId", authMiddleware, revokeSessionController);
+userRouter.delete("/sessions", authMiddleware, revokeAllSessionsController);
+
 // Identity Routes (Phase 4)
 userRouter.post("/identity/face", authMiddleware, upload.single('selfie'), claimFaceIdentityController as unknown as express.RequestHandler);
 userRouter.get("/memories", authMiddleware, getGlobalMemoriesController as unknown as express.RequestHandler);
 userRouter.delete("/identity/face", authMiddleware, deleteFaceIdentityController as unknown as express.RequestHandler);
 
 export default userRouter;
+

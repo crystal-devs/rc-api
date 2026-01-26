@@ -18,8 +18,8 @@ import { googleAuthService } from "@services/auth/google-auth.service";
 
 const REFRESH_COOKIE_OPTIONS = {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production', // Localhost can be http
-    sameSite: 'strict' as const, // Changed from 'none' for better security
+    secure: process.env.NODE_ENV === 'production', // HTTPS only in production (localhost needs HTTP)
+    sameSite: process.env.NODE_ENV === 'production' ? 'strict' as const : 'lax' as const,
     path: '/',
     maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
 };

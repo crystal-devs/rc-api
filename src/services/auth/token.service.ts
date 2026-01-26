@@ -17,16 +17,20 @@ export class TokenService {
       */
     generateToken(userId: string, email?: string, provider?: string): string {
         try {
+            const jti = crypto.randomUUID(); // Unique token ID for revocation
+
             const payload: TokenPayload = {
                 user_id: userId,
                 email,
                 provider: provider || 'email'
+                // jti is added automatically by jwt.sign via jwtid option
             };
 
             const token = jwt.sign(payload, keys.jwtSecret as string, {
                 expiresIn: "15m", // Short-lived: 15 minutes
                 issuer: 'roseclick',
-                audience: 'roseclick-users'
+                audience: 'roseclick-users',
+                jwtid: jti // JWT ID for per-token blacklisting
             });
 
             // logger.debug(`Access token generated for user: ${userId}`);
