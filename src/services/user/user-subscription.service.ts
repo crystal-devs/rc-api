@@ -5,11 +5,12 @@ import mongoose from "mongoose";
 import { User } from "@models/user.model";
 import { UserSubscription } from "@models/user-subscription.model";
 import { SubscriptionPlan } from "@models/subscription-plan.model";
+import { Transaction } from "@models/transaction.model";
 import { logger } from "@utils/logger";
-import type { 
-    ServiceResponse, 
-    FormattedSubscription, 
-    UpgradeSubscriptionOptions 
+import type {
+    ServiceResponse,
+    FormattedSubscription,
+    UpgradeSubscriptionOptions
 } from './user.types';
 
 export const getUserSubscriptionService = async (userId: string): Promise<ServiceResponse<FormattedSubscription>> => {
@@ -58,7 +59,7 @@ export const getUserSubscriptionService = async (userId: string): Promise<Servic
 };
 
 export const upgradeSubscriptionService = async (
-    userId: string, 
+    userId: string,
     options: UpgradeSubscriptionOptions
 ): Promise<ServiceResponse<any>> => {
     try {
@@ -69,19 +70,65 @@ export const upgradeSubscriptionService = async (
         }
 
         // Check if plan exists
-        const plan = await SubscriptionPlan.findOne({ 
-            planId: options.planId, 
-            isActive: true 
+        const plan = await SubscriptionPlan.findOne({
+            planId: options.planId,
+            isActive: true
         });
-        
+
         if (!plan) {
             throw new Error("Subscription plan not found or inactive");
         }
 
-        // Validate payment for paid plans
-        if (plan.planId !== 'free' && plan.price > 0 && !options.paymentMethodId && !user.stripeCustomerId) {
-            throw new Error("Payment method is required for paid plans");
+        // --- PAYMENT PROCESSING LOGIC ---
+        // Determine the payment method
+        const paymentMethodId = options.paymentMethodId || '';
+        let provider = 'stripe'; // Default
+
+        // MOCK PAYMENT SECURITY CHECK
+        if (paymentMethodId.startsWith('mock_')) {
+            // CRITICAL SECURITY GATE: Check if mock payments are allowed in this environment
+            if (process.env.ENABLE_MOCK_PAYMENTS !== 'true') {
+                logger.warn(`Security Attempt: User ${userId} tried to use mock payment in production.`);
+                throw new Error("Mock payments are disabled in this environment.");
+            }
+            provider = 'mock';
         }
+
+        // Validate payment for paid plans
+        if (plan.planId !== 'free' && plan.price > 0) {
+            if (!paymentMethodId && !user.stripeCustomerId) {
+                throw new Error("Payment method is required for paid plans");
+            }
+
+            // In a real implementation, we would call Stripe/Razorpay here.
+            // For now, we only support the secure mock flow explicitly.
+            if (provider !== 'mock') {
+                // TODO: Implement actual Stripe/Razorpay charge here
+                // For now, fail if not mock to prevent free accidents
+                throw new Error("Real payment processing is not yet enabled. Please use mock mode.");
+            }
+        }
+
+        // RECORD TRANSACTION (Audit Trail)
+        const transaction = await new Transaction({
+            userId: user._id,
+            planId: plan.planId,
+            planName: plan.name,
+            amount: plan.price,
+            currency: plan.currency,
+            provider: provider,
+            providerTransactionId: paymentMethodId || `free_${Date.now()}`,
+            status: 'succeeded', // In real flow, this might be 'pending' first
+            metadata: {
+                billingCycle: plan.billingCycle
+            }
+        }).save();
+
+        if (!transaction) {
+            throw new Error("Failed to record transaction. Subscription upgrade aborted.");
+        }
+
+        // --- END PAYMENT LOGIC ---
 
         // Create expiration date based on billing cycle
         const expirationDate = calculateExpirationDate(plan.billingCycle);
@@ -132,13 +179,13 @@ const createFreeSubscription = async (userId: string) => {
 
 const calculateExpirationDate = (billingCycle: string): Date => {
     const expirationDate = new Date();
-    
+
     if (billingCycle === 'monthly') {
         expirationDate.setMonth(expirationDate.getMonth() + 1);
     } else if (billingCycle === 'yearly') {
         expirationDate.setFullYear(expirationDate.getFullYear() + 1);
     }
-    
+
     return expirationDate;
 };
 

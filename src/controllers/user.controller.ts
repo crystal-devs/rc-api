@@ -110,7 +110,10 @@ export const upgradeSubscriptionController = async (req: injectedRequest, res: R
 
         const result = await upgradeSubscriptionService(
             userId.toString(),
-            planId
+            {
+                planId,
+                paymentMethodId
+            }
         );
 
         res.status(200).json(result);
