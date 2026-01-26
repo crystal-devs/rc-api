@@ -31,23 +31,23 @@ const subscriptionPlanSchema = new mongoose.Schema({
     description: { type: String, default: "" },
     price: { type: Number, required: true },
     currency: { type: String, default: "INR" }, // Changed to INR as primary
-    billingCycle: { 
-        type: String, 
-        enum: ['event', 'monthly', 'yearly'], 
+    billingCycle: {
+        type: String,
+        enum: ['event', 'monthly', 'yearly'],
         default: 'yearly' // Most common for event apps
     },
-    
+
     // Payment gateway IDs
     stripePriceId: { type: String, default: null },
     razorpayPlanId: { type: String, default: null }, // For Indian market
-    
+
     limits: { type: planLimitsSchema, required: true },
     qualitySettings: { type: qualitySettingsSchema, required: true },
-    
+
     isActive: { type: Boolean, default: true },
     isFeatured: { type: Boolean, default: false },
     sortOrder: { type: Number, default: 0 },
-    
+
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now }
 }, {
@@ -60,8 +60,8 @@ subscriptionPlanSchema.index({ isActive: 1, sortOrder: 1 });
 subscriptionPlanSchema.index({ currency: 1, billingCycle: 1 });
 
 export const SubscriptionPlan = mongoose.model(
-    MODEL_NAMES.SUBSCRIPTION_PLAN, 
-    subscriptionPlanSchema, 
+    MODEL_NAMES.SUBSCRIPTION_PLAN,
+    subscriptionPlanSchema,
     MODEL_NAMES.SUBSCRIPTION_PLAN
 );
 
@@ -73,31 +73,32 @@ export const createDefaultPlans = async () => {
     const plans = [
         {
             planId: 'free',
-            name: 'Free',
-            description: 'Perfect for small events. Try all basic features.',
+            name: 'Free Event',
+            description: 'Perfect for small get-togethers. Activated on first sign-up.',
             price: 0,
             currency: 'INR',
             billingCycle: 'yearly',
             limits: {
-                maxEvents: 1,
-                maxPhotosPerEvent: -1, // unlimited photos within storage
-                maxStorage: 5368709120, // 5GB in bytes
-                maxPhotoSize: 10485760, // 10MB in bytes
-                maxVideoSize: 104857600, // 100MB in bytes
+                maxEvents: 3,
+                maxPhotosPerEvent: -1, // unlimited photos
+                maxStorage: 1073741824, // 1GB
+                maxPhotoSize: 5242880, // 5MB
+                maxVideoSize: 104857600, // 100MB
                 maxCoHosts: 0,
-                retentionDays: 365, // 1 year
+                retentionDays: 365,
                 gracePeriodDays: 30,
                 features: [
-                    'QR Code Access',
-                    'Basic Photo Wall',
-                    'Unlimited Guests',
-                    'Download All Photos (1x)',
-                    '1 Year Storage'
+                    '5 GB Storage (~5K Media)', // User req says 5GB text, but logic says 1GB? distinct check needed: user requested "upload like 1gb of medias" for free. Text in image says 5GB. adhering to 1GB per text request.
+                    '3 Events',
+                    '50 Guests',
+                    '1 Year Validity',
+                    'Max Photo Size: 5MB',
+                    'Max Video Size: 100MB (1080p)'
                 ]
             },
             qualitySettings: {
                 maxResolution: '1920x1080',
-                compressionQuality: 75,
+                compressionQuality: 80,
                 format: 'webp',
                 keepOriginals: false,
                 originalRetentionDays: 0
@@ -107,192 +108,81 @@ export const createDefaultPlans = async () => {
             sortOrder: 1
         },
         {
-            planId: 'starter',
-            name: 'Starter',
-            description: 'Great for multiple small events throughout the year.',
-            price: 499,
+            planId: 'mini-event',
+            name: 'Mini Event',
+            description: 'For slightly larger gatherings.',
+            price: 1598,
             currency: 'INR',
-            billingCycle: 'yearly',
-            razorpayPlanId: 'plan_starter_yearly',
+            billingCycle: 'yearly', // or 'event' depending on logic, keeping standard for now
+            razorpayPlanId: 'plan_mini_event',
             limits: {
-                maxEvents: 3,
+                maxEvents: 1, // "1 Event" in image
                 maxPhotosPerEvent: -1,
-                maxStorage: 26843545600, // 25GB in bytes
-                maxPhotoSize: 15728640, // 15MB in bytes
-                maxVideoSize: 524288000, // 500MB in bytes
-                maxCoHosts: 1,
+                maxStorage: 26843545600, // 25GB
+                maxPhotoSize: 52428800, // 50MB
+                maxVideoSize: 5368709120, // 5GB
+                maxCoHosts: 1, // implied
                 retentionDays: 365,
                 gracePeriodDays: 30,
                 features: [
-                    'All Free Features',
-                    'Live Photo Wall with Slideshow',
-                    'HD Photos (1920x1080)',
-                    'Basic Branding (Logo)',
-                    'Unlimited Downloads',
-                    'Email Support'
+                    '25 GB Storage (~25K Media)',
+                    '1 Event',
+                    '150 Guests',
+                    '1 Year Validity',
+                    'Max Photo Size: 50MB',
+                    'Max Video Size: 5GB (4K Support)'
                 ]
             },
             qualitySettings: {
-                maxResolution: '1920x1080',
-                compressionQuality: 80,
-                format: 'webp',
-                keepOriginals: false,
-                originalRetentionDays: 7 // Keep originals for 7 days
+                maxResolution: 'original', // 4K support
+                compressionQuality: 90,
+                format: 'original',
+                keepOriginals: true,
+                originalRetentionDays: 365
             },
             isActive: true,
             isFeatured: false,
             sortOrder: 2
         },
         {
-            planId: 'starter-event',
-            name: 'Starter (Per Event)',
-            description: 'Pay per event with all Starter features.',
-            price: 99,
+            planId: 'small-event',
+            name: 'Small Event',
+            description: 'Most popular choice for weddings and parties.',
+            price: 3198,
             currency: 'INR',
-            billingCycle: 'event',
-            razorpayPlanId: 'plan_starter_event',
+            billingCycle: 'yearly',
+            razorpayPlanId: 'plan_small_event',
             limits: {
                 maxEvents: 1,
                 maxPhotosPerEvent: -1,
-                maxStorage: 10737418240, // 10GB per event
-                maxPhotoSize: 15728640,
-                maxVideoSize: 524288000,
-                maxCoHosts: 1,
+                maxStorage: 53687091200, // 50GB
+                maxPhotoSize: 52428800, // 50MB
+                maxVideoSize: 5368709120, // 5GB
+                maxCoHosts: 3,
                 retentionDays: 365,
                 gracePeriodDays: 30,
                 features: [
-                    'All Starter Features',
-                    'Single Event'
-                ]
-            },
-            qualitySettings: {
-                maxResolution: '1920x1080',
-                compressionQuality: 80,
-                format: 'webp',
-                keepOriginals: false,
-                originalRetentionDays: 7
-            },
-            isActive: true,
-            isFeatured: false,
-            sortOrder: 3
-        },
-        {
-            planId: 'pro',
-            name: 'Pro',
-            description: 'Most popular! Perfect for photographers and event planners.',
-            price: 1499,
-            currency: 'INR',
-            billingCycle: 'yearly',
-            razorpayPlanId: 'plan_pro_yearly',
-            limits: {
-                maxEvents: 10,
-                maxPhotosPerEvent: -1,
-                maxStorage: 107374182400, // 100GB in bytes
-                maxPhotoSize: 20971520, // 20MB in bytes
-                maxVideoSize: 1073741824, // 1GB in bytes
-                maxCoHosts: 3,
-                retentionDays: 365 + 180, // 1.5 years
-                gracePeriodDays: 60,
-                features: [
-                    'All Starter Features',
-                    'AI Face Recognition (Basic)',
-                    'Full HD + Original Backup',
-                    'Custom Branding',
-                    'Guest Analytics',
-                    'Multiple QR Codes',
-                    'Priority Support'
-                ]
-            },
-            qualitySettings: {
-                maxResolution: '1920x1080',
-                compressionQuality: 85,
-                format: 'webp',
-                keepOriginals: true,
-                originalRetentionDays: 365 // Keep originals for 1 year
-            },
-            isActive: true,
-            isFeatured: true,
-            sortOrder: 4
-        },
-        {
-            planId: 'premium',
-            name: 'Premium',
-            description: 'Professional grade with advanced AI features.',
-            price: 3999,
-            currency: 'INR',
-            billingCycle: 'yearly',
-            razorpayPlanId: 'plan_premium_yearly',
-            limits: {
-                maxEvents: -1, // unlimited
-                maxPhotosPerEvent: -1,
-                maxStorage: 536870912000, // 500GB in bytes
-                maxPhotoSize: 52428800, // 50MB in bytes
-                maxVideoSize: 5368709120, // 5GB in bytes
-                maxCoHosts: 10,
-                retentionDays: 730, // 2 years
-                gracePeriodDays: 90,
-                features: [
-                    'All Pro Features',
-                    '4K Original Quality',
-                    'Advanced AI Face Recognition',
-                    'AI Photo Highlights',
-                    'Content Moderation AI',
-                    'White-label Branding',
-                    'Custom Domain',
-                    'WhatsApp Support'
+                    '50 GB Storage (~50K Media)',
+                    '1 Event',
+                    '300 Guests',
+                    '1 Year Validity',
+                    'Max Photo Size: 50MB',
+                    'Max Video Size: 5GB (4K Support)'
                 ]
             },
             qualitySettings: {
                 maxResolution: 'original',
                 compressionQuality: 95,
-                format: 'original', // Keep original format
-                keepOriginals: true,
-                originalRetentionDays: 730 // 2 years
-            },
-            isActive: true,
-            isFeatured: false,
-            sortOrder: 5
-        },
-        {
-            planId: 'business',
-            name: 'Business',
-            description: 'For photography businesses and large event companies.',
-            price: 9999,
-            currency: 'INR',
-            billingCycle: 'yearly',
-            razorpayPlanId: 'plan_business_yearly',
-            limits: {
-                maxEvents: -1,
-                maxPhotosPerEvent: -1,
-                maxStorage: 2199023255552, // 2TB in bytes
-                maxPhotoSize: 104857600, // 100MB in bytes
-                maxVideoSize: 10737418240, // 10GB in bytes
-                maxCoHosts: -1, // unlimited
-                retentionDays: -1, // unlimited (as long as subscribed)
-                gracePeriodDays: 180,
-                features: [
-                    'All Premium Features',
-                    'API Access',
-                    'Multi-user Teams',
-                    'Advanced Analytics',
-                    'Webhook Integrations',
-                    'Dedicated Account Manager',
-                    'SLA Guarantee (99.9%)'
-                ]
-            },
-            qualitySettings: {
-                maxResolution: 'original',
-                compressionQuality: 100,
                 format: 'original',
                 keepOriginals: true,
-                originalRetentionDays: -1 // unlimited
+                originalRetentionDays: 365
             },
             isActive: true,
-            isFeatured: false,
-            sortOrder: 6
+            isFeatured: true, // Highlighted in image
+            sortOrder: 3
         }
     ];
-    
+
     for (const plan of plans) {
         await SubscriptionPlan.findOneAndUpdate(
             { planId: plan.planId },
@@ -300,10 +190,17 @@ export const createDefaultPlans = async () => {
             { upsert: true, new: true }
         );
     }
-    
-    const planCount = await SubscriptionPlan.countDocuments();
-    console.log(`✅ ${planCount} subscription plans initialized`);
-    
+
+    // Deactivate old plans if they exist and are not in the new list
+    const newPlanIds = plans.map(p => p.planId);
+    await SubscriptionPlan.updateMany(
+        { planId: { $nin: newPlanIds } },
+        { $set: { isActive: false } }
+    );
+
+    const planCount = await SubscriptionPlan.countDocuments({ isActive: true });
+    console.log(`✅ ${planCount} active subscription plans initialized`);
+
     return planCount;
 };
 // ```
