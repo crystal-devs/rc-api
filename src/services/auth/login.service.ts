@@ -82,7 +82,7 @@ export class LoginService {
 
                 let hashedPassword = undefined;
                 if (provider === 'email' && password) {
-                    hashedPassword = await bcrypt.hash(password, 10);
+                    hashedPassword = await bcrypt.hash(password, 12); // Cost 12 for production security
                 }
 
                 const newUserData = {

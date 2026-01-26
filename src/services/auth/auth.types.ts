@@ -52,6 +52,7 @@ export interface TokenPayload {
     user_id: string;
     email?: string;
     provider: string;
+    jti?: string; // JWT ID for per-token revocation
     iat?: number;
     exp?: number;
 }
