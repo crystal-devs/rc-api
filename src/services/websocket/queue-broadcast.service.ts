@@ -3,6 +3,7 @@
 
 import { getWebSocketService } from './websocket.service';
 import { logger } from '@utils/logger';
+import { getImageQueue } from 'queues/imageQueue';
 
 export interface QueueUpdateData {
     eventId: string;
@@ -52,7 +53,7 @@ export class QueueBroadcastService {
             if (!webSocketService) return;
 
             const adminRoom = `admin_${data.eventId}`;
-            
+
             const payload = {
                 type: 'queue_update',
                 mediaId: data.mediaId,
@@ -85,7 +86,7 @@ export class QueueBroadcastService {
             if (!webSocketService) return;
 
             const adminRoom = `admin_${data.eventId}`;
-            
+
             const payload = {
                 type: 'queue_stats',
                 eventId: data.eventId,
@@ -125,7 +126,7 @@ export class QueueBroadcastService {
             if (!webSocketService) return;
 
             const adminRoom = `admin_${eventId}`;
-            
+
             const payload = {
                 type: 'queue_alert',
                 eventId,
@@ -159,7 +160,7 @@ export class QueueBroadcastService {
             if (!webSocketService) return;
 
             const adminRoom = `admin_${eventId}`;
-            
+
             const payload = {
                 type: 'performance_metrics',
                 eventId,
@@ -193,7 +194,7 @@ export class QueueBroadcastService {
             if (!webSocketService) return;
 
             const adminRoom = `admin_${eventId}`;
-            
+
             const payload = {
                 type: 'batch_operation',
                 eventId,
@@ -220,8 +221,6 @@ export const queueBroadcastService = new QueueBroadcastService();
 // services/websocket/queue-monitor.service.ts
 // Service to monitor queue health and broadcast alerts
 // ============================================
-
-import { getImageQueue } from 'queues/imageQueue';
 
 export class QueueMonitorService {
     private monitoringIntervals: Map<string, NodeJS.Timeout> = new Map();
@@ -303,7 +302,7 @@ export class QueueMonitorService {
 
             // Check for stuck jobs
             const now = Date.now();
-            const stuckJobs = active.filter(job => {
+            const stuckJobs = active.filter((job: any) => {
                 const jobAge = now - (job.timestamp || now);
                 return jobAge > this.STUCK_JOB_THRESHOLD;
             });
@@ -313,7 +312,7 @@ export class QueueMonitorService {
                     type: 'stuck_jobs',
                     message: `${stuckJobs.length} jobs appear to be stuck (running >5 minutes)`,
                     severity: 'error',
-                    data: { stuckJobIds: stuckJobs.map(j => j.id) }
+                    data: { stuckJobIds: stuckJobs.map((j: any) => j.id) }
                 });
             }
 
@@ -341,7 +340,7 @@ export class QueueMonitorService {
 
         } catch (error) {
             logger.error('Queue health check failed:', error);
-            
+
             queueBroadcastService.broadcastQueueAlert(eventId, {
                 type: 'worker_error',
                 message: `Queue health check failed: ${error.message}`,
@@ -353,7 +352,7 @@ export class QueueMonitorService {
     private calculateThroughput(completedJobs: any[]): number {
         // Calculate items processed in the last minute
         const oneMinuteAgo = Date.now() - 60000;
-        const recentCompletions = completedJobs.filter(job => 
+        const recentCompletions = completedJobs.filter(job =>
             (job.finishedOn || 0) > oneMinuteAgo
         );
         return recentCompletions.length;
@@ -361,7 +360,7 @@ export class QueueMonitorService {
 
     private calculateAverageWaitTime(activeJobs: any[]): number {
         if (activeJobs.length === 0) return 0;
-        
+
         const totalWaitTime = activeJobs.reduce((sum, job) => {
             const waitTime = Date.now() - (job.timestamp || Date.now());
             return sum + waitTime;

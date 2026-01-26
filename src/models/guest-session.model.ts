@@ -15,6 +15,17 @@ const guestSessionSchema = new mongoose.Schema({
         unique: true
     },
 
+    // Facial Identity (Phase 2)
+    aws_face_id: {
+        type: String,
+        default: null,
+        index: true // Key for "Login" lookup
+    },
+    selfie_url: {
+        type: String,
+        default: null
+    },
+
     event_id: {
         type: mongoose.Schema.Types.ObjectId,
         ref: MODEL_NAMES.EVENT,
@@ -23,7 +34,7 @@ const guestSessionSchema = new mongoose.Schema({
 
     access_method: {
         type: String,
-        enum: ['qr_code', 'share_link', 'invitation_link', 'direct_link'],
+        enum: ['qr_code', 'share_link', 'invitation_link', 'direct_link', 'face_login'],
         required: true
     },
 
@@ -100,7 +111,7 @@ guestSessionSchema.index({ event_id: 1, status: 1 });
 guestSessionSchema.index({ 'guest_info.email': 1, event_id: 1 }, { sparse: true });
 guestSessionSchema.index({ 'guest_info.phone': 1, event_id: 1 }, { sparse: true });
 guestSessionSchema.index({ claimed_by_user: 1 }, { sparse: true });
-guestSessionSchema.index({ expires_at: 1 });
+// guestSessionSchema.index({ expires_at: 1 }); // Commented out to fix duplicate index warning
 guestSessionSchema.index({ status: 1, last_activity_at: -1 });
 guestSessionSchema.index({ invitation_token: 1 }, { sparse: true });
 guestSessionSchema.index({ 'device_fingerprint.fingerprint_hash': 1, event_id: 1 });

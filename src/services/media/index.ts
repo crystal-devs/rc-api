@@ -2,23 +2,17 @@
 // ====================================
 
 // Re-export all media services
-export { 
-    getMediaByEventService, 
-    getMediaByAlbumService, 
-    getGuestMediaService 
+export {
+    getMediaByEventService,
+    getMediaByAlbumService,
+    getGuestMediaService
 } from './media-query.service';
 
-export { 
-    updateMediaStatusService, 
-    bulkUpdateMediaStatusService, 
-    deleteMediaService 
+export {
+    updateMediaStatusService,
+    bulkUpdateMediaStatusService,
+    deleteMediaService
 } from './media-management.service';
-
-export { 
-    uploadCoverImageService 
-} from './media-upload.service';
-
-export { mediaProcessingService } from './media-processing.service';
 
 // Export types
 export type {

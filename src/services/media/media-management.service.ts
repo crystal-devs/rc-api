@@ -4,16 +4,21 @@
 import mongoose from 'mongoose';
 import { logger } from '@utils/logger';
 import { Media } from '@models/media.model';
+import { S3Client, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import { keys } from '@configs/dotenv.config';
+
+const s3Client = new S3Client({
+    region: keys.awsRegion as string,
+    credentials: {
+        accessKeyId: keys.awsAccessKeyId as string,
+        secretAccessKey: keys.awsSecretAccessKey as string
+    }
+});
 import { Event } from '@models/event.model';
 import { EventParticipant } from '@models/event-participants.model';
-import { mediaNotificationService } from '../websocket/notifications';
+import { mediaNotificationService } from '@services/websocket/notifications';
 import type { ServiceResponse, StatusUpdateOptions } from './media.types';
 import { getPhotoWallWebSocketService } from '@services/photoWallWebSocketService';
-import { imagekit } from '@configs/imagekit.config';
-import { FileObject } from 'imagekit/dist/libs/interfaces';
-// import { queueStorageCleanup } from 'workers/storageCleanupWorker';
-import { queueStorageCleanup } from 'workers/batchStorageCleanupWorker';
-import { validateAndCleanUrls } from '@utils/file.util';
 
 export const updateMediaStatusService = async (
     mediaId: string,
@@ -34,7 +39,7 @@ export const updateMediaStatusService = async (
 
         // Find the media item with additional fields for counter logic
         const media = await Media.findById(mediaId).select(
-            'approval event_id url image_variants original_filename type uploaded_by size_mb'
+            'approval event_id original variants type owner size_mb'
         );
 
         if (!media) {
@@ -49,8 +54,8 @@ export const updateMediaStatusService = async (
 
         const previousStatus = media.approval?.status;
         const eventId = media.event_id.toString();
-        const uploadedBy = media.uploaded_by;
-        const sizeMB = media.size_mb || 0;
+        const uploadedBy = media.owner?.user_id;
+        const sizeMB = media.original?.size_mb || 0;
 
         // Build update object
         const updateObj: any = {
@@ -133,11 +138,14 @@ export const updateMediaStatusService = async (
             status: true,
             code: 200,
             message: 'Media status updated successfully',
-            data: updatedMedia,
+            data: {
+                mediaId: mediaId,
+                eventId: eventId,
+                newStatus: status,
+                previousStatus: previousStatus
+            },
             error: null,
             other: {
-                previousStatus,
-                newStatus: status,
                 websocketBroadcasted: true,
                 photoWallNotified: !!(shareToken && (status === 'approved' || status === 'auto_approved'))
             }
@@ -189,7 +197,7 @@ export const bulkUpdateMediaStatusService = async (
         const mediaItems = await Media.find({
             _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
             event_id: new mongoose.Types.ObjectId(eventId)
-        }).select('approval.status uploaded_by size_mb type').lean();
+        }).select('approval.status owner size_mb type').lean();
 
         if (mediaItems.length === 0) {
             return {
@@ -291,7 +299,10 @@ export const bulkUpdateMediaStatusService = async (
             message: `Successfully updated ${result.modifiedCount} media items`,
             data: {
                 modifiedCount: result.modifiedCount,
-                requestedCount: validMediaIds.length
+                requestedCount: validMediaIds.length,
+                updatedMediaIds: validMediaIds, // Return the list of successfully updated media IDs
+                eventId: eventId,
+                newStatus: status
             },
             error: null,
             other: {
@@ -336,7 +347,7 @@ export const deleteMediaService = async (
 
         // Find the media item
         const media = await Media.findById(mediaId)
-            .select('event_id url image_variants original_filename type approval.status uploaded_by size_mb')
+            .select('event_id original variants type approval.status owner size_mb')
             .populate('event_id', 'share_token')
             .lean();
 
@@ -353,26 +364,8 @@ export const deleteMediaService = async (
         const eventId = media.event_id._id?.toString() || media.event_id.toString();
         const shareToken = (media.event_id as any)?.share_token || null;
         const wasVisible = ['approved', 'auto_approved'].includes(media.approval?.status || '');
-        const uploadedBy = media.uploaded_by;
-        const sizeMB = media.size_mb || 0;
-
-        // IMPROVED: Collect all URLs with better validation
-        const urlsToDelete = collectAllMediaUrls(media);
-        const { validUrls, invalidUrls } = validateAndCleanUrls(urlsToDelete);
-
-        if (invalidUrls.length > 0) {
-            logger.warn(`Found ${invalidUrls} invalid URLs for media ${mediaId}`, {
-                invalidUrls: invalidUrls.slice(0, 3)
-            });
-        }
-
-        logger.info(`Collected ${validUrls} valid URLs for deletion ${urlsToDelete.length}`, {
-            mediaId,
-            totalUrls: urlsToDelete.length,
-            validUrls: validUrls.length,
-            invalidUrls: invalidUrls.length,
-            sampleUrls: validUrls.slice(0, 3)
-        });
+        const uploadedBy = media.owner?.user_id;
+        const sizeMB = media.original?.size_mb || 0;
 
         // STEP 1: Delete from database IMMEDIATELY (for instant UI response)
         await Media.findByIdAndDelete(mediaId);
@@ -411,29 +404,6 @@ export const deleteMediaService = async (
             }
         }
 
-        // STEP 4: Queue storage cleanup in background (non-blocking) - ONLY valid URLs
-        if (validUrls.length > 0) {
-            logger.info(`Queueing storage cleanup for ${validUrls.length} valid URLs`);
-            queueStorageCleanup({
-                mediaId,
-                urls: validUrls, // Only pass valid URLs
-                eventId,
-                userId,
-                isBulk: false
-            }).catch((error: any) => {
-                logger.error('Failed to queue storage cleanup:', error);
-            });
-        } else {
-            logger.info('No valid URLs to cleanup for media deletion');
-        }
-
-        logger.info('Media deleted successfully (storage cleanup queued):', {
-            mediaId,
-            deletedBy: userId,
-            eventId,
-            urlsToCleanup: validUrls.length
-        });
-
         return {
             status: true,
             code: 200,
@@ -446,9 +416,9 @@ export const deleteMediaService = async (
             other: {
                 websocketBroadcasted: wasVisible,
                 photoWallNotified: !!(wasVisible && shareToken),
-                storageCleanupQueued: validUrls.length > 0,
-                validUrlsQueued: validUrls.length,
-                invalidUrlsSkipped: invalidUrls.length
+                // storageCleanupQueued: validUrls.length > 0,
+                // validUrlsQueued: validUrls.length,
+                // invalidUrlsSkipped: invalidUrls.length
             }
         };
 
@@ -464,11 +434,288 @@ export const deleteMediaService = async (
     }
 };
 
+export const softDeleteMediaService = async (
+    mediaId: string,
+    userId: string,
+    options?: {
+        adminName?: string;
+        reason?: string;
+    }
+): Promise<ServiceResponse<any>> => {
+    try {
+        const media = await Media.findById(mediaId)
+            .select('event_id original variants approval.status owner size_mb deleteGroup')
+            .populate('event_id', 'share_token')
+            .lean();
 
+        if (!media) {
+            return {
+                status: false,
+                code: 404,
+                message: 'Media not found',
+                data: null,
+                error: { message: 'Media item does not exist' }
+            };
+        }
+
+        const eventId = media.event_id._id?.toString() || media.event_id.toString();
+        const shareToken = (media.event_id as any)?.share_token || null;
+        const wasVisible = ['approved', 'auto_approved'].includes(media.approval?.status || '');
+        const uploadedBy = media.owner?.user_id;
+        const sizeMB = media.original?.size_mb || 0;
+
+        // STEP 1: Soft-delete in DB IMMEDIATELY
+        const updateResult = await Media.updateOne(
+            { _id: mediaId },
+            {
+                $set: {
+                    isDeleted: true,
+                    deletedAt: new Date(),
+                    approval: {
+                        ...media.approval,
+                        status: 'deleted' // or 'rejected' if needed
+                    }
+                }
+            }
+        );
+
+        if (updateResult.modifiedCount === 0) {
+            return {
+                status: false,
+                code: 404,
+                message: 'Media not found or already deleted',
+                data: null,
+                error: { message: 'No changes made' }
+            };
+        }
+
+        // STEP 2: Update counters
+        try {
+            await updateCountersForDeletion(eventId, uploadedBy, media.approval?.status || 'pending', sizeMB);
+        } catch (counterError) {
+            logger.warn('Failed to update counters after soft-deletion:', counterError);
+        }
+
+        // STEP 3: Broadcast soft-deletion if visible
+        if (wasVisible) {
+            try {
+                mediaNotificationService.broadcastMediaRemoved({
+                    mediaId,
+                    eventId,
+                    reason: options?.reason || 'deleted_by_admin',
+                    adminName: options?.adminName
+                });
+
+                mediaNotificationService.broadcastMediaStats(eventId);
+
+                if (shareToken) {
+                    const photoWallService = getPhotoWallWebSocketService();
+                    if (photoWallService) {
+                        await photoWallService.notifyMediaRemoved(
+                            shareToken,
+                            mediaId,
+                            options?.reason || 'Soft-removed by admin'
+                        );
+                    }
+                }
+            } catch (wsError) {
+                logger.error('Failed to broadcast soft-deletion via WebSocket:', wsError);
+            }
+        }
+
+        return {
+            status: true,
+            code: 200,
+            message: 'Media soft-deleted successfully',
+            data: {
+                id: mediaId,
+                wasVisibleToGuests: wasVisible
+            },
+            error: null,
+            other: {
+                websocketBroadcasted: wasVisible,
+                photoWallNotified: !!(wasVisible && shareToken),
+                cleanupScheduled: true // Now async after 30 days
+            }
+        };
+
+    } catch (error: any) {
+        logger.error('Error in softDeleteMediaService:', error);
+        return {
+            status: false,
+            code: 500,
+            message: 'Failed to soft-delete media',
+            data: null,
+            error: { message: error.message }
+        };
+    }
+};
+
+// export const recoverMediaService = async (
+//     mediaId: string,
+//     userId: string
+// ): Promise<ServiceResponse<any>> => {
+//     try {
+//         const media = await Media.findById(mediaId)
+//             .select('event_id approval.status')
+//             .lean();
+
+//         if (!media) {
+//             return {
+//                 status: false,
+//                 code: 404,
+//                 message: 'Media not found',
+//                 data: null,
+//                 error: { message: 'Media item does not exist' }
+//             };
+//         }
+
+//         // STEP 1: Recover in DB
+//         const updateResult = await Media.updateOne(
+//             { _id: mediaId },
+//             {
+//                 $set: {
+//                     isDeleted: false,
+//                     approval: {
+//                         ...media.approval,
+//                         status: 'approved' // or original status
+//                     }
+//                 },
+//                 $unset: { deletedAt: "" }
+//             }
+//         );
+
+//         if (updateResult.modifiedCount === 0) {
+//             return {
+//                 status: false,
+//                 code: 404,
+//                 message: 'Media not deleted or already recovered',
+//                 data: null,
+//                 error: { message: 'No changes made' }
+//             };
+//         }
+
+//         // STEP 2: Broadcast recovery
+//         try {
+//             mediaNotificationService.broadcastMediaRecovered({
+//                 mediaId,
+//                 eventId: media.event_id.toString(),
+//                 userId
+//             });
+//         } catch (wsError) {
+//             logger.error('Failed to broadcast recovery:', wsError);
+//         }
+
+//         return {
+//             status: true,
+//             code: 200,
+//             message: 'Media recovered successfully',
+//             data: { id: mediaId },
+//             error: null,
+//             other: null
+//         };
+//     } catch (error: any) {
+//         logger.error('Error in recoverMediaService:', error);
+//         return {
+//             status: false,
+//             code: 500,
+//             message: 'Failed to recover media',
+//             data: null,
+//             error: { message: error.message }
+//         };
+//     }
+// };
+
+export const cleanupDeletedMedia = async () => {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    // Find media items that are soft-deleted and older than 30 days
+    const toDelete = await Media.find({
+        isDeleted: true,
+        deletedAt: { $lt: thirtyDaysAgo }
+    }).select('original variants owner').lean();
+
+    if (toDelete.length === 0) return;
+
+    logger.info(`Found ${toDelete.length} expired media items to cleanup.`);
+
+    // Collect all S3 keys to delete
+    const keysToDelete: string[] = [];
+
+    toDelete.forEach((media: any) => {
+        // 1. Original
+        if (media.original?.public_id) {
+            keysToDelete.push(media.original.public_id);
+        } else if (media.public_id) {
+            // Legacy support
+            keysToDelete.push(media.public_id);
+        }
+
+        // 2. Variants (Images)
+        if (media.variants?.images) {
+            const v = media.variants.images;
+            if (v.small?.public_id) keysToDelete.push(v.small.public_id);
+            if (v.medium?.public_id) keysToDelete.push(v.medium.public_id);
+            if (v.large?.public_id) keysToDelete.push(v.large.public_id);
+        }
+
+        // 3. Variants (Videos)
+        if (media.variants?.videos) {
+            const v = media.variants.videos;
+            if (v.p360?.public_id) keysToDelete.push(v.p360.public_id);
+            if (v.p720?.public_id) keysToDelete.push(v.p720.public_id);
+            if (v.p1080?.public_id) keysToDelete.push(v.p1080.public_id);
+        }
+
+        // 4. Thumbnails
+        if (media.variants?.thumbnails) {
+            const t = media.variants.thumbnails;
+            if (t.poster?.public_id) keysToDelete.push(t.poster.public_id);
+            if (t.preview?.public_id) keysToDelete.push(t.preview.public_id);
+        }
+
+        // 5. Legacy image_variants support
+        if (media.image_variants) {
+            const v = media.image_variants;
+            if (v.small?.public_id) keysToDelete.push(v.small.public_id);
+            if (v.medium?.public_id) keysToDelete.push(v.medium.public_id);
+            if (v.large?.public_id) keysToDelete.push(v.large.public_id);
+        }
+    });
+
+    if (keysToDelete.length > 0) {
+        // S3 DeleteObjects allows max 1000 keys per request
+        const chunkSize = 1000;
+        for (let i = 0; i < keysToDelete.length; i += chunkSize) {
+            const batch = keysToDelete.slice(i, i + chunkSize);
+            try {
+                const command = new DeleteObjectsCommand({
+                    Bucket: keys.s3BucketName as string,
+                    Delete: {
+                        Objects: batch.map(key => ({ Key: key })),
+                        Quiet: true
+                    }
+                });
+                await s3Client.send(command);
+                logger.info(`Deleted batch of ${batch.length} files from S3.`);
+            } catch (err) {
+                logger.error('Failed to delete batch from S3 during cleanup:', err);
+                // Continue to next batch even if one fails
+            }
+        }
+    }
+
+    // Hard-delete from DB
+    const deleteResult = await Media.deleteMany({
+        _id: { $in: toDelete.map(m => m._id) }
+    });
+
+    logger.info(`Cleanup complete. Permanently deleted ${deleteResult.deletedCount} media records.`);
+};
 /**
  * Bulk delete multiple media items
  */
-export const bulkDeleteMediaService = async (
+export const bulkSoftDeleteMediaService = async (
     eventId: string,
     mediaIds: string[],
     userId: string,
@@ -500,11 +747,11 @@ export const bulkDeleteMediaService = async (
             };
         }
 
-        // Get media items for URL collection
+        // Get media items for processing
         const mediaItems = await Media.find({
             _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
             event_id: new mongoose.Types.ObjectId(eventId)
-        }).select('url image_variants approval.status uploaded_by size_mb')
+        }).select('original variants approval.status owner size_mb deleteGroup')
             .populate('event_id', 'share_token')
             .lean();
 
@@ -521,56 +768,56 @@ export const bulkDeleteMediaService = async (
         const shareToken = (mediaItems[0].event_id as any)?.share_token || null;
         const visibleMediaIds: string[] = [];
 
-        // IMPROVED: Collect all URLs with better validation
-        const allUrls: string[] = [];
+        // Collect visible media IDs for notifications
         mediaItems.forEach(media => {
-            const urls = collectAllMediaUrls(media);
-            allUrls.push(...urls);
-
             if (['approved', 'auto_approved'].includes(media.approval?.status || '')) {
                 visibleMediaIds.push(media._id.toString());
             }
         });
 
-        const { validUrls, invalidUrls } = validateAndCleanUrls(allUrls);
+        // STEP 1: Soft-delete in DB IMMEDIATELY
+        const updateResult = await Media.updateMany(
+            {
+                _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
+                event_id: new mongoose.Types.ObjectId(eventId)
+            },
+            {
+                $set: {
+                    isDeleted: true,
+                    deletedAt: new Date(),
+                    approval: {
+                        ...mediaItems[0].approval, // Use first item's approval as template
+                        status: 'deleted'
+                    }
+                }
+            }
+        );
 
-        if (invalidUrls.length > 0) {
-            logger.warn(`Found ${invalidUrls.length} invalid URLs for bulk deletion`, {
-                eventId,
-                mediaCount: mediaItems.length,
-                invalidUrls: invalidUrls.slice(0, 3)
-            });
+        if (updateResult.modifiedCount === 0) {
+            return {
+                status: false,
+                code: 404,
+                message: 'No media items were modified',
+                data: null,
+                error: { message: 'No changes made - items may already be deleted' }
+            };
         }
-
-        logger.info(`Collected URLs for bulk deletion`, {
-            eventId,
-            mediaItems: mediaItems.length,
-            totalUrls: allUrls.length,
-            validUrls: validUrls.length,
-            invalidUrls: invalidUrls.length
-        });
-
-        // STEP 1: Delete from database IMMEDIATELY
-        const deleteResult = await Media.deleteMany({
-            _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
-            event_id: new mongoose.Types.ObjectId(eventId)
-        });
 
         // STEP 2: Update counters
         try {
             await updateBulkCountersForDeletion(eventId, mediaItems);
         } catch (counterError) {
-            logger.warn('Failed to update bulk counters for deletion:', counterError);
+            logger.warn('Failed to update bulk counters for soft-deletion:', counterError);
         }
 
-        // STEP 3: Broadcast deletions
+        // STEP 3: Broadcast soft-deletions if visible
         if (visibleMediaIds.length > 0) {
             try {
                 for (const mediaId of visibleMediaIds) {
                     mediaNotificationService.broadcastMediaRemoved({
                         mediaId,
                         eventId,
-                        reason: options?.reason || 'bulk_deleted_by_admin',
+                        reason: options?.reason || 'bulk_soft_deleted_by_admin',
                         adminName: options?.adminName
                     });
                 }
@@ -584,45 +831,22 @@ export const bulkDeleteMediaService = async (
                             await photoWallService.notifyMediaRemoved(
                                 shareToken,
                                 mediaId,
-                                options?.reason || 'Bulk removed by admin'
+                                options?.reason || 'Bulk soft-removed by admin'
                             );
                         }
                     }
                 }
             } catch (wsError) {
-                logger.error('Failed to broadcast bulk media deletion via WebSocket:', wsError);
+                logger.error('Failed to broadcast bulk soft-deletion via WebSocket:', wsError);
             }
         }
-
-        // STEP 4: Queue storage cleanup in background - ONLY valid URLs
-        if (validUrls.length > 0) {
-            logger.info(`Queueing bulk storage cleanup for ${validUrls.length} valid URLs`);
-            queueStorageCleanup({
-                mediaId: `bulk-${eventId}-${Date.now()}`,
-                urls: validUrls, // Only pass valid URLs
-                eventId,
-                userId,
-                isBulk: true
-            }).catch((error: any) => {
-                logger.error('Failed to queue bulk storage cleanup:', error);
-            });
-        } else {
-            logger.info('No valid URLs to cleanup for bulk media deletion');
-        }
-
-        logger.info('Bulk media deletion completed:', {
-            eventId,
-            requestedCount: validMediaIds.length,
-            deletedFromDb: deleteResult.deletedCount,
-            urlsToCleanup: validUrls.length
-        });
 
         return {
             status: true,
             code: 200,
-            message: `Successfully deleted ${deleteResult.deletedCount} media items`,
+            message: `Successfully soft-deleted ${updateResult.modifiedCount} media items`,
             data: {
-                deletedCount: deleteResult.deletedCount,
+                modifiedCount: updateResult.modifiedCount,
                 requestedCount: validMediaIds.length,
                 visibleMediaDeleted: visibleMediaIds.length
             },
@@ -630,18 +854,16 @@ export const bulkDeleteMediaService = async (
             other: {
                 websocketBroadcasted: visibleMediaIds.length > 0,
                 photoWallNotified: !!(shareToken && visibleMediaIds.length > 0),
-                storageCleanupQueued: validUrls.length > 0,
-                validUrlsQueued: validUrls.length,
-                invalidUrlsSkipped: invalidUrls.length
+                cleanupScheduled: true // Now async after 30 days
             }
         };
 
     } catch (error: any) {
-        logger.error('Error in bulkDeleteMediaService:', error);
+        logger.error('Error in bulkSoftDeleteMediaService:', error);
         return {
             status: false,
             code: 500,
-            message: 'Failed to bulk delete media',
+            message: 'Failed to bulk soft-delete media',
             data: null,
             error: { message: error.message }
         };
@@ -652,7 +874,7 @@ export const bulkDeleteMediaService = async (
 // Helper function to update counters for individual status changes
 async function updateCountersForStatusChange(
     eventId: string,
-    uploadedBy: mongoose.Types.ObjectId | null,
+    uploadedBy: mongoose.Types.ObjectId | undefined,
     previousStatus: string | undefined,
     newStatus: string,
     sizeMB: number
@@ -716,8 +938,8 @@ async function updateBulkCountersForStatusChange(
             eventPhotoIncrement += increment;
 
             // Track participant increments
-            if (media.uploaded_by) {
-                const userId = media.uploaded_by.toString();
+            if (media.owner?.user_id) {
+                const userId = media.owner.user_id.toString();
                 participantIncrements.set(userId, (participantIncrements.get(userId) || 0) + increment);
             }
         }
@@ -760,7 +982,7 @@ async function updateBulkCountersForStatusChange(
 // Helper function to update counters for deletion
 async function updateCountersForDeletion(
     eventId: string,
-    uploadedBy: mongoose.Types.ObjectId | null,
+    uploadedBy: mongoose.Types.ObjectId | undefined,
     deletedStatus: string,
     sizeMB: number
 ): Promise<void> {
@@ -826,8 +1048,8 @@ async function updateBulkCountersForDeletion(
         }
 
         // Track participant decrements
-        if (media.uploaded_by) {
-            const userId = media.uploaded_by.toString();
+        if (media.owner?.user_id) {
+            const userId = media.owner.user_id.toString();
             const current = participantDecrements.get(userId) || { uploads: 0, approved: 0, size: 0 };
 
             current.uploads += 1;
@@ -936,73 +1158,3 @@ function collectAllMediaUrls(media: any): string[] {
     return urlArray;
 }
 
-
-// Cleanup orphaned ImageKit files - CORRECTED VERSION
-export const cleanupOrphanedImageKitFiles = async (eventId: string): Promise<void> => {
-    try {
-        // List all files in the event folder
-        const listResponse = await imagekit.listFiles({
-            path: `/events/${eventId}`,
-            limit: 1000
-        });
-
-        // Filter to only get files (not folders)
-        const files = listResponse.filter((item): item is FileObject =>
-            'fileId' in item && item.type === 'file'
-        );
-
-        // Get all media URLs from database
-        const mediaItems = await Media.find({ event_id: eventId })
-            .select('url image_variants')
-            .lean();
-
-        const validUrls = new Set<string>();
-
-        // Collect all valid URLs from media items
-        mediaItems.forEach(media => {
-            if (media.url) validUrls.add(media.url);
-
-            // Add all variant URLs
-            if (media.image_variants) {
-                const variants = media.image_variants;
-
-                // Helper to safely add URL
-                const addUrl = (obj: any) => {
-                    if (obj?.url) validUrls.add(obj.url);
-                };
-
-                // Original
-                addUrl(variants.original);
-
-                // Small variants
-                addUrl(variants.small?.webp);
-                addUrl(variants.small?.jpeg);
-
-                // Medium variants
-                addUrl(variants.medium?.webp);
-                addUrl(variants.medium?.jpeg);
-
-                // Large variants
-                addUrl(variants.large?.webp);
-                addUrl(variants.large?.jpeg);
-            }
-        });
-
-        // Find orphaned files
-        const orphanedFiles = files.filter(file => !validUrls.has(file.url));
-
-        logger.info(`Found ${orphanedFiles.length} orphaned files for event ${eventId}`);
-
-        // Delete orphaned files
-        for (const file of orphanedFiles) {
-            try {
-                await imagekit.deleteFile(file.fileId);
-                logger.debug(`Deleted orphaned file: ${file.name}`);
-            } catch (deleteError) {
-                logger.error(`Failed to delete orphaned file ${file.name}:`, deleteError);
-            }
-        }
-    } catch (error) {
-        logger.error('Cleanup orphaned files error:', error);
-    }
-};

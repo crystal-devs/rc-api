@@ -10,6 +10,8 @@ import mongoose from "mongoose";
 import { ServiceResponse } from "@services/media";
 import { EventType } from "./event.types";
 import { getPhotoWallWebSocketService } from "@services/photoWallWebSocketService";
+import { Media } from "@models/media.model";
+import { getEventDetailService } from "./event-query.service";
 
 // Role permissions template
 const ROLE_PERMISSIONS = {
@@ -193,6 +195,22 @@ export const deleteEventService = async (
         // Delete all event participants first
         await EventParticipant.deleteMany({ event_id: new mongoose.Types.ObjectId(eventId) }, { session });
 
+        // Delete all event medias first
+        const deleteGroup = `event-${eventId}-${Date.now()}`;
+        await Media.updateMany(
+            {
+                event_id: new mongoose.Types.ObjectId(eventId)
+            },
+            {
+                $set: {
+                    isDeleted: true,
+                    deletedAt: new Date(),
+                    approval: { status: 'deleted' },
+                    deleteGroup: deleteGroup
+                }
+            }
+        );
+
         // Delete event
         await Event.findOneAndDelete({ _id: new mongoose.Types.ObjectId(eventId) }, { session });
 
@@ -333,13 +351,29 @@ export const updateEventService = async (
             }
         }
 
+        // Fetch the fully enriched event object to return (including user_role, stats, etc.)
+        // This ensures the frontend doesn't lose context after an update
+        const enrichedEventResponse = await getEventDetailService(eventId, userId, undefined, session);
+
         await session.commitTransaction();
+
+        if (!enrichedEventResponse.status || !enrichedEventResponse.data) {
+            // Fallback to updatedEvent if enrichment fails (should be rare)
+            return {
+                status: true,
+                code: 200,
+                message: 'Event updated successfully (partial details)',
+                data: updatedEvent,
+                error: null,
+                other: null
+            };
+        }
 
         return {
             status: true,
             code: 200,
             message: 'Event updated successfully',
-            data: updatedEvent,
+            data: enrichedEventResponse.data,
             error: null,
             other: null
         };
@@ -407,85 +441,6 @@ export const getUserEventRole = async (
             status: false,
             code: 500,
             message: "Failed to get user role",
-            data: null,
-            error: {
-                message: error.message,
-                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-            },
-            other: null
-        };
-    }
-};
-
-// Helper function to get all events for a user with their roles
-export const getUserEventsService = async (
-    userId: string,
-    filters?: {
-        role?: 'creator' | 'co_host' | 'guest';
-        status?: 'active' | 'pending' | 'blocked' | 'removed';
-        archived?: boolean;
-    }
-): Promise<ServiceResponse<EventType[]>> => {
-    try {
-        const matchConditions: any = {
-            user_id: new mongoose.Types.ObjectId(userId)
-        };
-
-        if (filters?.role) {
-            matchConditions.role = filters.role;
-        }
-
-        if (filters?.status) {
-            matchConditions.status = filters.status;
-        } else {
-            matchConditions.status = 'active'; // Default to active
-        }
-
-        const pipeline: any[] = [
-            { $match: matchConditions },
-            {
-                $lookup: {
-                    from: 'events',
-                    localField: 'event_id',
-                    foreignField: '_id',
-                    as: 'event'
-                }
-            },
-            { $unwind: '$event' },
-            {
-                $match: {
-                    'event.archived_at': filters?.archived ? { $ne: null } : null
-                }
-            },
-            {
-                $addFields: {
-                    'event.user_role': '$role',
-                    'event.user_permissions': '$permissions'
-                }
-            },
-            { $replaceRoot: { newRoot: '$event' } },
-            { $sort: { updated_at: -1 } }
-        ];
-
-        const events = await EventParticipant.aggregate(pipeline);
-
-        return {
-            status: true,
-            code: 200,
-            message: "Events retrieved successfully",
-            data: events,
-            error: null,
-            other: {
-                total_count: events.length,
-                filters_applied: filters
-            }
-        };
-    } catch (error: any) {
-        logger.error('Error in getUserEventsService:', error);
-        return {
-            status: false,
-            code: 500,
-            message: "Failed to get user events",
             data: null,
             error: {
                 message: error.message,

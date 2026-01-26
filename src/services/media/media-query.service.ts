@@ -7,6 +7,7 @@ import { Media } from '@models/media.model';
 import { Event } from '@models/event.model';
 import { transformMediaForResponse } from '@utils/file.util';
 import type { ServiceResponse, MediaQueryOptions, MediaItem } from './media.types';
+import type { MediaMetadata } from '@utils/file.util';
 
 export const buildMediaQuery = (
     baseId: string,
@@ -71,9 +72,8 @@ export const getMediaByEventService = async (
     eventId: string,
     options: MediaQueryOptions,
     userAgent?: string
-): Promise<ServiceResponse<MediaItem[]>> => {
+): Promise<ServiceResponse<MediaMetadata[]>> => {
     try {
-        // Validate event_id
         if (!mongoose.Types.ObjectId.isValid(eventId)) {
             return {
                 status: false,
@@ -93,6 +93,7 @@ export const getMediaByEventService = async (
         });
         const filteredCount = await Media.countDocuments(query);
 
+        console.log(filteredCount, 'media items found after applying filters');
         logger.info('Media query debug:', {
             eventId,
             totalCount,
@@ -122,18 +123,16 @@ export const getMediaByEventService = async (
 
         // Execute query
         const mediaItems = await Media.find(query)
+            .select('_id type event_id album_id original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)
             .lean();
 
-        // Apply image optimization
-        const optimizedMedia = transformMediaForResponse(mediaItems, {
-            quality: options.quality || 'medium',
-            format: options.format || 'auto',
-            context: options.context || 'desktop',
-            includeVariants: true
-        }, userAgent);
+        // Transform media with optimized signed URL handling
+        const optimizedMedia = await transformMediaForResponse(
+            mediaItems,
+        );
 
         // Calculate pagination info
         const totalPages = Math.ceil(filteredCount / limit);
@@ -153,17 +152,12 @@ export const getMediaByEventService = async (
                     hasNext: page < totalPages,
                     hasPrev: page > 1
                 },
-                debug: {
-                    totalInEvent: totalCount,
-                    afterFilters: filteredCount,
-                    returned: optimizedMedia.length
-                },
                 optimization_settings: {
                     quality: options.quality || 'medium',
                     format: options.format || 'auto',
                     context: options.context || 'desktop'
                 },
-                appliedFilters: options
+                appliedFilters: options,
             }
         };
 
@@ -183,7 +177,7 @@ export const getMediaByAlbumService = async (
     albumId: string,
     options: MediaQueryOptions,
     userAgent?: string
-): Promise<ServiceResponse<MediaItem[]>> => {
+): Promise<ServiceResponse<MediaMetadata[]>> => {
     try {
         // Validate albumId
         if (!albumId || !mongoose.Types.ObjectId.isValid(albumId)) {
@@ -206,6 +200,7 @@ export const getMediaByAlbumService = async (
 
         // Get media with pagination
         const mediaItems = await Media.find(query)
+            .select('_id type event_id album_id original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)
@@ -214,12 +209,7 @@ export const getMediaByAlbumService = async (
         const totalCount = await Media.countDocuments(query);
 
         // Optimize images for response
-        const optimizedMedia = transformMediaForResponse(mediaItems, {
-            quality: options.quality,
-            format: options.format,
-            context: options.context,
-            includeVariants: true
-        }, userAgent);
+        const optimizedMedia = await transformMediaForResponse(mediaItems,);
 
         // Calculate pagination info
         const totalPages = Math.ceil(totalCount / limit);
@@ -264,7 +254,7 @@ export const getGuestMediaService = async (
     userEmail?: string,
     authToken?: string,
     options: any = {}
-): Promise<ServiceResponse<MediaItem[]>> => {
+): Promise<ServiceResponse<MediaMetadata[]>> => {
     try {
         logger.info(`🔍 Guest media request for token: ${shareToken.substring(0, 8)}...`, {
             page: options.page,
@@ -332,18 +322,13 @@ export const getGuestMediaService = async (
             .lean();
 
         // 🚀 Use the SAME transformation function as admin service
-        const transformedMedia = transformMediaForResponse(mediaItems, {
-            quality: options.quality || 'medium',
-            format: options.format || 'auto',
-            context: options.context || 'mobile', // Default to mobile for guests
-            includeVariants: true // Enable progressive URLs for guests
-        }, options.userAgent);
+        const transformedMedia = await transformMediaForResponse(mediaItems);
 
         // Add guest-specific metadata to each item
-        const guestEnhancedMedia = transformedMedia.map(item => ({
+        const guestEnhancedMedia = transformedMedia.map((item: MediaMetadata) => ({
             ...item,
             // Hide uploader info for privacy
-            uploaded_by: "Guest",
+            uploader_display_name: "Guest",
             // Ensure guest access context
             guest_access: true
         }));
@@ -399,88 +384,84 @@ export const getGuestMediaService = async (
 };
 
 // 🎯 Simplified batch service using existing transformation
-export const getGuestMediaBatchService = async (
-    shareToken: string,
-    mediaIds: string[],
-    quality: string = 'medium'
-): Promise<ServiceResponse<any[]>> => {
-    try {
-        // Validate input
-        if (!shareToken || !mediaIds || !Array.isArray(mediaIds) || mediaIds.length === 0) {
-            return {
-                status: false,
-                code: 400,
-                message: 'Invalid parameters',
-                data: null,
-                error: { message: 'Share token and media IDs are required' }
-            };
-        }
+// export const getGuestMediaBatchService = async (
+//     shareToken: string,
+//     mediaIds: string[],
+//     quality: string = 'medium'
+// ): Promise<ServiceResponse<MediaMetadata[]>> => {
+//     try {
+//         // Validate input
+//         if (!shareToken || !mediaIds || !Array.isArray(mediaIds) || mediaIds.length === 0) {
+//             return {
+//                 status: false,
+//                 code: 400,
+//                 message: 'Invalid parameters',
+//                 data: null,
+//                 error: { message: 'Share token and media IDs are required' }
+//             };
+//         }
 
-        // Validate all media IDs
-        const validMediaIds = mediaIds.filter(id => mongoose.Types.ObjectId.isValid(id));
-        if (validMediaIds.length === 0) {
-            return {
-                status: false,
-                code: 400,
-                message: 'No valid media IDs provided',
-                data: null,
-                error: { message: 'All media IDs must be valid ObjectIds' }
-            };
-        }
+//         // Validate all media IDs
+//         const validMediaIds = mediaIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+//         if (validMediaIds.length === 0) {
+//             return {
+//                 status: false,
+//                 code: 400,
+//                 message: 'No valid media IDs provided',
+//                 data: null,
+//                 error: { message: 'All media IDs must be valid ObjectIds' }
+//             };
+//         }
 
-        // Find event by share token
-        const event = await Event.findOne({
-            share_token: shareToken
-        }).select('_id permissions share_settings').lean();
+//         // Find event by share token
+//         const event = await Event.findOne({
+//             share_token: shareToken
+//         }).select('_id permissions share_settings').lean();
 
-        if (!event || !event.permissions?.can_view || !event.share_settings?.is_active) {
-            return {
-                status: false,
-                code: 403,
-                message: 'Access denied',
-                data: null,
-                error: { message: 'Cannot access this event' }
-            };
-        }
+//         if (!event || !event.permissions?.can_view || !event.share_settings?.is_active) {
+//             return {
+//                 status: false,
+//                 code: 403,
+//                 message: 'Access denied',
+//                 data: null,
+//                 error: { message: 'Cannot access this event' }
+//             };
+//         }
 
-        // Get specific media items
-        const mediaItems = await Media.find({
-            _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
-            event_id: event._id,
-            'approval.status': { $in: ['approved', 'auto_approved'] }
-        }).lean();
+//         // Get specific media items
+//         const mediaItems = await Media.find({
+//             _id: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) },
+//             event_id: event._id,
+//             'approval.status': { $in: ['approved', 'auto_approved'] }
+//         }).lean();
 
-        // 🚀 Use the SAME transformation function
-        const optimizedBatch = transformMediaForResponse(mediaItems, {
-            quality: quality,
-            format: 'auto',
-            context: 'mobile',
-            includeVariants: true
-        });
+//         // 🚀 Use the SAME transformation function
+//         // const optimizedBatch = await transformMediaForResponse(mediaItems);
+//         const optimizedBatch = {};
 
-        return {
-            status: true,
-            code: 200,
-            message: 'Batch media URLs retrieved',
-            data: optimizedBatch,
-            error: null,
-            other: {
-                quality_used: quality,
-                progressive_loading: true,
-                requested_count: mediaIds.length,
-                valid_count: validMediaIds.length,
-                returned_count: optimizedBatch.length
-            }
-        };
+//         return {
+//             status: true,
+//             code: 200,
+//             message: 'Batch media URLs retrieved',
+//             data: optimizedBatch,
+//             error: null,
+//             other: {
+//                 quality_used: quality,
+//                 progressive_loading: true,
+//                 requested_count: mediaIds.length,
+//                 valid_count: validMediaIds.length,
+//                 // returned_count: optimizedBatch.length
+//             }
+//         };
 
-    } catch (error: any) {
-        logger.error('❌ Error in getGuestMediaBatchService:', error);
-        return {
-            status: false,
-            code: 500,
-            message: 'Failed to get batch media',
-            data: null,
-            error: { message: error.message }
-        };
-    }
-};
+//     } catch (error: any) {
+//         logger.error('❌ Error in getGuestMediaBatchService:', error);
+//         return {
+//             status: false,
+//             code: 500,
+//             message: 'Failed to get batch media',
+//             data: null,
+//             error: { message: error.message }
+//         };
+//     }
+// };

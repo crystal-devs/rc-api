@@ -4,6 +4,10 @@
 
 import { logger } from "@utils/logger";
 import type { EventVisibility, AccessCheckResult } from './access.types';
+import { EventInvitation } from '@models/event-invitations.model';
+import { EventParticipant } from '@models/event-participants.model';
+import { User } from '@models/user.model';
+import mongoose from 'mongoose';
 
 export class ShareValidationService {
     /**
@@ -41,7 +45,8 @@ export class ShareValidationService {
     checkVisibilityAccess(
         visibility: EventVisibility,
         authToken?: string,
-        userEmail?: string
+        userEmail?: string,
+        eventId?: string
     ): AccessCheckResult {
         switch (visibility) {
             case 'private':
@@ -59,7 +64,14 @@ export class ShareValidationService {
                     };
                 }
 
-                const isInvited = this.checkIfUserIsInvited(userEmail);
+                if (!eventId) {
+                    return {
+                        valid: false,
+                        reason: "Event ID is required for invitation validation."
+                    };
+                }
+
+                const isInvited = this.checkIfUserIsInvited(userEmail, eventId);
                 if (!isInvited) {
                     return {
                         valid: false,
@@ -77,12 +89,38 @@ export class ShareValidationService {
     }
 
     /**
-     * Check if user is invited to the event
+     * Check if user is invited to the event or already a participant
      */
-    private checkIfUserIsInvited(userEmail: string): boolean {
-        // TODO: Add invited user logic later
-        // For now, any authenticated user can access invited_only events
-        return true;
+    private async checkIfUserIsInvited(userEmail: string, eventId: string): Promise<boolean> {
+        try {
+            // Check if user is already a participant
+            const existingParticipant = await EventParticipant.findOne({
+                event_id: new mongoose.Types.ObjectId(eventId),
+                user_id: { $exists: true }, // Only check registered users for invited_only
+                status: 'active'
+            });
+
+            if (existingParticipant) {
+                // Check if this participant's user email matches
+                const user = await User.findById(existingParticipant.user_id);
+                if (user && user.email === userEmail) {
+                    return true;
+                }
+            }
+
+            // Check for pending/accepted invitations
+            const invitation = await EventInvitation.findOne({
+                event_id: new mongoose.Types.ObjectId(eventId),
+                invitee_email: userEmail,
+                status: { $in: ['pending', 'accepted'] },
+                expires_at: { $gt: new Date() }
+            });
+
+            return !!invitation;
+        } catch (error) {
+            logger.error(`Error checking user invitation for event ${eventId}:`, error);
+            return false;
+        }
     }
 }
 

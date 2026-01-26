@@ -11,7 +11,7 @@ const bulkDownloadSchema = new mongoose.Schema({
 
     // Event relationship
     event_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.EVENT, required: true, index: true },
-    share_token: { type: String, required: true, index: true },
+    share_token: { type: String, required: false, index: true },
 
     // Requester info (supports concurrent requests from multiple users)
     requested_by_type: { type: String, enum: ['guest', 'user', 'host'], required: true },
@@ -26,6 +26,10 @@ const bulkDownloadSchema = new mongoose.Schema({
         default: 'original',
         index: true
     },
+
+    // Content versioning for smart caching
+    content_hash: { type: String, index: true }, // MD5 hash of approved media IDs + timestamps
+    media_count: { type: Number, default: 0 }, // Number of media files in this ZIP
     include_videos: { type: Boolean, default: true },
     include_images: { type: Boolean, default: true },
     file_format: { type: String, enum: ['zip'], default: 'zip' },
@@ -85,7 +89,7 @@ const bulkDownloadSchema = new mongoose.Schema({
     download_url_expires_at: { type: Date, default: null },
 
     // Cloud storage info
-    storage_provider: { type: String, enum: ['imagekit', 'aws_s3', 'google_drive'], default: 'imagekit' },
+    storage_provider: { type: String, enum: ['aws_s3', 'google_drive'], default: 'aws_s3' },
     storage_key: { type: String, default: null }, // File path in cloud storage
     storage_file_id: { type: String, default: null }, // Provider-specific file ID
 

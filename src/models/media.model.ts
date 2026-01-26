@@ -1,437 +1,252 @@
-// models/Media.ts - Fixed TypeScript types for methods
+// models/Media.ts
 import mongoose, { InferSchemaType, Document } from "mongoose";
 import { MODEL_NAMES } from "./names";
 
-// Image variant sub-schema
-const imageVariantSchema = new mongoose.Schema({
-    url: { type: String, required: true },
-    width: { type: Number, required: true },
-    height: { type: Number, required: true },
-    size_mb: { type: Number, required: true },
-    format: { type: String, enum: ['webp', 'jpeg'], required: true }
+// Canonical media metadata (authoritative)
+const originalMediaSchema = new mongoose.Schema({
+    public_id: { type: String, required: true }, // S3 / CDN identifier
+    filename: { type: String, default: "" }, // Original filename from uploader
+    width: { type: Number, required: false }, // Images only (Optional - application validated)
+    height: { type: Number, required: false }, // Images only (Optional - application validated)
+    duration: { type: Number, required: false }, // Videos only (seconds)
+    format: { type: String, required: true }, // Flex string, validated in application
+    size_mb: { type: Number, required: true }
 }, { _id: false });
 
-// Image variants schema
+// Variant reference (just public_id, geometry derived from original)
+const variantRefSchema = new mongoose.Schema({
+    public_id: { type: String, required: true }
+}, { _id: false });
+
+// Image variants (optional presence)
 const imageVariantsSchema = new mongoose.Schema({
-    original: {
-        url: { type: String, required: true },
-        width: { type: Number, required: true },
-        height: { type: Number, required: true },
-        size_mb: { type: Number, required: true },
-        format: { type: String, required: true }
-    },
-    small: {
-        webp: { type: imageVariantSchema, required: false },
-        jpeg: { type: imageVariantSchema, required: true }
-    },
-    medium: {
-        webp: { type: imageVariantSchema, required: false },
-        jpeg: { type: imageVariantSchema, required: true }
-    },
-    large: {
-        webp: { type: imageVariantSchema, required: false },
-        jpeg: { type: imageVariantSchema, required: true }
-    }
+    small: { type: variantRefSchema, required: false },
+    medium: { type: variantRefSchema, required: false },
+    large: { type: variantRefSchema, required: false }
 }, { _id: false });
 
-// Guest uploader info schema
-const guestUploaderSchema = new mongoose.Schema({
-    guest_id: { type: String, required: true },
-    name: { type: String, default: "" },
-    email: { type: String, default: "" }, // Kept for display purposes
-    session_id: { type: String, required: true } // Critical: links to GuestSession
+// Video transcodes (optional presence)
+const videoTranscodesSchema = new mongoose.Schema({
+    p360: { type: variantRefSchema, required: false },   // 360p
+    p720: { type: variantRefSchema, required: false },   // 720p
+    p1080: { type: variantRefSchema, required: false }   // 1080p
 }, { _id: false });
 
-// Enhanced metadata schema
-const metadataSchema = new mongoose.Schema({
-    width: { type: Number, default: 0 },
-    height: { type: Number, default: 0 },
-    duration: { type: Number, default: 0 },
-    aspect_ratio: { type: Number, default: 1 },
-    color_profile: { type: String, default: "" },
-    has_transparency: { type: Boolean, default: false },
-    device_info: {
-        brand: { type: String, default: "" },
-        model: { type: String, default: "" },
-        os: { type: String, default: "" }
-    },
-    location: {
-        latitude: { type: Number, default: null },
-        longitude: { type: Number, default: null },
-        address: { type: String, default: "" }
-    },
-    timestamp: { type: Date, default: null },
-    camera_settings: {
-        iso: { type: Number, default: null },
-        aperture: { type: String, default: "" },
-        shutter_speed: { type: String, default: "" },
-        focal_length: { type: String, default: "" }
-    }
+// Video thumbnails (optional presence)
+const videoThumbnailsSchema = new mongoose.Schema({
+    poster: { type: variantRefSchema, required: false },   // Single frame poster
+    preview: { type: variantRefSchema, required: false }   // Animated preview (optional)
+}, { _id: false });
+
+// Unified variants schema (supports both images and videos)
+const mediaVariantsSchema = new mongoose.Schema({
+    // Image variants
+    images: { type: imageVariantsSchema, required: false },
+    // Video variants
+    videos: { type: videoTranscodesSchema, required: false },
+    thumbnails: { type: videoThumbnailsSchema, required: false }
+}, { _id: false });
+
+// Owner (unified user/guest reference)
+const ownerSchema = new mongoose.Schema({
+    type: { type: String, enum: ['registered_user', 'guest'], required: true },
+    user_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: false },
+    guest_id: { type: String, required: false },
+    display_name: { type: String, required: false } // Snapshot for guests
 }, { _id: false });
 
 // Enhanced processing schema
 const processingSchema = new mongoose.Schema({
     status: { type: String, enum: ['pending', 'processing', 'completed', 'failed'], default: 'pending' },
-    started_at: { type: Date, default: null },
-    completed_at: { type: Date, default: null },
-    processing_time_ms: { type: Number, default: 0 },
-
-    variants_generated: { type: Boolean, default: false },
-    variants_count: { type: Number, default: 0 },
-    total_variants_size_mb: { type: Number, default: 0 },
-
-    error_message: { type: String, default: "" },
+    stage: { type: String, enum: ['queued', 'uploading', 'variants', 'completed'], default: 'uploading' },
+    progress: { type: Number, default: 0, min: 0, max: 100 },
+    error: { type: String, default: "" },
+    // Extended processing fields (temporarily kept for compatibility)
+    job_id: { type: String, required: false },
     retry_count: { type: Number, default: 0 },
-
-    current_stage: {
-        type: String,
-        enum: ['uploading', 'queued', 'preview_creating', 'processing', 'variants_creating', 'completed', 'failed'],
-        default: 'uploading'
-    },
-    progress_percentage: { type: Number, default: 0, min: 0, max: 100 },
-    job_id: { type: String, default: null },
-    last_updated: { type: Date, default: Date.now },
-
-    ai_analysis: {
-        completed: { type: Boolean, default: false },
-        content_score: { type: Number, default: 0 },
-        tags: [{ type: String }],
-        faces_detected: { type: Number, default: 0 },
-        inappropriate_content: { type: Boolean, default: false }
-    }
+    started_at: { type: Date, default: null },
+    completed_at: { type: Date, default: null }
 }, { _id: false });
 
+// Approval (simplified)
 const approvalSchema = new mongoose.Schema({
-    status: { type: String, enum: ['pending', 'approved', 'rejected', 'auto_approved', 'hidden'], default: 'pending' },
-    approved_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, default: null },
-    approved_at: { type: Date, default: null },
-    rejection_reason: { type: String, default: "" },
-    auto_approval_reason: {
-        type: String,
-        enum: ['authenticated_user', 'guest_auto_approve', 'ai_safe', 'host_setting'],
-        default: null
-    }
+    status: { type: String, enum: ['pending', 'approved', 'rejected', 'hidden', 'auto_approved'], default: 'pending' },
+    reason: { type: String, default: "" }
 }, { _id: false });
 
-// Main Media Schema
+// Main Media Schema (Universal - Images & Videos)
 const mediaSchema = new mongoose.Schema({
     _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
 
-    // Core media info
-    url: { type: String, required: true },
-    public_id: { type: String, default: "" },
+    // Core identity
+    upload_id: { type: String, required: true, unique: true, index: true },
     type: { type: String, enum: ["image", "video"], required: true },
 
-    // Image variants (only for images)
-    image_variants: {
-        type: imageVariantsSchema,
-        default: null
-    },
-
     // Relationships
-    album_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.ALBUM, required: true },
     event_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.EVENT, required: true },
+    album_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.ALBUM, required: true },
 
-    // Uploader info
-    uploaded_by: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: MODEL_NAMES.USER,
-        required: false,
-        default: null
-    },
-    guest_uploader: {
-        type: guestUploaderSchema,
-        default: null
-    },
-    uploader_type: {
-        type: String,
-        enum: ['registered_user', 'guest'],
-        required: true,
-        default: function () {
-            return this.uploaded_by ? 'registered_user' : 'guest';
-        }
-    },
-    guest_session_id: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: MODEL_NAMES.GUEST_SESSION,
-        default: null
-    },
+    // Owner (unified)
+    owner: { type: ownerSchema, required: true },
 
-    // File info
-    original_filename: { type: String, default: "" },
-    size_mb: { type: Number, default: 0 },
-    format: { type: String, default: "" },
+    // Canonical media metadata (supports both images and videos)
+    original: { type: originalMediaSchema, required: true },
 
-    // Processing and optimization
+    // Unified variants (images, videos, thumbnails)
+    variants: { type: mediaVariantsSchema, default: () => ({}) },
+
+    // Processing state
     processing: { type: processingSchema, default: () => ({}) },
 
-    // Enhanced metadata
-    metadata: { type: metadataSchema, default: () => ({}) },
-
-    // Approval system
+    // Approval
     approval: { type: approvalSchema, default: () => ({}) },
 
-    // Legacy fields (backward compatibility)
-    approval_status: { type: Boolean, default: true },
-    approved_by: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, default: null },
-
-    // Engagement metrics
-    stats: {
-        views: { type: Number, default: 0 },
-        downloads: { type: Number, default: 0 },
-        shares: { type: Number, default: 0 },
-        likes: { type: Number, default: 0 },
-        comments_count: { type: Number, default: 0 }
-    },
-
-    // Content safety
-    content_flags: {
-        inappropriate: { type: Boolean, default: false },
-        duplicate: { type: Boolean, default: false },
-        low_quality: { type: Boolean, default: false },
-        ai_flagged: { type: Boolean, default: false }
-    },
-
-    // Upload context
-    upload_context: {
-        method: { type: String, enum: ['web', 'mobile', 'api', 'guest_upload'], default: 'web' },
-        ip_address: { type: String, default: "" },
-        user_agent: { type: String, default: "" },
-        upload_session_id: { type: String, default: "" },
-        referrer_url: { type: String, default: "" },
-        platform: { type: String, default: "web" }
-    },
+    // Face Metadata (Local Cache)
+    faces: [{
+        faceId: { type: String, required: true },
+        confidence: { type: Number, required: true },
+        boundingBox: {
+            Width: Number,
+            Height: Number,
+            Left: Number,
+            Top: Number
+        },
+        userId: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.USER, required: false } // Linked User
+    }],
 
     // Timestamps
     created_at: { type: Date, default: Date.now },
-    updated_at: { type: Date, default: Date.now }
+    updated_at: { type: Date, default: Date.now },
+    isDeleted: { type: Boolean, default: false, index: true },
+    deletedAt: { type: Date, default: null, index: true },
+    deleteGroup: { type: String, required: false, select: false }, // For bulk deletion grouping
 });
 
-// Pre-save middleware
+// Pre-save middleware (simplified)
 mediaSchema.pre('save', function (next) {
-    if (this.isNew) {
-        // Set uploader type
-        if (this.uploaded_by && !this.guest_uploader) {
-            this.uploader_type = 'registered_user';
-        } else if (!this.uploaded_by && this.guest_uploader) {
-            this.uploader_type = 'guest';
-        }
-
-        // Set default approval if not provided
-        if (!this.approval || this.approval.status === undefined) {
-            this.approval = {
-                status: 'pending',
-                approved_by: null,
-                approved_at: null,
-                rejection_reason: '',
-                auto_approval_reason: null
-            };
-        }
-
-        // Calculate aspect ratio if metadata exists
-        if (this.metadata?.width && this.metadata?.height) {
-            this.metadata.aspect_ratio = this.metadata.height / this.metadata.width;
-        }
-    }
-
     this.updated_at = new Date();
     next();
 });
 
 // Virtual for uploader display name
 mediaSchema.virtual('uploader_display_name').get(function (this: any) {
-    if (this.uploader_type === 'registered_user' && this.uploaded_by) {
-        if (typeof this.uploaded_by === 'object' && 'name' in this.uploaded_by) {
-            return this.uploaded_by.name;
-        }
+    if (this.owner.type === 'registered_user' && this.owner.user_id) {
+        // Would need to populate user, but for now return placeholder
         return 'User';
-    } else if (this.uploader_type === 'guest' && this.guest_uploader) {
-        return this.guest_uploader.name || 'Anonymous Guest';
+    } else if (this.owner.type === 'guest' && this.owner.guest_id) {
+        return 'Anonymous Guest';
     }
     return 'Unknown';
 });
 
-// Virtual for best image URL based on context
-mediaSchema.virtual('best_url').get(function (this: any) {
-    // For backward compatibility, return original URL if no variants
-    if (!this.image_variants) {
-        return this.url;
+// Virtual for best media public_id reference
+mediaSchema.virtual('best_public_id').get(function (this: any) {
+    // For backward compatibility, return original public_id if no variants
+    if (this.type === 'image') {
+        if (!this.variants?.images?.medium) {
+            return this.original?.public_id || '';
+        }
+        return this.variants.images.medium.public_id;
+    } else if (this.type === 'video') {
+        // For videos, return the highest quality transcode available
+        if (this.variants?.videos?.p1080) return this.variants.videos.p1080.public_id;
+        if (this.variants?.videos?.p720) return this.variants.videos.p720.public_id;
+        if (this.variants?.videos?.p360) return this.variants.videos.p360.public_id;
+        return this.original?.public_id || '';
     }
-
-    // Return medium JPEG as default best URL
-    return this.image_variants?.medium?.jpeg?.url || this.url;
+    return this.original?.public_id || '';
 });
 
-// ✅ FIXED: Define interface for methods with proper stage types
+// Methods
 interface IMediaMethods {
-    updateProgress(stage: 'uploading' | 'preview_creating' | 'processing' | 'variants_creating' | 'completed' | 'failed', percentage: number): Promise<this>;
-    setJobId(jobId: string): Promise<this>;
-    getProgressInfo(): {
-        stage: string;
-        percentage: number;
-        status: string;
-        jobId: string | null;
-        lastUpdated: Date;
-    };
+    updateProgress(stage: 'uploading' | 'variants' | 'completed', progress: number): Promise<this>;
+    getProgressInfo(): { stage: string; progress: number; status: string; error: string };
     canContactUploader(): boolean;
-    getOptimizedUrl(context?: 'mobile' | 'desktop' | 'lightbox', supportsWebP?: boolean): string;
+    getOptimizedUrl(size?: 'small' | 'medium' | 'large'): string;
     isProcessingComplete(): boolean;
 }
 
-// ✅ FIXED: Define proper MediaDocument type
 export type MediaDocument = Document & InferSchemaType<typeof mediaSchema> & IMediaMethods;
 
-// ✅ FIXED: Add methods to schema with proper typing
+// Methods implementation
 mediaSchema.methods.canContactUploader = function (this: MediaDocument) {
-    if (this.uploader_type === 'registered_user') {
-        return true;
-    } else if (this.uploader_type === 'guest' && this.guest_uploader) {
-        return !!(this.guest_uploader.email);
-    }
-    return false;
+    return this.owner.type === 'registered_user' && !!this.owner.user_id;
 };
 
-// Get optimized URL for specific context
 mediaSchema.methods.getOptimizedUrl = function (
     this: MediaDocument,
-    context: 'mobile' | 'desktop' | 'lightbox' = 'desktop',
-    supportsWebP: boolean = true
+    size: 'small' | 'medium' | 'large' = 'medium'
 ): string {
-    if (!this.image_variants || this.type !== 'image') {
-        return this.url; // Fallback to original
+    if (this.type === 'image') {
+        if (!this.variants?.images || !this.variants.images[size]) {
+            return this.original?.public_id || '';
+        }
+        return this.variants.images[size].public_id;
+    } else if (this.type === 'video') {
+        // For videos, map size to quality
+        const qualityMap = {
+            small: 'p360',
+            medium: 'p720',
+            large: 'p1080'
+        };
+        const quality = qualityMap[size] as keyof typeof this.variants.videos;
+        if (!this.variants?.videos || !this.variants.videos[quality]) {
+            return this.original?.public_id || '';
+        }
+        return this.variants.videos[quality].public_id;
     }
-
-    const variants = this.image_variants;
-    let targetVariant;
-
-    switch (context) {
-        case 'mobile':
-            targetVariant = variants.small;
-            break;
-        case 'desktop':
-            targetVariant = variants.medium;
-            break;
-        case 'lightbox':
-            targetVariant = variants.large;
-            break;
-        default:
-            targetVariant = variants.medium;
-    }
-
-    if (supportsWebP && targetVariant?.webp?.url) {
-        return targetVariant.webp.url;
-    } else if (targetVariant?.jpeg?.url) {
-        return targetVariant.jpeg.url;
-    }
-
-    // Fallback chain
-    return variants.medium?.jpeg?.url || variants.small?.jpeg?.url || this.url;
+    return this.original?.public_id || '';
 };
 
-// Check if image processing is complete
 mediaSchema.methods.isProcessingComplete = function (this: MediaDocument): boolean {
-    return this.processing?.status === 'completed' && this.processing?.variants_generated === true;
+    return this.processing?.status === 'completed';
 };
 
-// ✅ FIXED: Update progress with WebSocket broadcast
-mediaSchema.methods.updateProgress = async function (this: MediaDocument, stage: 'uploading' | 'preview_creating' | 'processing' | 'variants_creating' | 'completed' | 'failed', percentage: number) {
-    this.processing.current_stage = stage;
-    this.processing.progress_percentage = percentage;
-    this.processing.last_updated = new Date();
+mediaSchema.methods.updateProgress = async function (this: MediaDocument, stage: 'uploading' | 'variants' | 'completed', progress: number) {
+    this.processing.stage = stage;
+    this.processing.progress = progress;
     await this.save();
     return this;
 };
 
-// ✅ FIXED: Set job ID for queue tracking
-mediaSchema.methods.setJobId = async function (this: MediaDocument, jobId: string) {
-    this.processing.job_id = jobId;
-    await this.save();
-    return this;
-};
-
-// ✅ FIXED: Get simple progress info
 mediaSchema.methods.getProgressInfo = function (this: MediaDocument) {
     return {
-        stage: this.processing.current_stage,
-        percentage: this.processing.progress_percentage,
+        stage: this.processing.stage,
+        progress: this.processing.progress,
         status: this.processing.status,
-        jobId: this.processing.job_id,
-        lastUpdated: this.processing.last_updated
+        error: this.processing.error
     };
 };
 
 // Indexes
-mediaSchema.index({ "processing.job_id": 1 });
-mediaSchema.index({ "processing.current_stage": 1, "event_id": 1 });
 mediaSchema.index({ event_id: 1, album_id: 1 });
-mediaSchema.index({ uploaded_by: 1, created_at: -1 });
-mediaSchema.index({ "guest_uploader.guest_id": 1, event_id: 1 });
-mediaSchema.index({ "guest_uploader.email": 1, event_id: 1 });
-mediaSchema.index({ "approval.status": 1, event_id: 1 });
+mediaSchema.index({ event_id: 1, created_at: -1 }); // Optimized for Event Feed
+mediaSchema.index({ album_id: 1, created_at: -1 }); // Optimized for album view
+mediaSchema.index({ "owner.user_id": 1, created_at: -1 });
+mediaSchema.index({ "owner.guest_id": 1, event_id: 1 });
 mediaSchema.index({ "processing.status": 1 });
-mediaSchema.index({ type: 1, event_id: 1 });
-mediaSchema.index({ uploader_type: 1, event_id: 1 });
-mediaSchema.index({ "content_flags.inappropriate": 1 });
 mediaSchema.index({ created_at: -1 });
-mediaSchema.index({ guest_session_id: 1, event_id: 1 });
-mediaSchema.index({ guest_session_id: 1, uploader_type: 1 });
 
-// ✅ FIXED: Create model with proper typing
+// Export model
 export const Media = mongoose.model<MediaDocument>(MODEL_NAMES.MEDIA, mediaSchema, MODEL_NAMES.MEDIA);
+
+// Helper to create guest uploader info structure
+export const createGuestUploaderInfo = (guestInfo: any, isContext: boolean = false) => {
+    return {
+        name: guestInfo.name || 'Anonymous',
+        email: guestInfo.email || '',
+        phone: guestInfo.phone || '',
+        session_id: guestInfo.sessionId || '',
+        device_fingerprint: guestInfo.deviceFingerprint || '',
+        platform_info: guestInfo.platformInfo || {}
+    };
+};
 
 // Export types
 export type MediaType = InferSchemaType<typeof mediaSchema>;
 export type MediaCreationType = Omit<MediaType, '_id'>;
 
-// ✅ NEW: Export stage types for type safety
-export type ProcessingStage = 'uploading' | 'preview_creating' | 'processing' | 'variants_creating' | 'completed' | 'failed' | 'queued';
+// Processing and approval status types
 export type ProcessingStatus = 'pending' | 'processing' | 'completed' | 'failed';
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'auto_approved' | 'hidden';
-
-// Helper functions remain the same
-export const generateGuestId = (guestInfo?: { name?: string; email?: string; device?: string }): string => {
-    const timestamp = Date.now();
-    const random = Math.random().toString(36).substring(2, 8);
-
-    if (guestInfo?.email) {
-        const emailHash = guestInfo.email.toLowerCase().split('@')[0].substring(0, 4);
-        return `guest_${emailHash}_${random}`;
-    } else if (guestInfo?.name) {
-        const nameHash = guestInfo.name.toLowerCase().replace(/\s+/g, '').substring(0, 4);
-        return `guest_${nameHash}_${random}`;
-    } else {
-        return `guest_anon_${timestamp}_${random}`;
-    }
-};
-
-export const createGuestUploaderInfo = (
-    guestData: {
-        name?: string;
-        email?: string;
-        phone?: string;
-        sessionId?: string;
-        deviceFingerprint?: string;
-        uploadMethod?: string;
-        platformInfo?: any;
-    },
-    isFirstUpload: boolean = true
-) => {
-    const guestId = generateGuestId({
-        name: guestData.name,
-        email: guestData.email,
-        device: guestData.deviceFingerprint
-    });
-
-    return {
-        guest_id: guestId,
-        name: guestData.name || '',
-        email: guestData.email || '',
-        phone: guestData.phone || '',
-        session_id: guestData.sessionId || '',
-        device_fingerprint: guestData.deviceFingerprint || '',
-        upload_method: guestData.uploadMethod || 'web',
-        total_uploads: isFirstUpload ? 1 : undefined,
-        first_upload_at: isFirstUpload ? new Date() : undefined,
-        platform_info: guestData.platformInfo || {}
-    };
-};
+export type ProcessingStage = 'queued' | 'uploading' | 'variants' | 'completed';
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'hidden' | 'auto_approved';

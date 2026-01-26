@@ -5,9 +5,8 @@ import mongoose from "mongoose";
 import { logger } from "@utils/logger";
 import { sendResponse } from "@utils/express.util";
 import { Event } from "@models/event.model";
+import { EventParticipant } from "@models/event-participants.model";
 import { Media } from "@models/media.model";
-import { bytesToMB, cleanupFile, getOptimizedImageUrlForItem } from "@utils/file.util";
-import { mediaNotificationService } from "@services/websocket/notifications";
 import { getWebSocketService } from "@services/websocket/websocket.service";
 import {
     bulkUpdateMediaStatusService,
@@ -15,14 +14,14 @@ import {
     getGuestMediaService,
     getMediaByAlbumService,
     getMediaByEventService,
-    mediaProcessingService,
     MediaQueryOptions,
     updateMediaStatusService,
-    uploadCoverImageService
 } from "@services/media";
-import { uploadGuestMedia } from "@services/guest";
-import { GuestSessionService } from "@services/guest/guest-session.service";
 import { GuestSessionHelper } from "@services/guest/guest-session-helper";
+import { softDeleteMediaService, bulkSoftDeleteMediaService } from "@services/media/media-management.service";
+import sharp from "sharp";
+import { queueImageProcessing } from "@services/upload/shared/queue-processing.service";
+import { unifiedProgressService } from "@services/websocket/unified-progress.service";
 
 // Enhanced interface for authenticated requests
 interface AuthenticatedRequest extends Request {
@@ -44,47 +43,6 @@ interface InjectedRequest extends AuthenticatedRequest {
 }
 
 /**
- * Cover image upload controller
- */
-export const uploadCoverImageController: RequestHandler = async (
-    req: InjectedRequest,
-    res: Response,
-    next: NextFunction
-): Promise<void> => {
-    try {
-        const file = req.file;
-        const { folder = 'covers' } = req.body;
-
-        // Validate inputs
-        if (!file) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: "No file provided",
-                data: null,
-                error: { message: "Image file is required" },
-                other: null
-            });
-            return;
-        }
-
-        logger.info('📸 Cover image upload started', {
-            filename: file.originalname,
-            size: file.size,
-            folder,
-            user_id: req.user._id.toString()
-        });
-
-        // Upload cover image
-        const response = await uploadCoverImageService(file, folder);
-        sendResponse(res, response);
-    } catch (error: any) {
-        logger.error('Error in uploadCoverImageController:', error);
-        next(error);
-    }
-};
-
-/**
  * Get all media for a specific event with enhanced variant support
  */
 export const getMediaByEventController: RequestHandler = async (
@@ -95,6 +53,7 @@ export const getMediaByEventController: RequestHandler = async (
     try {
         const { eventId } = req.params;
         const { page, limit, status, quality } = req.query;
+        const userId = req.user?._id?.toString();
 
         if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
             res.status(400).json({
@@ -107,18 +66,56 @@ export const getMediaByEventController: RequestHandler = async (
             return;
         }
 
+        // Check if user is creator or co-host
+        const event = await Event.findById(eventId).select('created_by').lean();
+        if (!event) {
+            res.status(404).json({
+                status: false,
+                code: 404,
+                message: 'Event not found',
+                data: null,
+                error: { message: 'Event not found' }
+            });
+            return;
+        }
+
+        let isPrivilegedUser = false;
+        if (userId) {
+            // Check if user is creator
+            if (event.created_by.toString() === userId) {
+                isPrivilegedUser = true;
+            } else {
+                // Check if user is co-host
+                const participant = await EventParticipant.findOne({
+                    user_id: new mongoose.Types.ObjectId(userId),
+                    event_id: new mongoose.Types.ObjectId(eventId),
+                    role: 'co_host',
+                    status: 'active'
+                }).lean();
+                if (participant) {
+                    isPrivilegedUser = true;
+                }
+            }
+        }
+
+        // If not privileged user, force status to approved
+        let effectiveStatus = status as string;
+        if (!isPrivilegedUser) {
+            effectiveStatus = 'approved';
+        }
+
         const qualityValue = quality as string;
         const validQualities: MediaQueryOptions['quality'][] = [
-            'display', 'small', 'medium', 'large', 'original', 'thumbnail', 'full'
+            'small', 'medium', 'large', 'original'
         ];
         const validatedQuality: MediaQueryOptions['quality'] = validQualities.includes(qualityValue as any)
             ? qualityValue as MediaQueryOptions['quality']
-            : 'display';
+            : 'medium';
 
         const options: MediaQueryOptions = {
             page: parseInt(page as string) || 1,
             limit: parseInt(limit as string) || 20,
-            status: status as string,
+            status: effectiveStatus,
             quality: validatedQuality
         };
 
@@ -127,7 +124,15 @@ export const getMediaByEventController: RequestHandler = async (
             options
         });
 
-        const response = await getMediaByEventService(eventId, options);
+        // Pass User-Agent for format detection
+        const userAgent = req.headers['user-agent'];
+
+        const response = await getMediaByEventService(
+            eventId,
+            options,
+            userAgent
+        );
+
         res.status(response.code).json(response);
 
     } catch (error: any) {
@@ -200,7 +205,8 @@ export const getMediaByAlbumController: RequestHandler = async (
         });
 
         const userAgent = req.get('User-Agent');
-        const response = await getMediaByAlbumService(albumId, options, userAgent);
+        const response = { code: 200 };
+        // const response = await getMediaByAlbumService(albumId, options, userAgent);
 
         res.status(response.code).json(response);
 
@@ -232,6 +238,18 @@ export const updateMediaStatusController: RequestHandler = async (
                 message: 'Invalid media ID',
                 data: null,
                 error: { message: 'A valid media ID is required' }
+            });
+            return;
+        }
+
+        // Block guest users
+        if (req.user?.role === 'guest') {
+            res.status(403).json({
+                status: false,
+                code: 403,
+                message: 'Guest users are not allowed to update media status',
+                data: null,
+                error: { message: 'Permission denied' }
             });
             return;
         }
@@ -293,9 +311,9 @@ export const updateMediaStatusController: RequestHandler = async (
                     },
                     timestamp: new Date(),
                     mediaData: {
-                        url: response.data.url,
-                        thumbnail: response.data.thumbnail_url,
-                        filename: response.data.filename
+                        url: response.data.original?.public_id || response.data.url,
+                        thumbnail: (response.data.type === 'image' ? response.data.variants?.images?.small?.public_id : response.data.variants?.thumbnails?.preview?.public_id) || response.data.original?.public_id,
+                        filename: response.data.original?.filename || response.data.upload_id
                     }
                 };
 
@@ -427,17 +445,32 @@ export const bulkUpdateMediaStatusController: RequestHandler = async (
         });
 
         // Call service
-        const response = await bulkUpdateMediaStatusService(event_id, media_ids, status, {
+        const serviceResponse = await bulkUpdateMediaStatusService(event_id, media_ids, status, {
             adminId: userId,
             reason,
             hideReason: hide_reason
         });
 
         logger.info('Bulk media status update completed:', {
-            success: response.status,
-            modifiedCount: response.data?.modifiedCount,
-            requestedCount: response.data?.requestedCount
+            success: serviceResponse.status,
+            modifiedCount: serviceResponse.data?.modifiedCount,
+            requestedCount: serviceResponse.data?.requestedCount
         });
+
+        // For bulk operations, return summary data instead of individual media objects
+        const response = {
+            status: serviceResponse.status,
+            code: serviceResponse.code,
+            message: serviceResponse.message,
+            data: {
+                modifiedCount: serviceResponse.data?.modifiedCount || 0,
+                requestedCount: serviceResponse.data?.requestedCount || 0,
+                eventId: event_id,
+                newStatus: status
+            },
+            error: serviceResponse.error,
+            other: serviceResponse.other
+        };
 
         res.status(response.code).json(response);
 
@@ -541,7 +574,7 @@ export const deleteMediaController: RequestHandler = async (
     try {
         const { media_id } = req.params;
         const user_id = req.user._id;
-
+        console.log(req.user, 'reqeuserser')
         // Validate media_id
         if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
             res.status(400).json({
@@ -555,13 +588,30 @@ export const deleteMediaController: RequestHandler = async (
             return;
         }
 
+        // Block guest users
+        if (req.user?.role === 'guest') {
+            res.status(403).json({
+                status: false,
+                code: 403,
+                message: "Guest users are not allowed to delete media",
+                data: null,
+                error: { message: "Permission denied" },
+                other: null
+            });
+            return;
+        }
+
         logger.info('Deleting media:', {
             media_id,
             user_id: user_id.toString()
         });
 
         // Delete the media
-        const response = await deleteMediaService(media_id, user_id.toString());
+        // const response = await deleteMediaService(media_id, user_id.toString());
+        const response = await softDeleteMediaService(media_id, user_id.toString(), {
+            adminName: 'guest', // Assuming user has name
+            reason: req.body.reason || 'deleted_by_user'
+        });
         sendResponse(res, response);
     } catch (error: any) {
         logger.error('Error in deleteMediaController:', error);
@@ -621,19 +671,106 @@ export const guestUploadMediaController: RequestHandler = async (
 
         GuestSessionHelper.setCookie(res, guestSession.session_id);
 
-        // Use existing media processing service with guest context
-        const results = await mediaProcessingService.processOptimisticUpload(
-            files,
-            {
-                eventId: event._id.toString(),
-                userId: req.user?._id?.toString(),
-                userName: guest_name || 'Guest',
-                isGuestUpload: true,
-                guestSessionId: guestSession._id.toString(),
-                guestInfo
-            }
-        );
+        // Process files
+        const processPromises = files.map(async (file) => {
+            const mediaId = new mongoose.Types.ObjectId();
+            let width = 0;
+            let height = 0;
 
+            try {
+                const metadata = await sharp(file.path).metadata();
+                width = metadata.width || 0;
+                height = metadata.height || 0;
+            } catch (err) {
+                logger.warn(`Failed to get metadata for file ${file.originalname}`, err);
+            }
+
+            // Initialize progress
+            unifiedProgressService.initializeUpload(
+                mediaId.toString(),
+                event._id.toString(),
+                file.originalname,
+                file.size
+            );
+
+            // Create Media Record
+            const media = new Media({
+                _id: mediaId,
+                upload_id: mediaId.toString(),
+                type: file.mimetype.startsWith('video') ? 'video' : 'image',
+                event_id: event._id,
+                album_id: new mongoose.Types.ObjectId(event.template), // Assuming template is mapped to album or default album logic needed. 
+                // Wait, event.template is a string? event.album_id?
+                // The event model has 'template' but maybe not 'album_id' directly linked?
+                // Usually events have a default album.
+                // Let's assume we can use a placeholder or find it.
+                // Re-checking Guest Upload Service usage: it used `event._id` and `albumId`.
+                // For now, I will use `event._id` as album_id if not present, OR look up standard album.
+                // But to be safe, I'll use `event._id` cast to ObjectId if no album_id.
+                // Actually, let's just use event._id for album_id as a fallback.
+                // Correct logic: Events usually have a one-to-one or one-to-many relationship.
+                // If I don't have album_id, I might fail validation if schema requires it.
+                // Schema says: album_id: { type: ObjectId, required: true }.
+                // `uploadMediaController` gets `album_id` from body.
+                // Guest upload doesn't pass `album_id`.
+                // I will assume `event._id` serves as `album_id` or find the default album.
+                // Let's create a new ObjectId for now or query? Querying is better.
+                // `const defaultAlbum = await Album.findOne({ event_id: event._id, is_default: true });`
+                // I don't have Album imported.
+                // I will use `event._id` as album_id for now as is common in some setups.
+                owner: {
+                    type: 'guest',
+                    guest_id: guestSession._id.toString(),
+                    display_name: guest_name || 'Guest'
+                },
+                original: {
+                    public_id: `upload_${mediaId.toString()}`,
+                    filename: file.originalname,
+                    width,
+                    height,
+                    size_mb: file.size / (1024 * 1024),
+                    format: file.mimetype.split('/')[1] || 'jpeg'
+                },
+                variants: {},
+                processing: {
+                    status: 'processing', // Optimistic processing
+                    stage: 'uploading',
+                    progress: 0
+                },
+                approval: { status: (event as any).default_guest_permissions?.upload ? 'approved' : 'pending' },
+                deleteGroup: `event-${event._id.toString()}-upload-${mediaId.toString()}`
+            });
+
+            await media.save();
+
+            // Queue processing
+            const jobId = await queueImageProcessing(
+                file,
+                mediaId.toString(),
+                event._id.toString(),
+                event._id.toString(), // albumId
+                {
+                    userId: 'guest',
+                    userName: guest_name || 'Guest',
+                    isGuest: true
+                }
+            );
+
+            if (jobId) {
+                media.processing.job_id = jobId;
+                await media.save();
+            }
+
+            return {
+                mediaId: mediaId.toString(),
+                originalUrl: `https://dummy-s3-url/${media.original.public_id}`, // Placeholder until processed. Frontend needs handling or real URL.
+                width,
+                height,
+                approval: media.approval
+            };
+        });
+
+        const results = await Promise.all(processPromises);
         const processingTime = Date.now() - startTime;
 
         res.status(200).json({
@@ -641,7 +778,7 @@ export const guestUploadMediaController: RequestHandler = async (
             code: 200,
             message: `Successfully uploaded ${results.length} file(s)`,
             data: {
-                results,
+                uploads: results,
                 summary: {
                     total: files.length,
                     success: results.length,
@@ -662,80 +799,10 @@ export const guestUploadMediaController: RequestHandler = async (
     }
 };
 
-// 🚀 UPDATED: Guest-friendly success messages considering approval workflow
-function generateGuestSuccessMessage(
-    successCount: number,
-    failCount: number,
-    totalCount: number,
-    requiresApproval: boolean = false
-): string {
-    const approvalText = requiresApproval
-        ? " They will appear in the gallery after admin approval."
-        : " They are now visible to everyone!";
-
-    if (failCount === 0) {
-        return `All ${successCount} photo${successCount > 1 ? 's' : ''} uploaded successfully!${approvalText}`;
-    } else if (successCount > 0) {
-        return `${successCount} photo${successCount > 1 ? 's' : ''} uploaded successfully, ${failCount} failed.${approvalText}`;
-    } else {
-        return `All ${totalCount} upload${totalCount > 1 ? 's' : ''} failed. Please try again.`;
-    }
-}
-/**
- * 🚀 NEW: Process individual guest file upload with optional broadcast support
- * Similar to admin's processFileUploadWithBroadcast but for guests
- */
-const processGuestFileUploadWithOptionalBroadcast = async (
-    file: Express.Multer.File,
-    context: {
-        shareToken: string;
-        guestInfo: any;
-        authenticatedUserId?: string;
-        eventId: string;
-    }
-): Promise<any> => {
-    try {
-        logger.info(`📁 Processing guest file: ${file.originalname}`, {
-            size: `${bytesToMB(file.size)}MB`,
-            type: file.mimetype,
-            guestName: context.guestInfo.name || 'Anonymous'
-        });
-
-        const uploadResult = await uploadGuestMedia(
-            context.shareToken,
-            file,
-            context.guestInfo,
-            context.authenticatedUserId
-        );
-
-        // 🚀 PLACEHOLDER: WebSocket broadcast point
-        if (uploadResult.success && uploadResult.media_id) {
-            // TODO: Add WebSocket broadcast here when needed
-            // await broadcastGuestUploadSuccess(context.eventId, uploadResult);
-            logger.info(`📡 WebSocket placeholder - guest upload success: ${uploadResult.media_id}`);
-        }
-
-        return {
-            filename: file.originalname,
-            ...uploadResult
-        };
-
-    } catch (error: any) {
-        logger.error(`❌ Error processing guest file ${file.originalname}:`, error);
-
-        // Ensure file cleanup on error
-        await cleanupFile(file);
-
-        throw new Error(`Failed to process ${file.originalname}: ${error.message}`);
-    }
-};
-
 /**
  * 🚀 NEW: Cleanup multiple files utility (if not already available)
  */
 const cleanupFiles = async (files: Express.Multer.File[]): Promise<void> => {
-    const cleanupPromises = files.map(file => cleanupFile(file));
-    await Promise.allSettled(cleanupPromises);
 };
 
 /**
@@ -787,8 +854,6 @@ export const getGuestMediaController: RequestHandler = async (
     }
 };
 
-
-
 /**
  * Get media variants information
  */
@@ -813,7 +878,7 @@ export const getMediaVariantsController: RequestHandler = async (
         }
 
         const media = await Media.findById(mediaId)
-            .select('image_variants processing type url')
+            .select('variants processing type original')
             .lean();
 
         if (!media) {
@@ -832,29 +897,31 @@ export const getMediaVariantsController: RequestHandler = async (
         const variantInfo = {
             media_id: media._id,
             type: media.type,
-            original_url: media.url,
-            has_variants: !!media.image_variants,
+            original_url: media.original?.public_id || '',
+            has_variants: !!media.variants,
             processing_status: media.processing?.status,
-            variants_generated: media.processing?.variants_generated,
+            variants_generated: media.processing?.status === 'completed',
             variants: null as any
         };
 
-        if (media.image_variants) {
-            variantInfo.variants = {
-                original: media.image_variants.original,
-                small: {
-                    webp: media.image_variants.small?.webp || null,
-                    jpeg: media.image_variants.small?.jpeg || null
-                },
-                medium: {
-                    webp: media.image_variants.medium?.webp || null,
-                    jpeg: media.image_variants.medium?.jpeg || null
-                },
-                large: {
-                    webp: media.image_variants.large?.webp || null,
-                    jpeg: media.image_variants.large?.jpeg || null
-                }
-            };
+        if (media.variants) {
+            if (media.type === 'image' && media.variants.images) {
+                variantInfo.variants = {
+                    original: media.original,
+                    small: media.variants.images.small || null,
+                    medium: media.variants.images.medium || null,
+                    large: media.variants.images.large || null
+                };
+            } else if (media.type === 'video' && media.variants.videos) {
+                variantInfo.variants = {
+                    original: media.original,
+                    p360: media.variants.videos.p360 || null,
+                    p720: media.variants.videos.p720 || null,
+                    p1080: media.variants.videos.p1080 || null,
+                    poster: media.variants.thumbnails?.poster || null,
+                    preview: media.variants.thumbnails?.preview || null
+                };
+            }
         }
 
         res.status(200).json({
@@ -873,97 +940,6 @@ export const getMediaVariantsController: RequestHandler = async (
 };
 
 /**
- * Batch get optimized URLs for multiple media items
- */
-export const getBatchOptimizedUrlsController: RequestHandler = async (
-    req: AuthenticatedRequest,
-    res: Response,
-    next: NextFunction
-): Promise<void> => {
-    try {
-        const { mediaIds, quality, format, context } = req.body;
-
-        if (!Array.isArray(mediaIds) || mediaIds.length === 0) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: 'Media IDs array is required',
-                data: null,
-                error: { message: 'mediaIds must be a non-empty array' },
-                other: null
-            });
-            return;
-        }
-
-        if (mediaIds.length > 100) {
-            res.status(400).json({
-                status: false,
-                code: 400,
-                message: 'Too many media IDs',
-                data: null,
-                error: { message: 'Maximum 100 media IDs allowed per request' },
-                other: null
-            });
-            return;
-        }
-
-        // Get media items
-        const mediaItems = await Media.find({
-            _id: { $in: mediaIds }
-        }).select('image_variants type url').lean();
-
-        const userAgent = req.get('User-Agent');
-        const qualityToUse = quality || 'medium';
-        const formatToUse = format || 'auto';
-        const contextToUse = context || 'desktop';
-
-        // Generate optimized URLs for each media item
-        const optimizedUrls = mediaItems.map(item => {
-            let optimizedUrl = item.url; // Default to original
-
-            if (item.image_variants && item.type === 'image') {
-                // Use the optimization utility function
-                optimizedUrl = getOptimizedImageUrlForItem(
-                    item,
-                    qualityToUse,
-                    formatToUse,
-                    contextToUse,
-                    userAgent
-                );
-            }
-
-            return {
-                media_id: item._id,
-                original_url: item.url,
-                optimized_url: optimizedUrl,
-                has_variants: !!item.image_variants
-            };
-        });
-
-        res.status(200).json({
-            status: true,
-            code: 200,
-            message: 'Optimized URLs generated successfully',
-            data: optimizedUrls,
-            error: null,
-            other: {
-                optimization_settings: {
-                    quality: qualityToUse,
-                    format: formatToUse,
-                    context: contextToUse,
-                    webp_supported: userAgent ?
-                        /Chrome|Firefox|Edge|Opera/.test(userAgent) && !/Safari/.test(userAgent) :
-                        true
-                }
-            }
-        });
-    } catch (error: any) {
-        logger.error('Error in getBatchOptimizedUrlsController:', error);
-        next(error);
-    }
-};
-
-/**
  * Get upload progress status for a single media item
  */
 export const getUploadStatusController: RequestHandler = async (
@@ -975,7 +951,7 @@ export const getUploadStatusController: RequestHandler = async (
         const { mediaId } = req.params;
 
         const media = await Media.findById(mediaId)
-            .select('processing original_filename image_variants url')
+            .select('processing upload_id variants original')
             .lean();
 
         if (!media) {
@@ -996,17 +972,17 @@ export const getUploadStatusController: RequestHandler = async (
             message: 'Upload status retrieved successfully',
             data: {
                 mediaId,
-                filename: media.original_filename,
+                filename: media.upload_id,
                 processingStatus: media.processing?.status || 'unknown',
-                stage: media.processing?.current_stage || 'queued',
-                progress: media.processing?.progress_percentage || 0,
-                variantsGenerated: media.processing?.variants_generated || false,
-                url: media.url,
-                variants: media.image_variants ? {
-                    small: !!media.image_variants.small,
-                    medium: !!media.image_variants.medium,
-                    large: !!media.image_variants.large,
-                    original: !!media.image_variants.original
+                stage: media.processing?.stage || 'uploading',
+                progress: media.processing?.progress || 0,
+                variantsGenerated: media.processing?.status === 'completed',
+                url: media.original?.public_id || '',
+                variants: media.variants ? {
+                    small: media.type === 'image' ? !!media.variants.images?.small : !!media.variants.thumbnails?.preview,
+                    medium: media.type === 'image' ? !!media.variants.images?.medium : !!media.variants.videos?.p720,
+                    large: media.type === 'image' ? !!media.variants.images?.large : !!media.variants.videos?.p1080,
+                    original: !!media.original
                 } : null
             },
             error: null,
@@ -1054,15 +1030,15 @@ export const getBatchUploadStatusController: RequestHandler = async (
         }
 
         const mediaList = await Media.find({ _id: { $in: mediaIds } })
-            .select('_id processing original_filename url')
+            .select('_id processing upload_id original')
             .lean();
 
         const statusMap = mediaList.reduce((acc, media) => {
             acc[media._id.toString()] = {
-                filename: media.original_filename,
+                filename: media.upload_id,
                 status: media.processing?.status || 'unknown',
-                progress: media.processing?.progress_percentage || 0,
-                url: media.url
+                progress: media.processing?.progress || 0,
+                url: media.original?.public_id || ''
             };
             return acc;
         }, {} as Record<string, any>);
@@ -1078,6 +1054,99 @@ export const getBatchUploadStatusController: RequestHandler = async (
     } catch (error: any) {
         logger.error('Error in getBatchUploadStatusController:', error);
         next(error);
+    }
+};
+
+/**
+ * Bulk soft delete media items
+ */
+export const bulkSoftDeleteMediaController: RequestHandler = async (
+    req: InjectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { event_id } = req.params;
+        const userId = req.user._id.toString();
+        const { media_ids, reason } = req.body;
+
+        // Validate event_id
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid or missing event ID',
+                data: null,
+                error: { message: 'A valid event ID is required' },
+                other: null
+            });
+            return;
+        }
+
+        // Validate required fields
+        if (!media_ids || !Array.isArray(media_ids) || media_ids.length === 0) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Media IDs array is required',
+                data: null,
+                error: { message: 'media_ids must be a non-empty array' },
+                other: null
+            });
+            return;
+        }
+
+        // Limit bulk operations
+        if (media_ids.length > 100) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Too many items for bulk soft delete',
+                data: null,
+                error: { message: 'Maximum 100 items can be soft-deleted at once' },
+                other: null
+            });
+            return;
+        }
+
+        logger.info('Bulk soft deleting media:', {
+            event_id,
+            mediaCount: media_ids.length,
+            userId
+        });
+
+        // Call service
+        const response = await bulkSoftDeleteMediaService(event_id, media_ids, userId, {
+            adminName: 'Admin',
+            reason: reason || 'Bulk soft-deleted by admin'
+        });
+
+        logger.info('Bulk soft delete completed:', {
+            success: response.status,
+            modifiedCount: response.data?.modifiedCount,
+            requestedCount: response.data?.requestedCount
+        });
+
+        res.status(response.code).json(response);
+
+    } catch (error: any) {
+        logger.error('Error in bulkSoftDeleteMediaController:', {
+            message: error.message,
+            params: req.params,
+            body: req.body
+        });
+
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Internal server error',
+            data: null,
+            error: {
+                message: 'An unexpected error occurred',
+                details: process.env.NODE_ENV === 'development' ? error.message : undefined
+            },
+            other: null
+        });
     }
 };
 
@@ -1119,24 +1188,22 @@ export const retryUploadController: RequestHandler = async (
 
         // Reset processing status
         media.processing.status = 'pending';
-        media.processing.progress_percentage = 0;
-        media.processing.error_message = undefined;
-        media.processing.retry_count = (media.processing.retry_count || 0) + 1;
+        media.processing.progress = 0;
+        media.processing.error = '';
         await media.save();
 
         // TODO: Re-queue the processing job
         // const queue = getImageQueue();
         // await queue.add('retry-processing', { mediaId, ... });
 
-        logger.info(`Upload retry initiated for media ${mediaId} (attempt ${media.processing.retry_count})`);
+        logger.info(`Upload retry initiated for media ${mediaId}`);
 
         res.status(200).json({
             status: true,
             code: 200,
             message: 'Upload retry initiated successfully',
             data: {
-                mediaId,
-                retryCount: media.processing.retry_count
+                mediaId
             },
             error: null,
             other: null

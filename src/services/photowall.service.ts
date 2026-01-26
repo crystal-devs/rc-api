@@ -57,13 +57,13 @@ export const getPhotoWallDisplayService = async (
     })
       .sort({ created_at: -1 })
       .limit(options.maxItems || 100)
-      .select('_id image_variants created_at guest_uploader uploaded_by uploader_type')
+      .select('_id variants created_at guest_uploader uploaded_by uploader_type')
       .lean();
 
     // Transform to display items
     const items: PhotoWallItem[] = media.map((item, index) => ({
       id: item._id.toString(),
-      imageUrl: getOptimizedImageUrl(item.image_variants, options.quality || 'large'),
+      imageUrl: getOptimizedImageUrl(item.variants?.images, options.quality || 'large'),
       uploaderName: event.photowall_settings.showUploaderNames ? getUploaderName(item) : null,
       timestamp: item.created_at,
       position: index,
@@ -98,8 +98,11 @@ export const getPhotoWallDisplayService = async (
 // Helper functions
 const getOptimizedImageUrl = (variants: any, quality: string): string => {
   if (!variants) return '';
+  const { getCachedSignedUrl } = require('../utils/signedUrl');
   const variant = variants[quality] || variants.large || variants.medium || variants.original;
-  return variant?.webp?.url || variant?.jpeg?.url || variant?.url || '';
+  return variant?.webp?.public_id ? getCachedSignedUrl(variant.webp.public_id) :
+    variant?.jpeg?.public_id ? getCachedSignedUrl(variant.jpeg.public_id) :
+      variant?.public_id ? getCachedSignedUrl(variant.public_id) : '';
 };
 
 const getUploaderName = (media: any): string => {

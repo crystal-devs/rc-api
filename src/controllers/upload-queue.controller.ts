@@ -74,19 +74,20 @@ export const getUploadQueueController = async (
             {
                 $project: {
                     _id: 1,
-                    original_filename: 1,
-                    size_mb: 1,
+                    original_filename: '$original.filename',
+                    size_mb: '$original.size_mb',
                     uploader_type: 1,
                     uploader_name: 1,
                     'processing.status': 1,
-                    'processing.current_stage': 1,
-                    'processing.progress_percentage': 1,
+                    'processing.current_stage': '$processing.stage',
+                    'processing.progress_percentage': '$processing.progress',
                     'processing.started_at': 1,
                     'processing.completed_at': 1,
-                    'processing.error_message': 1,
+                    'processing.error_message': '$processing.error',
                     'processing.retry_count': 1,
                     'processing.job_id': 1,
-                    url: 1,
+                    original: 1,
+                    variants: 1,
                     created_at: 1
                 }
             },
@@ -123,7 +124,9 @@ export const getUploadQueueController = async (
                 error: item.processing?.error_message,
                 retryCount: item.processing?.retry_count || 0,
                 jobId: item.processing?.job_id,
-                thumbnail: item.url,
+                thumbnail: item.variants?.images?.small?.public_id ?
+                    require('@utils/signedUrl').getCachedSignedUrl(item.variants.images.small.public_id) :
+                    (item.original?.public_id ? require('@utils/signedUrl').getCachedSignedUrl(item.original.public_id) : ''),
                 estimatedTime: queuePosition ? queuePosition * 30 : undefined // 30 seconds per job estimate
             };
         }));
@@ -225,9 +228,9 @@ export const retryUploadController = async (
 
         // Reset processing status
         media.processing.status = 'pending';
-        media.processing.current_stage = 'uploading';
-        media.processing.progress_percentage = 0;
-        media.processing.error_message = '';
+        media.processing.stage = 'uploading';
+        media.processing.progress = 0;
+        media.processing.error = '';
         media.processing.retry_count = (media.processing.retry_count || 0) + 1;
         media.processing.started_at = new Date();
 
@@ -240,9 +243,9 @@ export const retryUploadController = async (
                 mediaId: media._id.toString(),
                 eventId,
                 albumId: media.album_id.toString(),
-                originalFilename: media.original_filename,
-                fileSize: media.size_mb * 1024 * 1024, // Convert back to bytes
-                mimeType: `image/${media.format}`,
+                originalFilename: media.original.filename,
+                fileSize: media.original.size_mb * 1024 * 1024, // Convert back to bytes
+                mimeType: `image/${media.original.format}`,
                 isRetry: true,
                 retryCount: media.processing.retry_count
             }, {
@@ -389,7 +392,7 @@ export const cancelUploadController = async (
             message: 'Upload cancelled successfully',
             data: {
                 mediaId,
-                filename: media.original_filename
+                filename: media.original.filename
             }
         });
 
@@ -582,7 +585,7 @@ async function getQueuePosition(jobId: string): Promise<number | undefined> {
         if (!imageQueue) return undefined;
 
         const waiting = await imageQueue.getWaiting();
-        const position = waiting.findIndex(job => job.id === jobId);
+        const position = waiting.findIndex((job: any) => job.id === jobId);
         return position >= 0 ? position + 1 : undefined;
     } catch (error) {
         logger.warn('Failed to get queue position:', error);

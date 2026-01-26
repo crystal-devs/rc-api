@@ -36,6 +36,7 @@ export interface FormattedSubscription {
         maxPhotosPerEvent: number;
         maxStorage: number;
         maxPhotoSize: number; // Size in bytes
+        maxVideoSize: number; // Size in bytes
     };
     currentPeriodStart?: Date;
     currentPeriodEnd?: Date;

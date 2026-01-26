@@ -16,8 +16,8 @@ export class EventResponseService {
             description: event.description || '',
             start_date: event.start_date,
             visibility: event.visibility,
-            cover_image: event.cover_image?.url ? {
-                url: event.cover_image.url
+            cover_image: event.cover_image?.public_id ? {
+                public_id: event.cover_image.public_id
             } : null,
             location: event.location?.name ? {
                 name: event.location.name

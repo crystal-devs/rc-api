@@ -30,7 +30,7 @@ const stylingConfigSchema = new mongoose.Schema({
 
     // Gallery layout and appearance
     gallery: {
-        layout_id: { type: Number, default: 1 }, // 0: grid, 1: masonry, 2: justified, etc.
+        layout_id: { type: Number, default: 1 }, // 1: masonry (default), 2: horizontal/rows (0 is deprecated)
         grid_spacing: { type: Number, default: 0 }, // 0: tight, 1: normal, 2: loose
         thumbnail_size: { type: Number, default: 1 }, // 0: small, 1: medium, 2: large
     },

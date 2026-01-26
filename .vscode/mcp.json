@@ -1,0 +1,23 @@
+{
+	"servers": {
+		"mongodb": {
+			"command": "npx",
+			"args": [
+				"-y",
+				"mongodb-mcp-server",
+				"--readOnly"
+			],
+			"env": {
+				"MDB_MCP_CONNECTION_STRING": "${input:connection_string}"
+			},
+			"type": "stdio"
+		}
+	},
+	"inputs": [
+		{
+			"id": "connection_string",
+			"type": "promptString",
+			"description": "MongoDB connection string"
+		}
+	]
+}

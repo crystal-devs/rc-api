@@ -3,7 +3,9 @@ import { keys } from "@configs/dotenv.config";
 import {
   corsOptions,
   rateLimiter,
-  securityHeaders
+  securityHeaders,
+  botDetectionMiddleware,
+  rateLimitLogger
 } from "@configs/security.config";
 import { gracefulShutdown } from "@configs/shutdown.config";
 import { globalErrorHandler } from "@middlewares/error-handler.middleware";
@@ -14,17 +16,17 @@ import { logger, morganMiddleware } from "@utils/logger";
 import { initializeWebSocketService } from "@services/websocket/websocket.service";
 
 // Route imports
-import authRouter from "@routes/auth-router";
-import systemRouter from "@routes/system.route";
+import authRouter from "@routes/auth.router";
+import systemRouter from "@routes/system.router";
 import eventRouter from "@routes/event.router";
 import mediaRouter from "@routes/media.router";
 import userRouter from "@routes/user.router";
 import albumRouter from "@routes/album.router";
 import shareTokenRouter from "@routes/share-token.router";
 import photoWallRouter from "@routes/photo-wall.router";
-import bulkDownloadRouter from "@routes/bulk-download.routes";
-import uploadQueueRouter from "@routes/upload-queue.routes";
+import uploadQueueRouter from "@routes/upload-queue.router";
 import bulkOperationsRouter from "@routes/bulk-operations.router";
+import bulkDownloadRouter from "@routes/bulk-download.router";
 
 // Packages
 import compression from "compression";
@@ -32,12 +34,11 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
 import http from "http";
-import { HealthService } from "@services/health.service";
-import { InitializationService } from "@services/initialization.service";
-import { CleanupService } from "@services/cleanup.service";
-import { ShutdownService } from "@services/shutdown.service";
-import { ProductionMonitoringService } from "@services/monitoring.service";
-import guestRouter from "@routes/guest-session.routes";
+import { HealthService } from "@services/system";
+import { InitializationService, ProductionMonitoringService } from "@services/system";
+import guestSessionRouter from "@routes/guest-session.router";
+import guestRouter from "@routes/guest.router";
+import { cronService } from "@services/system/cron.service";
 
 const app = express();
 const PORT = keys.port;
@@ -50,8 +51,10 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(securityHeaders);
 
-// Apply general rate limiter globally
-app.use(rateLimiter);
+// Apply security middlewares
+app.use(botDetectionMiddleware); // Bot detection first
+app.use(rateLimiter); // Global rate limiting
+app.use(rateLimitLogger); // Rate limit monitoring
 
 app.use(cors(corsOptions));
 app.use(morganMiddleware);
@@ -96,14 +99,18 @@ app.use(`/api/${VERSION}/event`, eventRouter);
 app.use(`/api/${VERSION}/album`, albumRouter);
 app.use(`/api/${VERSION}/media`, mediaRouter);
 app.use(`/api/${VERSION}/user`, userRouter);
-app.use(`/api/${VERSION}/token`, shareTokenRouter);
+app.use(`/api/${VERSION}/share`, shareTokenRouter);  // Primary semantic route
+app.use(`/api/${VERSION}/token`, shareTokenRouter);  // Legacy support
 app.use(`/api/${VERSION}/photo-wall`, photoWallRouter);
-app.use(`/api/${VERSION}/download`, bulkDownloadRouter);
 app.use(`/api/${VERSION}/upload-queue`, uploadQueueRouter);
-app.use(`/api/${VERSION}/guest-sessions`, guestRouter);
+app.use(`/api/${VERSION}/guest-sessions`, guestSessionRouter);
+app.use(`/api/${VERSION}/guest`, guestRouter);
 
 // NEW: Dedicated bulk operations router with its own rate limiting
 app.use(`/api/${VERSION}/bulk`, bulkOperationsRouter);
+
+// Bulk download router
+app.use(`/api/${VERSION}/download`, bulkDownloadRouter);
 
 // Enhanced Application Initialization
 async function initializeApplication() {
@@ -115,14 +122,16 @@ async function initializeApplication() {
     const redisConnected = await InitializationService.initializeRedis();
 
     // Initialize image processing (requires Redis)
+    // Initialize image processing (requires Redis)
     if (redisConnected) {
-      await InitializationService.initializeImageProcessing();
       await InitializationService.initializeBulkDownload();
-      await InitializationService.initializeImageStorageCleaup();
-
-      // Initialize cleanup jobs
-      CleanupService.initializeBulkDownloadCleanupJobs();
     }
+
+    // Initialize Cron Service (Scheduled Tasks)
+    cronService.initialize();
+
+    // Initialize S3 connection
+    const s3Connected = await InitializationService.initializeS3();
 
     // WebSocket status logging
     if (webSocketService) {
@@ -171,14 +180,6 @@ function startServer() {
 
 // Error handling middleware
 app.use(globalErrorHandler);
-
-// Signal handlers for graceful shutdown
-const handleShutdown = () => ShutdownService.handleGracefulShutdown(server, webSocketService);
-
-// Enhanced graceful shutdown
-gracefulShutdown(server);
-process.on('SIGTERM', handleShutdown);
-process.on('SIGINT', handleShutdown);
 
 // Process error handling
 process.on("uncaughtException", (err) => {

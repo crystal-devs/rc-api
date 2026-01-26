@@ -1,7 +1,20 @@
-// utils/file.util.ts - Consolidated file and media utilities
+// utils/file.util.ts - Updated with Redis-backed signed URL cache and batch operations
 
-import fs from 'fs/promises';
 import { logger } from './logger';
+import { getCachedSignedUrl, getCachedSignedUrlsBatch } from './cloudfront-url.util';
+import fs from 'fs';
+import { promisify } from 'util';
+
+const unlinkAsync = promisify(fs.unlink);
+
+export const cleanupFile = async (file: Express.Multer.File | { path: string }) => {
+    if (!file || !file.path) return;
+    try {
+        await unlinkAsync(file.path);
+    } catch (error) {
+        logger.warn(`Failed to delete temporary file: ${file.path}`, error);
+    }
+};
 
 /**
  * Determine file type based on MIME type
@@ -37,69 +50,11 @@ export function isValidVideoFormat(file: Express.Multer.File): boolean {
         'video/mp4',
         'video/mpeg',
         'video/quicktime',
-        'video/x-msvideo', // .avi
+        'video/x-msvideo',
         'video/webm',
         'video/x-ms-wmv'
     ];
     return validVideoTypes.includes(file.mimetype.toLowerCase());
-}
-
-/**
- * Clean up temporary file with error handling
- */
-export async function cleanupFile(file: Express.Multer.File): Promise<void> {
-    try {
-        if (file?.path) {
-            await fs.unlink(file.path);
-            logger.debug(`🗑️ Cleaned up temp file: ${file.path}`);
-        }
-    } catch (error) {
-        logger.warn(`Failed to cleanup file ${file.path}:`, error);
-    }
-}
-
-/**
- * Calculate total size of variants in MB
- */
-export function calculateTotalVariantsSize(variants: any): number {
-    if (!variants) return 0;
-
-    let total = 0;
-    try {
-        Object.values(variants).forEach((sizeVariants: any) => {
-            if (sizeVariants && typeof sizeVariants === 'object') {
-                Object.values(sizeVariants).forEach((formatVariant: any) => {
-                    if (formatVariant && formatVariant.size_mb) {
-                        total += formatVariant.size_mb;
-                    }
-                });
-            }
-        });
-    } catch (error) {
-        logger.warn('Error calculating variants size:', error);
-    }
-    return Math.round(total * 100) / 100;
-}
-
-/**
- * Calculate number of variants
- */
-export function calculateVariantsCount(variants: any): number {
-    if (!variants) return 0;
-
-    let count = 0;
-    try {
-        Object.values(variants).forEach((sizeVariants: any) => {
-            if (sizeVariants && typeof sizeVariants === 'object') {
-                Object.keys(sizeVariants).forEach(() => {
-                    count++;
-                });
-            }
-        });
-    } catch (error) {
-        logger.warn('Error calculating variants count:', error);
-    }
-    return count;
 }
 
 /**
@@ -117,97 +72,7 @@ export function mbToBytes(mb: number): number {
 }
 
 /**
- * Detect user context from User-Agent
- */
-export function detectContextFromUserAgent(userAgent?: string): 'mobile' | 'desktop' | 'lightbox' {
-    if (!userAgent) return 'desktop';
-
-    const mobileRegex = /Mobile|Android|iPhone|iPad|iPod|BlackBerry|Windows Phone/i;
-    return mobileRegex.test(userAgent) ? 'mobile' : 'desktop';
-}
-
-/**
- * Detect WebP support from User-Agent
- */
-export function supportsWebP(userAgent?: string): boolean {
-    if (!userAgent) return true; // Default to true for modern browsers
-
-    // WebP is supported by Chrome, Firefox, Edge, Opera, and Android browsers
-    // But not by Safari on iOS/macOS (yet)
-    return /Chrome|Firefox|Edge|Opera|Android/.test(userAgent) && !/Safari|iPhone|iPad/.test(userAgent);
-}
-
-/**
- * Get optimized image URL for a single media item (updated for your model structure)
- */
-export function getOptimizedImageUrlForItem(
-    mediaItem: any,
-    quality: string = 'medium',
-    format: string = 'auto',
-    context: string = 'desktop',
-    userAgent?: string
-): string {
-    // Fallback to original URL if no variants or not an image
-    if (!mediaItem.image_variants || mediaItem.type !== 'image') {
-        return mediaItem.url;
-    }
-
-    const variants = mediaItem.image_variants;
-
-    // Map quality options for backward compatibility
-    let targetVariant;
-    switch (quality) {
-        case 'thumbnail':
-        case 'small':
-            targetVariant = variants.small;
-            break;
-        case 'display':
-        case 'medium':
-            targetVariant = variants.medium;
-            break;
-        case 'full':
-        case 'large':
-            targetVariant = variants.large;
-            break;
-        case 'original':
-            return variants.original?.url || mediaItem.url;
-        default:
-            // Smart selection based on context
-            if (context === 'mobile') {
-                targetVariant = variants.small;
-            } else if (context === 'lightbox') {
-                targetVariant = variants.large;
-            } else {
-                targetVariant = variants.medium;
-            }
-    }
-
-    if (!targetVariant) {
-        return mediaItem.url; // Fallback to original
-    }
-
-    // Format selection logic
-    if (format === 'webp' && targetVariant.webp?.url) {
-        return targetVariant.webp.url;
-    } else if (format === 'jpeg' && targetVariant.jpeg?.url) {
-        return targetVariant.jpeg.url;
-    } else if (format === 'auto') {
-        // Auto-detect WebP support from User-Agent
-        const webpSupported = supportsWebP(userAgent);
-
-        if (webpSupported && targetVariant.webp?.url) {
-            return targetVariant.webp.url;
-        } else if (targetVariant.jpeg?.url) {
-            return targetVariant.jpeg.url;
-        }
-    }
-
-    // Final fallback
-    return targetVariant.jpeg?.url || targetVariant.webp?.url || mediaItem.url;
-}
-
-/**
- * Check if media item has variants available (updated for your model)
+ * Check if media item has completed variants
  */
 export function hasImageVariants(mediaItem: any): boolean {
     return !!(
@@ -219,90 +84,28 @@ export function hasImageVariants(mediaItem: any): boolean {
 }
 
 /**
- * Media metadata interface for better type safety
+ * Get uploader display name
  */
-interface MediaMetadata {
-    _id: any;
-    type: any;
-    url: any;
-    optimized_url: any;
-    has_variants: boolean;
-    processing_status: any;
-    approval_status: any;
-    size_mb: any;
-    original_filename: any;
-    format: any;
-    uploader_type: any;
-    uploader_display_name: string;
-    dimensions: {
-        width: number;
-        height: number;
-        aspect_ratio: number;
-    } | null;
-    stats: any;
-    created_at: any;
-    updated_at: any;
-    // Optional properties that might be added
-    responsive_urls?: {
-        thumbnail: string;
-        medium: string;
-        large: string;
-        original: string;
-        preferred: string;
-    };
-    available_variants?: {
-        small: {
-            webp: boolean;
-            jpeg: boolean;
-        };
-        medium: {
-            webp: boolean;
-            jpeg: boolean;
-        };
-        large: {
-            webp: boolean;
-            jpeg: boolean;
-        };
-    };
-    requested_optimized_url?: string;
-}
-
-/**
- * Get media metadata for response (updated for your model structure)
- */
-export function getMediaMetadata(mediaItem: any, userAgent?: string): MediaMetadata {
-    const hasVariants = hasImageVariants(mediaItem);
-
-    return {
-        _id: mediaItem._id,
-        type: mediaItem.type,
-        url: mediaItem.url, // Original URL
-        optimized_url: hasVariants ?
-            getOptimizedImageUrlForItem(mediaItem, 'medium', 'auto', 'desktop', userAgent) :
-            mediaItem.url,
-        has_variants: hasVariants,
-        processing_status: mediaItem.processing?.status || 'unknown',
-        approval_status: mediaItem.approval?.status || 'pending',
-        size_mb: mediaItem.size_mb || 0,
-        original_filename: mediaItem.original_filename || '',
-        format: mediaItem.format || '',
-        uploader_type: mediaItem.uploader_type || 'guest',
-        uploader_display_name: getUploaderDisplayName(mediaItem),
-        dimensions: mediaItem.metadata ? {
-            width: mediaItem.metadata.width || 0,
-            height: mediaItem.metadata.height || 0,
-            aspect_ratio: mediaItem.metadata.aspect_ratio || 1
-        } : null,
-        stats: mediaItem.stats || { views: 0, downloads: 0, shares: 0, likes: 0 },
-        created_at: mediaItem.created_at,
-        updated_at: mediaItem.updated_at
-    };
-}
-
 /**
  * Get uploader display name
  */
 function getUploaderDisplayName(mediaItem: any): string {
+    // Check for owner field (Schema compliant)
+    if (mediaItem.owner) {
+        if (mediaItem.owner.type === 'registered_user') {
+            // Note: Since we are using lean(), populated user data might not be here.
+            // If user_id is populated as an object with name:
+            if (mediaItem.owner.user_id && typeof mediaItem.owner.user_id === 'object' && mediaItem.owner.user_id.name) {
+                return mediaItem.owner.user_id.name;
+            }
+            return 'User';
+        } else if (mediaItem.owner.type === 'guest') {
+            // Priority: Snapshot display_name (new) > guest_id (fallback)
+            return mediaItem.owner.display_name || 'Anonymous Guest';
+        }
+    }
+
+    // Fallback for legacy or loose objects
     if (mediaItem.uploader_type === 'registered_user' && mediaItem.uploaded_by) {
         if (typeof mediaItem.uploaded_by === 'object' && mediaItem.uploaded_by.name) {
             return mediaItem.uploaded_by.name;
@@ -315,229 +118,311 @@ function getUploaderDisplayName(mediaItem: any): string {
 }
 
 /**
- * Get multiple optimized URLs for responsive images (updated for your model)
+ * Media metadata interface for API response
  */
-export function getResponsiveImageUrls(
+export interface MediaMetadata {
+    _id: string;
+    type: string;
+    url: string;
+    processing_status: string;
+    processing?: {
+        status: string;
+        stage?: string;
+        progress?: number;
+        error?: string;
+    };
+    approval_status: string;
+    size_mb: number;
+    format: string;
+    uploaded_by?: string;
+    uploader_type?: string;
+    guest_uploader?: any;
+    uploader_display_name: string;
+    dimensions: {
+        width: number;
+        height: number;
+    } | null;
+    stats: any;
+    created_at: string;
+    responsive_urls: {
+        thumbnail: string | null;
+        display: string | null;
+        full: string | null;
+        original: string | null;
+    };
+    // image_variants removed for optimization
+}
+
+/**
+ * Get responsive image URLs using pre-generated cache
+ */
+async function getResponsiveImageUrlsWithCache(
     mediaItem: any,
-    userAgent?: string
-): {
-    thumbnail: string;
-    medium: string;
-    large: string;
-    original: string;
-    preferred: string;
-} {
-    const context = detectContextFromUserAgent(userAgent);
+    urlCache: Map<string, string>
+): Promise<{
+    thumbnail: string | null;
+    display: string | null;
+    full: string | null;
+    original: string | null;
+}> {
+    const publicId = mediaItem.public_id || mediaItem.original?.public_id;
+    const isExternal = publicId && (publicId.startsWith('http://') || publicId.startsWith('https://'));
+
+    const originalUrl = publicId
+        ? (isExternal ? publicId : (urlCache.get(publicId) || await getCachedSignedUrl(publicId)))
+        : null;
+
+    // Unified Schema Support (variants.images OR variants.thumbnails for videos)
+    if (mediaItem.variants) {
+        // VIDEO HANDLING
+        if (mediaItem.type === 'video' && mediaItem.variants.thumbnails) {
+            const thumbs = mediaItem.variants.thumbnails;
+
+            // Prefer poster for static grid, preview for hover
+            const posterUrl = thumbs.poster?.public_id ? (urlCache.get(thumbs.poster.public_id) || await getCachedSignedUrl(thumbs.poster.public_id)) : null;
+            const previewUrl = thumbs.preview?.public_id ? (urlCache.get(thumbs.preview.public_id) || await getCachedSignedUrl(thumbs.preview.public_id)) : null;
+
+            return {
+                thumbnail: posterUrl || previewUrl || originalUrl, // Lightweight preview
+                display: posterUrl || previewUrl || originalUrl,   // Lightweight preview
+                full: originalUrl, // Click to play full video
+                original: originalUrl,
+            };
+        }
+
+        // IMAGE HANDLING
+        if (mediaItem.variants.images) {
+            const images = mediaItem.variants.images;
+            const getUrl = async (variant: any) => {
+                if (!variant?.public_id) return null;
+                return urlCache.get(variant.public_id) || await getCachedSignedUrl(variant.public_id);
+            };
+
+            return {
+                thumbnail: await getUrl(images.small) || originalUrl,
+                display: await getUrl(images.medium) || originalUrl,
+                full: await getUrl(images.large) || originalUrl,
+                original: originalUrl,
+            };
+        }
+    }
+
+    // Legacy Schema Support (image_variants)
+    if (!mediaItem?.image_variants || mediaItem.type !== 'image') {
+        return {
+            thumbnail: originalUrl,
+            display: originalUrl,
+            full: originalUrl,
+            original: originalUrl,
+        };
+    }
+
+    const variants = mediaItem.image_variants;
+
+    const getVariantUrl = async (variant: any): Promise<string | null> => {
+        if (variant?.webp?.public_id) {
+            return urlCache.get(variant.webp.public_id) || await getCachedSignedUrl(variant.webp.public_id);
+        }
+        if (variant?.jpeg?.public_id) {
+            return urlCache.get(variant.jpeg.public_id) || await getCachedSignedUrl(variant.jpeg.public_id);
+        }
+        return null;
+    };
 
     return {
-        thumbnail: getOptimizedImageUrlForItem(mediaItem, 'small', 'auto', 'mobile', userAgent),
-        medium: getOptimizedImageUrlForItem(mediaItem, 'medium', 'auto', 'desktop', userAgent),
-        large: getOptimizedImageUrlForItem(mediaItem, 'large', 'auto', 'lightbox', userAgent),
-        original: mediaItem.url,
-        preferred: getOptimizedImageUrlForItem(mediaItem, 'medium', 'auto', context, userAgent)
+        thumbnail: await getVariantUrl(variants.small) || originalUrl,
+        display: await getVariantUrl(variants.medium) || originalUrl,
+        full: await getVariantUrl(variants.large) || originalUrl,
+        original: originalUrl,
     };
 }
 
 /**
- * Transform media array for API response (updated for your model)
+ * Get media metadata using pre-generated URL cache
  */
-export function transformMediaForResponse(
-    mediaItems: any[],
-    options: {
-        quality?: string;
-        format?: string;
-        context?: string;
-        includeVariants?: boolean;
-    } = {},
-    userAgent?: string
-): any[] {
-    return mediaItems.map(item => {
-        const transformed: MediaMetadata = getMediaMetadata(item, userAgent);
+async function getMediaMetadataWithCache(mediaItem: any, urlCache: Map<string, string>): Promise<MediaMetadata> {
+    // Get main URL from cache or generate
+    // Get main URL from cache or generate
+    let mainUrl = mediaItem.url;
+    const publicId = mediaItem.public_id || mediaItem.original?.public_id;
 
-        // Add variant information if requested
-        if (options.includeVariants && hasImageVariants(item)) {
-            transformed.responsive_urls = getResponsiveImageUrls(item, userAgent);
-            transformed.available_variants = {
-                small: {
-                    webp: !!item.image_variants?.small?.webp?.url,
-                    jpeg: !!item.image_variants?.small?.jpeg?.url
-                },
-                medium: {
-                    webp: !!item.image_variants?.medium?.webp?.url,
-                    jpeg: !!item.image_variants?.medium?.jpeg?.url
-                },
-                large: {
-                    webp: !!item.image_variants?.large?.webp?.url,
-                    jpeg: !!item.image_variants?.large?.jpeg?.url
-                }
-            };
+    if (publicId) {
+        if (publicId.startsWith('http://') || publicId.startsWith('https://')) {
+            mainUrl = publicId;
+        } else {
+            mainUrl = urlCache.get(publicId) || await getCachedSignedUrl(publicId);
         }
+    }
 
-        // Add specific optimized URL if quality/format/context specified
-        if (options.quality || options.format || options.context) {
-            transformed.requested_optimized_url = getOptimizedImageUrlForItem(
-                item,
-                options.quality || 'medium',
-                options.format || 'auto',
-                options.context || 'desktop',
-                userAgent
-            );
+    // Get responsive URLs using cache
+    const responsiveUrls = await getResponsiveImageUrlsWithCache(mediaItem, urlCache);
+
+    // Construct authorized image_variants with signed URLs
+    // REMOVED to save bandwidth as per optimization request. 
+    // responsive_urls provides sufficient data for frontend display.
+    /* 
+    let authorizedVariants = null;
+    if (mediaItem.image_variants) {
+        authorizedVariants = JSON.parse(JSON.stringify(mediaItem.image_variants)); // Deep copy
+
+        // Helper to update variant URL
+        const updateVariantUrl = async (variant: any) => {
+            if (variant?.webp?.public_id) {
+                variant.webp.url = urlCache.get(variant.webp.public_id) || await getCachedSignedUrl(variant.webp.public_id);
+            }
+            if (variant?.jpeg?.public_id) {
+                variant.jpeg.url = urlCache.get(variant.jpeg.public_id) || await getCachedSignedUrl(variant.jpeg.public_id);
+            }
+        };
+
+        if (authorizedVariants.small) await updateVariantUrl(authorizedVariants.small);
+        if (authorizedVariants.medium) await updateVariantUrl(authorizedVariants.medium);
+        if (authorizedVariants.large) await updateVariantUrl(authorizedVariants.large);
+
+        // Also update original
+        if (authorizedVariants.original && mediaItem.public_id) {
+            authorizedVariants.original.url = mainUrl;
         }
+    }
+    */
 
-        return transformed;
-    });
+    return {
+        _id: mediaItem._id?.toString() || mediaItem._id,
+        type: mediaItem.type,
+        url: mainUrl,
+        processing_status: mediaItem.processing?.status || 'unknown',
+        processing: {
+            status: mediaItem.processing?.status || 'unknown',
+            stage: mediaItem.processing?.stage,
+            progress: mediaItem.processing?.progress,
+            error: mediaItem.processing?.error
+        },
+        approval_status: mediaItem.approval?.status || 'pending',
+        size_mb: mediaItem.original?.size_mb || mediaItem.size_mb || 0,
+        format: mediaItem.original?.format || mediaItem.format || '',
+
+        // Owner / Uploader mapping
+        uploaded_by: mediaItem.owner?.user_id?.toString() || mediaItem.uploaded_by,
+        uploader_type: mediaItem.owner?.type || mediaItem.uploader_type,
+        guest_uploader: mediaItem.owner?.type === 'guest' ? { guest_id: mediaItem.owner.guest_id } : mediaItem.guest_uploader,
+        uploader_display_name: getUploaderDisplayName(mediaItem),
+
+        dimensions: {
+            // Priority: original schema > metadata logic > default
+            width: mediaItem.original?.width || mediaItem.metadata?.width || 0,
+            height: mediaItem.original?.height || mediaItem.metadata?.height || 0
+        },
+        stats: mediaItem.stats || {
+            views: 0,
+            downloads: 0,
+            shares: 0,
+            likes: 0,
+            comments_count: 0
+        },
+        created_at: mediaItem.created_at,
+        responsive_urls: responsiveUrls,
+        // image_variants: authorizedVariants // Removed for bandwidth optimization
+    };
 }
 
-export const extractImageKitFileId = (url: string): string | null => {
-    try {
-        if (!url || !url.includes('imagekit.io')) {
-            return null;
+/**
+ * Transform media array for API response with batch URL generation
+ * Optimized to generate all URLs in a single batch operation
+ */
+export async function transformMediaForResponse(
+    mediaItems: any[]
+): Promise<MediaMetadata[]> {
+    if (mediaItems.length === 0) return [];
+
+    // Collect all unique public_ids for batch URL generation
+    const urlsToGenerate: Array<{ s3Key: string; expiresIn: number }> = [];
+    const seenKeys = new Set<string>();
+
+    mediaItems.forEach(item => {
+        const publicId = item.public_id || item.original?.public_id;
+
+        // Skip signing if already a full URL (e.g. Unsplash, External)
+        if (publicId && (publicId.startsWith('http://') || publicId.startsWith('https://'))) {
+            // No action needed, will be used as-is
+        } else if (publicId && !seenKeys.has(publicId)) {
+            urlsToGenerate.push({ s3Key: publicId, expiresIn: 3600 });
+            seenKeys.add(publicId);
         }
 
-        // Your ImageKit URL format: 
-        // https://ik.imagekit.io/roseclick/events/{eventId}/originals/original_{mediaId}.jpg
-        // We need everything after 'roseclick': events/{eventId}/originals/original_{mediaId}.jpg
-
-        const urlObj = new URL(url);
-        const pathParts = urlObj.pathname.split('/').filter(part => part !== '');
-
-        // pathParts = ['roseclick', 'events', '68d2ac7c...', 'originals', 'original_68d2aca...jpg']
-        // Remove 'roseclick' (your ImageKit ID) and join the rest
-        if (pathParts.length > 1 && pathParts[0] === 'roseclick') {
-            pathParts.shift(); // Remove 'roseclick'
-            const filePath = pathParts.join('/');
-
-            logger.debug('Extracted ImageKit file path:', {
-                originalUrl: url,
-                extractedPath: filePath
-            });
-
-            return filePath;
-        }
-
-        // Fallback: try regex approach
-        const match = url.match(/imagekit\.io\/[^\/]+\/(.+)$/);
-        if (match && match[1]) {
-            logger.debug('Extracted ImageKit file path (regex):', {
-                originalUrl: url,
-                extractedPath: match[1]
-            });
-            return match[1];
-        }
-
-        logger.warn('Could not extract file path from URL:', url);
-        return null;
-    } catch (error) {
-        logger.error('Failed to extract ImageKit file path:', error);
-        return null;
-    }
-};
-
-/**
- * NEW: Extract file directory from ImageKit URL
- * Useful for batch operations
- */
-export const extractImageKitDirectory = (url: string): string | null => {
-    const filePath = extractImageKitFileId(url);
-    if (!filePath) return null;
-    
-    const parts = filePath.split('/');
-    parts.pop(); // Remove filename
-    return parts.join('/');
-};
-
-/**
- * NEW: Extract event ID from ImageKit URL
- */
-export const extractEventIdFromImageKitUrl = (url: string): string | null => {
-    const filePath = extractImageKitFileId(url);
-    if (!filePath) return null;
-    
-    // Path format: events/{eventId}/originals/file.jpg
-    const parts = filePath.split('/');
-    if (parts.length >= 2 && parts[0] === 'events') {
-        return parts[1];
-    }
-    
-    return null;
-};
-
-/**
- * NEW: Validate ImageKit URL format
- */
-export const isValidImageKitUrl = (url: string): boolean => {
-    if (!url || typeof url !== 'string') return false;
-    
-    try {
-        const urlObj = new URL(url);
-        return urlObj.hostname.includes('imagekit.io');
-    } catch {
-        return false;
-    }
-};
-
-/**
- * NEW: Get file type from ImageKit URL
- */
-export const getFileTypeFromImageKitUrl = (url: string): 'original' | 'variant' | 'unknown' => {
-    const filePath = extractImageKitFileId(url);
-    if (!filePath) return 'unknown';
-    
-    if (filePath.includes('/originals/')) return 'original';
-    if (filePath.includes('/variants/')) return 'variant';
-    
-    return 'unknown';
-};
-
-/**
- * NEW: Group URLs by event ID for batch processing
- */
-export const groupUrlsByEvent = (urls: string[]): Map<string, string[]> => {
-    const grouped = new Map<string, string[]>();
-    
-    urls.forEach(url => {
-        const eventId = extractEventIdFromImageKitUrl(url);
-        if (eventId) {
-            if (!grouped.has(eventId)) {
-                grouped.set(eventId, []);
+        // Collect unified variants (variants.images AND variants.thumbnails)
+        if (item.variants) {
+            // Images
+            if (item.variants.images) {
+                ['small', 'medium', 'large'].forEach(size => {
+                    const variant = item.variants.images[size];
+                    if (variant?.public_id && !seenKeys.has(variant.public_id)) {
+                        urlsToGenerate.push({ s3Key: variant.public_id, expiresIn: 3600 });
+                        seenKeys.add(variant.public_id);
+                    }
+                });
             }
-            grouped.get(eventId)!.push(url);
-        } else {
-            logger.warn('Could not extract event ID from URL:', url);
+            // Video Thumbnails
+            if (item.variants.thumbnails) {
+                ['poster', 'preview'].forEach(type => {
+                    const variant = item.variants.thumbnails[type];
+                    if (variant?.public_id && !seenKeys.has(variant.public_id)) {
+                        urlsToGenerate.push({ s3Key: variant.public_id, expiresIn: 3600 });
+                        seenKeys.add(variant.public_id);
+                    }
+                });
+            }
+        }
+
+        // Collect legacy variants (image_variants)
+        if (item.image_variants) {
+            ['small', 'medium', 'large'].forEach(size => {
+                const variant = item.image_variants[size];
+                if (variant?.webp?.public_id && !seenKeys.has(variant.webp.public_id)) {
+                    urlsToGenerate.push({ s3Key: variant.webp.public_id, expiresIn: 3600 });
+                    seenKeys.add(variant.webp.public_id);
+                }
+                if (variant?.jpeg?.public_id && !seenKeys.has(variant.jpeg.public_id)) {
+                    urlsToGenerate.push({ s3Key: variant.jpeg.public_id, expiresIn: 3600 });
+                    seenKeys.add(variant.jpeg.public_id);
+                }
+            });
         }
     });
-    
-    return grouped;
-};
+
+    // Batch generate all URLs at once
+    let urlCache = new Map<string, string>();
+    if (urlsToGenerate.length > 0) {
+        try {
+            urlCache = await getCachedSignedUrlsBatch(urlsToGenerate);
+            logger.debug(`Batch generated ${urlCache.size} signed URLs for ${mediaItems.length} media items`);
+        } catch (error) {
+            logger.error('Error in batch URL generation, falling back to individual generation:', error);
+        }
+    }
+
+    // Transform each item using the cached URLs
+    return Promise.all(mediaItems.map((item) => getMediaMetadataWithCache(item, urlCache)));
+}
 
 /**
- * NEW: Validate and clean URLs before deletion
+ * Get media metadata for API response (single item)
+ * For backward compatibility
  */
-export const validateAndCleanUrls = (urls: string[]): {
-    validUrls: string[];
-    invalidUrls: string[];
-} => {
-    const validUrls: string[] = [];
-    const invalidUrls: string[] = [];
-    
-    urls.forEach(url => {
-        if (isValidImageKitUrl(url)) {
-            validUrls.push(url);
-        } else {
-            invalidUrls.push(url);
-        }
-    });
-    
-    if (invalidUrls.length > 0) {
-        logger.warn(`Found ${invalidUrls.length} invalid ImageKit URLs`, {
-            sample: invalidUrls.slice(0, 3)
-        });
-    }
-    
-    return { validUrls, invalidUrls };
-};
+export async function getMediaMetadata(mediaItem: any): Promise<MediaMetadata> {
+    return getMediaMetadataWithCache(mediaItem, new Map());
+}
+
 /**
- * Legacy function name - keeping for backward compatibility
- * @deprecated Use extractImageKitFileId instead
+ * Get responsive image URLs for a media item (single item)
+ * For backward compatibility
  */
-export const getImageKitFileId = extractImageKitFileId;
+export async function getResponsiveImageUrls(
+    mediaItem: any
+): Promise<{
+    thumbnail: string | null;
+    display: string | null;
+    full: string | null;
+    original: string | null;
+}> {
+    return getResponsiveImageUrlsWithCache(mediaItem, new Map());
+}

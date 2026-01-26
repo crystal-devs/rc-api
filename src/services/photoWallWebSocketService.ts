@@ -7,17 +7,18 @@ import { Event } from '@models/event.model'; // 🚀 Use Event instead of PhotoW
 // Helper function to get optimized image URL
 function getOptimizedImageUrlForItem(imageVariants: any, quality: string = 'large'): string {
   if (!imageVariants) return '';
-  
+  const { getCachedSignedUrl } = require('../utils/signedUrl');
+
   const variant = imageVariants[quality] || imageVariants.large || imageVariants.medium;
-  
+
   // Prefer WebP for better compression
-  if (variant?.webp?.url) {
-    return variant.webp.url;
-  } else if (variant?.jpeg?.url) {
-    return variant.jpeg.url;
+  if (variant?.webp?.public_id) {
+    return getCachedSignedUrl(variant.webp.public_id);
+  } else if (variant?.jpeg?.public_id) {
+    return getCachedSignedUrl(variant.jpeg.public_id);
   }
 
-  return imageVariants.original?.url || '';
+  return imageVariants.original?.public_id ? getCachedSignedUrl(imageVariants.original.public_id) : '';
 }
 
 // Helper function to get uploader name

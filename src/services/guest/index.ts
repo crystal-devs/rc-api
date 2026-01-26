@@ -21,7 +21,7 @@ export { getGuestUploadStats } from './guest-stats.service';
 //     getFileExtension,
 //     getEstimatedProcessingTime
 // } from '../upload/image-processing.service';
-export { queueImageProcessing } from '../upload/shared/queue-processing.service';
+// export { queueImageProcessing } from '../upload/shared/queue-processing.service';
 
 // Export types
 export type {

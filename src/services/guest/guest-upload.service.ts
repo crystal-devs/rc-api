@@ -5,15 +5,14 @@ import mongoose from 'mongoose';
 import { logger } from '@utils/logger';
 import { Media, createGuestUploaderInfo } from '@models/media.model';
 import { determineApprovalStatus } from '@utils/user.utils';
-import { bytesToMB, cleanupFile } from '@utils/file.util';
+import { bytesToMB } from '@utils/file.util';
 
 // Import shared services
-import { createInstantPreview, getBasicImageMetadata, getFileExtension } from '@services/upload/shared/image-processing.service';
 import { queueImageProcessing } from '../upload/shared/queue-processing.service';
 import { validateGuestFile, validateShareToken } from './guest-validation.service';
+import { GuestSessionService } from './guest-session.service';
 
 import type { GuestUploadResult, GuestUploadInfo } from './guest.types';
-import { getEstimatedProcessingTime } from '@services/upload/shared/image-processing.service';
 import { getOrCreateDefaultAlbum } from '@services/album';
 import { EventParticipant } from '@models/event-participants.model';
 
@@ -38,7 +37,29 @@ export const uploadGuestMedia = async (
         // 1. Validate share token and permissions
         const event = await validateShareToken(shareToken);
 
-        // 2. Validate file
+        // 2. Check upload rate limits for guest sessions
+        if (guestInfo.sessionId && !authenticatedUserId) {
+            const fileSizeMB = bytesToMB(file.size);
+            const rateLimitCheck = await GuestSessionService.checkUploadRateLimit(
+                guestInfo.sessionId,
+                fileSizeMB
+            );
+
+            if (!rateLimitCheck.allowed) {
+                logger.warn('Guest upload rate limit exceeded', {
+                    sessionId: guestInfo.sessionId.substring(0, 8) + '...',
+                    reason: rateLimitCheck.reason,
+                    currentStats: rateLimitCheck.currentStats
+                });
+
+                return {
+                    success: false,
+                    error: rateLimitCheck.reason || 'Upload limit exceeded'
+                };
+            }
+        }
+
+        // 3. Validate file
         const fileValidation = await validateGuestFile(file);
         if (!fileValidation.valid) {
             return {
@@ -54,7 +75,6 @@ export const uploadGuestMedia = async (
         );
 
         if (!defaultAlbumResponse.status) {
-            await cleanupFile(file);
             return {
                 success: false,
                 error: 'Failed to get or create album for upload'
@@ -98,7 +118,6 @@ export const uploadGuestMedia = async (
             fileName: file.originalname
         });
 
-        await cleanupFile(file);
         return {
             success: false,
             error: 'Upload failed due to server error'
@@ -124,34 +143,45 @@ const processGuestImageUpload = async (
         const userObjectId = authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : null;
 
         // Create preview image immediately
-        const previewUrl = await createInstantPreview(file, mediaId.toString(), eventId);
+        // const previewUrl = await createInstantPreview(file, mediaId.toString(), eventId);
 
         // Get basic metadata
-        const metadata = await getBasicImageMetadata(file.path);
+        // const metadata = await getBasicImageMetadata(file.path);
 
         // Create database record
+        // Create database record
+        const uploadId = mediaId.toString(); // Use _id as upload_id
         const media = new Media({
             _id: mediaId,
-            url: previewUrl,
+            upload_id: uploadId,
             type: 'image',
             album_id: albumObjectId,
             event_id: eventObjectId,
-            uploaded_by: userObjectId,
-            guest_uploader: !authenticatedUserId ? guestUploaderInfo : null,
-            uploader_type: authenticatedUserId ? 'registered_user' : 'guest',
-            original_filename: file.originalname,
-            size_mb: fileSizeMB,
-            format: getFileExtension(file),
-            metadata: {
-                width: metadata.width,
-                height: metadata.height,
-                aspect_ratio: metadata.aspect_ratio
+
+            owner: {
+                type: authenticatedUserId ? 'registered_user' : 'guest',
+                user_id: userObjectId || undefined,
+                guest_id: !authenticatedUserId ? guestUploaderInfo.session_id : undefined,
+                display_name: !authenticatedUserId ? (guestUploaderInfo.name || 'Anonymous Guest') : undefined
             },
+
+            original: {
+                public_id: `guest_upload_${uploadId}`, // Placeholder until processed
+                filename: file.originalname,
+                format: file.mimetype.split('/')[1] || '',
+                size_mb: fileSizeMB,
+                width: 0,
+                height: 0
+            },
+
             processing: {
                 status: 'processing',
+                stage: 'uploading',
+                progress: 0,
                 started_at: new Date(),
                 variants_generated: false,
             },
+
             approval: {
                 status: approvalConfig.status,
                 auto_approval_reason: approvalConfig.autoApprovalReason,
@@ -159,14 +189,8 @@ const processGuestImageUpload = async (
                 approved_by: approvalConfig.approvedBy,
                 rejection_reason: ''
             },
-            upload_context: {
-                method: 'guest_upload',
-                ip_address: guestUploaderInfo.session_id?.split('_')[0] || '',
-                user_agent: guestUploaderInfo.device_fingerprint || '',
-                upload_session_id: guestUploaderInfo.session_id || '',
-                referrer_url: guestUploaderInfo.platform_info?.referrer || '',
-                platform: 'web'
-            }
+
+            deleteGroup: `guest-upload-${guestUploaderInfo.session_id || 'anon'}`
         });
 
         await media.save();
@@ -176,14 +200,14 @@ const processGuestImageUpload = async (
         if (authenticatedUserId) {
             try {
                 await EventParticipant.updateOne(
-                    { 
+                    {
                         user_id: new mongoose.Types.ObjectId(authenticatedUserId),
                         event_id: new mongoose.Types.ObjectId(eventId)
                     },
-                    { 
-                        $inc: { 
+                    {
+                        $inc: {
                             'stats.uploads_count': 1,
-                            'stats.total_file_size_mb': fileSizeMB 
+                            'stats.total_file_size_mb': fileSizeMB
                         },
                         $set: {
                             'stats.last_upload_at': new Date(),
@@ -218,16 +242,14 @@ const processGuestImageUpload = async (
         return {
             success: true,
             media_id: mediaId.toString(),
-            url: previewUrl,
+            url: 'previewUrl',
             approval_status: media.approval.status,
             processing_status: jobId ? 'processing' : 'pending',
-            estimated_processing_time: getEstimatedProcessingTime(file.size),
             message: `${authenticatedUserId ? 'Image' : 'Guest image'} uploaded successfully! High-quality versions processing...`
         };
 
     } catch (error: any) {
         logger.error('❌ Guest image upload error:', error);
-        await cleanupFile(file);
         return {
             success: false,
             error: 'Failed to upload image'
@@ -247,29 +269,51 @@ const processGuestVideoUpload = async (
         const fileSizeMB = bytesToMB(file.size);
 
         // Create media record directly for videos
+        // Create media record directly for videos
+        const mediaId = new mongoose.Types.ObjectId();
+        const uploadId = mediaId.toString();
+
         const media = new Media({
-            url: '/placeholder-video.mp4',
+            _id: mediaId,
+            upload_id: uploadId,
             type: 'video',
             album_id: new mongoose.Types.ObjectId(albumId),
             event_id: new mongoose.Types.ObjectId(eventId),
-            uploaded_by: authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : null,
-            guest_uploader: !authenticatedUserId ? guestUploaderInfo : null,
-            uploader_type: authenticatedUserId ? 'registered_user' : 'guest',
-            original_filename: file.originalname,
-            size_mb: fileSizeMB,
-            format: file.mimetype.split('/')[1],
+
+            owner: {
+                type: authenticatedUserId ? 'registered_user' : 'guest',
+                user_id: authenticatedUserId ? new mongoose.Types.ObjectId(authenticatedUserId) : undefined,
+                guest_id: !authenticatedUserId ? guestUploaderInfo.session_id : undefined,
+                display_name: !authenticatedUserId ? (guestUploaderInfo.name || 'Anonymous Guest') : undefined
+            },
+
+            original: {
+                public_id: `guest_video_${uploadId}`, // Placeholder
+                filename: file.originalname,
+                format: file.mimetype.split('/')[1] || 'mp4',
+                size_mb: fileSizeMB,
+                width: 0,
+                height: 0,
+                duration: 0
+            },
+
             processing: {
                 status: 'pending',
+                stage: 'uploading',
+                progress: 0,
                 started_at: new Date(),
                 variants_generated: false,
             },
+
             approval: {
                 status: approvalConfig.status,
                 auto_approval_reason: approvalConfig.autoApprovalReason,
                 approved_at: approvalConfig.approvedAt,
                 approved_by: approvalConfig.approvedBy,
                 rejection_reason: ''
-            }
+            },
+
+            deleteGroup: `guest-upload-${guestUploaderInfo.session_id || 'anon'}`
         });
 
         await media.save();
@@ -278,14 +322,14 @@ const processGuestVideoUpload = async (
         if (authenticatedUserId) {
             try {
                 await EventParticipant.updateOne(
-                    { 
+                    {
                         user_id: new mongoose.Types.ObjectId(authenticatedUserId),
                         event_id: new mongoose.Types.ObjectId(eventId)
                     },
-                    { 
-                        $inc: { 
+                    {
+                        $inc: {
                             'stats.uploads_count': 1,
-                            'stats.total_file_size_mb': fileSizeMB 
+                            'stats.total_file_size_mb': fileSizeMB
                         },
                         $set: {
                             'stats.last_upload_at': new Date(),
@@ -308,7 +352,7 @@ const processGuestVideoUpload = async (
         return {
             success: true,
             media_id: media._id.toString(),
-            url: media.url,
+            url: media.getOptimizedUrl(),
             approval_status: media.approval.status,
             processing_status: 'pending',
             message: 'Video uploaded successfully'
@@ -321,6 +365,5 @@ const processGuestVideoUpload = async (
             error: 'Failed to upload video'
         };
     } finally {
-        await cleanupFile(file);
     }
 };

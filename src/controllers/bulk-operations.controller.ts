@@ -187,15 +187,15 @@ export class BulkOperationsController {
     }): Promise<void> {
         try {
             const webSocketService = getWebSocketService();
-            const { 
-                eventId, 
-                mediaIds, 
-                newStatus, 
-                updatedBy, 
-                reason, 
-                hideReason, 
-                updateResult, 
-                timestamp 
+            const {
+                eventId,
+                mediaIds,
+                newStatus,
+                updatedBy,
+                reason,
+                hideReason,
+                updateResult,
+                timestamp
             } = params;
 
             // Create bulk status update payload matching the enhanced service interface
@@ -223,11 +223,11 @@ export class BulkOperationsController {
             if (mediaIds.length > 20) {
                 // For large bulk operations, send summary first
                 await webSocketService.emitBulkStatusUpdate(bulkStatusUpdatePayload);
-                
+
                 // Then send individual updates in batches to avoid overwhelming clients
                 const batchSize = 10;
                 const batches = [];
-                
+
                 for (let i = 0; i < mediaIds.length; i += batchSize) {
                     batches.push(mediaIds.slice(i, i + batchSize));
                 }
@@ -247,7 +247,7 @@ export class BulkOperationsController {
                     };
 
                     await webSocketService.emitBulkStatusBatch(batchPayload);
-                    
+
                     // Small delay between batches (only for very large operations)
                     if (batchIndex < batches.length - 1 && mediaIds.length > 50) {
                         await new Promise(resolve => setTimeout(resolve, 10));
@@ -256,7 +256,7 @@ export class BulkOperationsController {
             } else {
                 // For smaller bulk operations, send all at once
                 await webSocketService.emitBulkStatusUpdate(bulkStatusUpdatePayload);
-                
+
                 // Also send individual updates for better granular UI updates
                 const individualUpdates = mediaIds.map(mediaId => ({
                     type: 'status_update' as const,
@@ -437,23 +437,33 @@ export class BulkOperationsController {
                 operation: 'get_history'
             });
 
-            // TODO: Implement history tracking service
+            // Fetch active operations from Redis via WebSocket service
+            const webSocketService = getWebSocketService();
+            const activeOps = await webSocketService.getActiveBulkOperations();
+
+            // Filter by event_id if provided
+            const filteredOps = event_id
+                ? activeOps.filter(op => op.eventId === event_id)
+                : activeOps;
+
+            // Sort by startTime desc
+            filteredOps.sort((a, b) => b.startTime - a.startTime);
             res.status(200).json({
                 status: true,
                 code: 200,
                 message: 'Bulk operation history retrieved successfully',
                 data: {
-                    operations: [],
+                    operations: filteredOps,
                     pagination: {
                         page: Number(page),
                         limit: Number(limit),
-                        total: 0,
+                        total: filteredOps.length,
                         hasNext: false
                     }
                 },
                 error: null,
                 other: {
-                    note: 'History tracking will be implemented in a future update'
+                    note: 'Currently showing active/recent operations (1 hour retention)'
                 }
             });
 

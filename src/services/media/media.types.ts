@@ -19,7 +19,7 @@ export interface MediaQueryOptions {
     status?: string;
     cursor?: string;
     scrollType?: 'pagination' | 'infinite';
-    quality?: 'small' | 'medium' | 'large' | 'original' | 'thumbnail' | 'display' | 'full';
+    quality?: 'small' | 'medium' | 'large' | 'original'
     format?: 'webp' | 'jpeg' | 'auto';
     context?: 'mobile' | 'desktop' | 'lightbox';
 }

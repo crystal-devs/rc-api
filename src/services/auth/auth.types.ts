@@ -9,12 +9,16 @@ export interface LoginData {
     name?: string;
     profile_pic?: string;
     country_code?: string;
+    password?: string;
+    googleAccessToken?: string; // For Google OAuth verification
 }
 
 export interface LoginResult {
     token: string;
+    refreshToken: string;
     message: string;
     status: boolean;
+    expiresAt?: string; // Access token expiry
     user?: {
         id: string;
         email?: string;
@@ -23,6 +27,19 @@ export interface LoginResult {
         profile_pic?: string;
         provider: string;
     };
+}
+
+export interface LogoutRequest {
+    refreshToken: string;
+}
+
+export interface GoogleAuthRequest {
+    redirect_uri?: string;
+}
+
+export interface GoogleAuthCallbackRequest {
+    code: string;
+    redirectUri: string;
 }
 
 export interface UserInitializationData {
@@ -35,6 +52,7 @@ export interface TokenPayload {
     user_id: string;
     email?: string;
     provider: string;
+    jti?: string; // JWT ID for per-token revocation
     iat?: number;
     exp?: number;
 }

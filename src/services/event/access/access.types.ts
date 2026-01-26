@@ -18,7 +18,7 @@ export interface EventResponse {
     description: string;
     start_date: string;
     visibility: EventVisibility;
-    cover_image?: { url: string } | null;
+    cover_image?: { public_id: string } | null;
     location?: { name: string } | null;
     permissions?: {
         can_upload: boolean;
