@@ -30,6 +30,7 @@ import { getSignedUrlForKeyController } from "@controllers/signed-url.controller
 import { validateLambdaToken } from "@middlewares/validateLambdaToken.middleware";
 import { updateMediaController } from "@controllers/update-media.controller";
 import { searchFacesController } from "@controllers/media/search-faces.controller";
+import { mediaRateLimiter, uploadRateLimiter } from "@configs/security.config";
 
 const mediaRouter = express.Router();
 const wrap = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -63,16 +64,17 @@ const upload = multer({
 //     uploadMediaController as RequestHandler,
 // );
 
-mediaRouter.post('/upload-url', authMiddleware, wrap(generateBatchUploadUrlsController))
+mediaRouter.post('/upload-url', authMiddleware, uploadRateLimiter, wrap(generateBatchUploadUrlsController))
 mediaRouter.post('/upload-complete', authMiddleware, wrap(uploadCompleteController))
 mediaRouter.post('/upload-complete/batch', authMiddleware, wrap(uploadBatchCompleteController))
 mediaRouter.post('/signed-url/key', optionalAuthMiddleware, wrap(getSignedUrlForKeyController))
-mediaRouter.post('/update-photo', validateLambdaToken as RequestHandler, wrap(updateMediaController))
+mediaRouter.post('/update-photo', validateLambdaToken as RequestHandler, uploadRateLimiter, wrap(updateMediaController))
 
 // === GUEST UPLOADS ===
 mediaRouter.post(
     "/guest/:share_token/upload",
     optionalAuthMiddleware,        // Allow both auth and non-auth users
+    uploadRateLimiter,             // Rate limit uploads
     upload.array('files', 10),    // Support multiple files
     guestUploadMediaController
 );
@@ -82,6 +84,7 @@ mediaRouter.post(
 mediaRouter.get(
     "/event/:eventId",
     authMiddleware,
+    mediaRateLimiter,
     getMediaByEventController
 );
 
@@ -89,6 +92,7 @@ mediaRouter.get(
 mediaRouter.get(
     "/album/:albumId",
     authMiddleware,
+    mediaRateLimiter,
     getMediaByAlbumController
 );
 
@@ -96,6 +100,7 @@ mediaRouter.get(
 mediaRouter.get(
     "/guest/:shareToken",
     optionalAuthMiddleware,
+    mediaRateLimiter,
     getGuestMediaController
 );
 
@@ -103,6 +108,7 @@ mediaRouter.get(
 mediaRouter.get(
     "/:media_id",
     authMiddleware,
+    mediaRateLimiter,
     getMediaByIdController
 );
 
@@ -174,6 +180,7 @@ mediaRouter.post(
 mediaRouter.post(
     "/search/faces",
     optionalAuthMiddleware,
+    mediaRateLimiter,
     upload.single('image'),
     wrap(searchFacesController)
 );

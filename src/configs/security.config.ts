@@ -76,7 +76,7 @@ export const rateLimiter = rateLimit({
  */
 export const authRateLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute window (relaxed)
-  max: 200, // 200/min for dev (prev was 15m/100)
+  max: 200, // 200/min for dev
   message: {
     error: "Too many login attempts. Please wait 15 minutes before trying again.",
     code: "AUTH_RATE_LIMIT_EXCEEDED",
@@ -157,6 +157,80 @@ export const uploadRateLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: false,
   skipFailedRequests: true,
+});
+
+/**
+ * 🚦 NEW: Bulk Delete rate limiter
+ * - More restrictive for destructive operations
+ */
+export const bulkDeleteRateLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: 10, // Max 10 bulk delete operations per window
+  message: {
+    error: "Too many bulk delete requests. Please wait 5 minutes before trying again.",
+    code: "BULK_DELETE_RATE_LIMIT_EXCEEDED",
+    retryAfter: 300 // 5 minutes in seconds
+  },
+  headers: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: false,
+  skipFailedRequests: true,
+  keyGenerator: (req) => {
+    return req.ip;
+  }
+});
+
+/**
+ * 🚦 NEW: General Bulk rate limiter
+ * - For status checks and history
+ */
+export const generalBulkRateLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 60, // Max 60 requests per minute
+  message: {
+    error: "Too many requests. Please wait before trying again.",
+    code: "GENERAL_BULK_RATE_LIMIT_EXCEEDED",
+    retryAfter: 60
+  },
+  headers: true,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+/**
+ * 🚦 NEW: Bulk Download Creation rate limiter
+ * - Very restrictive as it triggers heavy jobs
+ */
+export const createBulkDownloadRateLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: 3, // Max 3 requests per window per IP
+  message: {
+    error: "Too many download requests. Please wait 5 minutes before trying again.",
+    code: "BULK_DOWNLOAD_RATE_LIMIT_EXCEEDED",
+    retryAfter: 300
+  },
+  headers: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: false,
+  keyGenerator: (req) => {
+    return req.ip;
+  }
+});
+
+/**
+ * 🚦 NEW: Bulk Download Status rate limiter
+ * - For polling status
+ */
+export const bulkDownloadStatusRateLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 30, // Max 30 status checks per minute
+  message: {
+    error: "Too many status requests. Please wait.",
+    code: "BULK_DOWNLOAD_STATUS_RATE_LIMIT_EXCEEDED",
+    retryAfter: 60
+  }
 });
 
 /**

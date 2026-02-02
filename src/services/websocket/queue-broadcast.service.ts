@@ -3,7 +3,7 @@
 
 import { getWebSocketService } from './websocket.service';
 import { logger } from '@utils/logger';
-import { getImageQueue } from 'queues/imageQueue';
+
 
 export interface QueueUpdateData {
     eventId: string;
@@ -275,78 +275,8 @@ export class QueueMonitorService {
      * 🔍 Check queue health and broadcast alerts
      */
     private async checkQueueHealth(eventId: string): Promise<void> {
-        try {
-            const imageQueue = getImageQueue();
-            if (!imageQueue) return;
-
-            // Get queue status
-            const [waiting, active, completed, failed] = await Promise.all([
-                imageQueue.getWaiting(),
-                imageQueue.getActive(),
-                imageQueue.getCompleted(),
-                imageQueue.getFailed()
-            ]);
-
-            const totalJobs = waiting.length + active.length + completed.length + failed.length;
-            const failureRate = totalJobs > 0 ? (failed.length / totalJobs) * 100 : 0;
-
-            // Check for high failure rate
-            if (failureRate > this.HIGH_FAILURE_THRESHOLD && failed.length > 2) {
-                queueBroadcastService.broadcastQueueAlert(eventId, {
-                    type: 'high_failure_rate',
-                    message: `High failure rate detected: ${failureRate.toFixed(1)}% (${failed.length} failed jobs)`,
-                    severity: 'warning',
-                    data: { failureRate, failedJobs: failed.length }
-                });
-            }
-
-            // Check for stuck jobs
-            const now = Date.now();
-            const stuckJobs = active.filter((job: any) => {
-                const jobAge = now - (job.timestamp || now);
-                return jobAge > this.STUCK_JOB_THRESHOLD;
-            });
-
-            if (stuckJobs.length > 0) {
-                queueBroadcastService.broadcastQueueAlert(eventId, {
-                    type: 'stuck_jobs',
-                    message: `${stuckJobs.length} jobs appear to be stuck (running >5 minutes)`,
-                    severity: 'error',
-                    data: { stuckJobIds: stuckJobs.map((j: any) => j.id) }
-                });
-            }
-
-            // Check queue backlog
-            if (waiting.length > 20) {
-                queueBroadcastService.broadcastQueueAlert(eventId, {
-                    type: 'queue_full',
-                    message: `Large queue backlog: ${waiting.length} items waiting`,
-                    severity: 'warning',
-                    data: { backlog: waiting.length }
-                });
-            }
-
-            // Calculate and broadcast performance metrics
-            const currentThroughput = this.calculateThroughput(completed);
-            const averageWaitTime = this.calculateAverageWaitTime(active);
-
-            queueBroadcastService.broadcastPerformanceMetrics(eventId, {
-                currentThroughput,
-                averageWaitTime,
-                activeWorkers: active.length,
-                queueBacklog: waiting.length,
-                errorRate: failureRate
-            });
-
-        } catch (error) {
-            logger.error('Queue health check failed:', error);
-
-            queueBroadcastService.broadcastQueueAlert(eventId, {
-                type: 'worker_error',
-                message: `Queue health check failed: ${error.message}`,
-                severity: 'error'
-            });
-        }
+        // Lambda architecture - skipping local queue health checks
+        return;
     }
 
     private calculateThroughput(completedJobs: any[]): number {

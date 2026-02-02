@@ -3,7 +3,7 @@
 
 import { Request, Response } from 'express';
 import { Media } from '@models/media.model';
-import { getImageQueue } from 'queues/imageQueue';
+
 import { logger } from '@utils/logger';
 import mongoose from 'mongoose';
 
@@ -236,29 +236,8 @@ export const retryUploadController = async (
 
         await media.save();
 
-        // Re-queue the job if possible
-        const imageQueue = getImageQueue();
-        if (imageQueue) {
-            const job = await imageQueue.add('process-image', {
-                mediaId: media._id.toString(),
-                eventId,
-                albumId: media.album_id.toString(),
-                originalFilename: media.original.filename,
-                fileSize: media.original.size_mb * 1024 * 1024, // Convert back to bytes
-                mimeType: `image/${media.original.format}`,
-                isRetry: true,
-                retryCount: media.processing.retry_count
-            }, {
-                priority: 8, // Higher priority for retries
-                attempts: 2,
-                backoff: { type: 'exponential', delay: 3000 }
-            });
-
-            media.processing.job_id = job.id?.toString();
-            await media.save();
-
-            logger.info(`📄 Retry queued for ${mediaId}: Job ${job.id}`);
-        }
+        // For Lambda architecture, we reset status and let the scheduled job or trigger pick it up
+        logger.info(`📄 Retry initiated for ${mediaId}`);
 
         return res.json({
             status: true,
@@ -311,11 +290,10 @@ export const pauseResumeUploadController = async (
             });
         }
 
-        const imageQueue = getImageQueue();
-        if (!imageQueue || !media.processing.job_id) {
+        if (!media.processing.job_id && !media.processing.status) {
             return res.status(400).json({
                 status: false,
-                message: "Cannot control upload - queue or job not found"
+                message: "Cannot control upload - invalid state"
             });
         }
 
@@ -372,18 +350,7 @@ export const cancelUploadController = async (
         }
 
         // Try to remove from queue
-        const imageQueue = getImageQueue();
-        if (imageQueue && media.processing.job_id) {
-            try {
-                const job = await imageQueue.getJob(media.processing.job_id);
-                if (job) {
-                    await job.remove();
-                    logger.info(`🗑️ Removed job ${media.processing.job_id} from queue`);
-                }
-            } catch (jobError) {
-                logger.warn('Failed to remove job from queue:', jobError);
-            }
-        }
+        // Queue removal skipped (Lambda architecture)
 
         logger.info(`❌ Cancelled upload: ${mediaId}`);
 
@@ -533,21 +500,7 @@ async function getQueueStatistics(eventId: string) {
         stats.queueThroughput = recentCompletions;
 
         // Get real queue health info from BullMQ
-        const imageQueue = getImageQueue();
-        if (imageQueue) {
-            try {
-                const [waiting, active] = await Promise.all([
-                    imageQueue.getWaiting(),
-                    imageQueue.getActive()
-                ]);
 
-                // Override with real queue numbers if available
-                if (waiting.length > 0) stats.queued = waiting.length;
-                if (active.length > 0) stats.processing = active.length;
-            } catch (queueError) {
-                logger.warn('Failed to get real-time queue stats from BullMQ:', queueError);
-            }
-        }
 
         return stats;
 
@@ -580,15 +533,5 @@ function mapProcessingStatus(status: string): string {
 
 // Get current queue position for an item
 async function getQueuePosition(jobId: string): Promise<number | undefined> {
-    try {
-        const imageQueue = getImageQueue();
-        if (!imageQueue) return undefined;
-
-        const waiting = await imageQueue.getWaiting();
-        const position = waiting.findIndex((job: any) => job.id === jobId);
-        return position >= 0 ? position + 1 : undefined;
-    } catch (error) {
-        logger.warn('Failed to get queue position:', error);
-        return undefined;
-    }
+    return undefined; // Queue bypassed
 }
