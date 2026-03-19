@@ -64,6 +64,9 @@ export const sendResponse = (res: Response, responseData: any): void => {
         // Add any additional fields from the original response
         const finalResponse = {
             ...response,
+            ...(responseData.code && { code: responseData.code }),
+            ...(responseData.error && { error: responseData.error }),
+            ...(responseData.other && { other: responseData.other }),
             ...(responseData.visibility_transition && { visibility_transition: responseData.visibility_transition }),
             ...(responseData.timestamp && { timestamp: responseData.timestamp })
         };

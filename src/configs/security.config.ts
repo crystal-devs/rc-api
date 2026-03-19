@@ -483,6 +483,7 @@ export const corsOptions: CorsOptions = {
     "x-csrf-token",
     "x-expected-csrf",
     "x-bypass-csrf",
+    "x-event-password",
     "Cache-Control", // Allow cache control headers
     "Pragma",        // Allow pragma headers
     "X-Requested-With", // Allow standard AJAX header
