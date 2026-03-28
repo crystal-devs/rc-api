@@ -5,6 +5,7 @@ import { Server as HttpServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import { logger } from '@utils/logger';
 import { websocketAuthMiddleware, websocketRateLimit, websocketLogger } from '@middlewares/websocket-auth.middleware';
+import { createAdapter } from '@socket.io/redis-adapter';
 
 // Import our management services
 import { authenticateConnection, handleSubscription } from './management/websocket-auth.service';
@@ -144,7 +145,35 @@ class SimpleWebSocketService {
         this.healthService = new WebSocketHealthService(this.connectedClients, this.io);
         this.setupMiddleware();
         this.initializeEventHandlers();
+        this.attachRedisAdapter();
         logger.info('🔌 Enhanced WebSocket service initialized with subscription management and bulk operations');
+    }
+
+    /**
+     * Attach a Redis pub/sub adapter so Socket.IO events are propagated
+     * across all instances (horizontal scaling).
+     * Falls back gracefully if Redis is not available (dev / single-instance).
+     */
+    private async attachRedisAdapter(): Promise<void> {
+        try {
+            const redisClient = getRedisClient();
+            if (!redisClient || !redisClient.isReady) {
+                logger.warn('⚠️ Redis not ready — WebSocket running in single-instance mode (no pub/sub adapter)');
+                return;
+            }
+
+            // The adapter requires two separate connections:
+            // one for publishing (write) and one for subscribing (blocked read).
+            const pubClient = redisClient.duplicate();
+            const subClient = redisClient.duplicate();
+
+            await Promise.all([pubClient.connect(), subClient.connect()]);
+
+            this.io.adapter(createAdapter(pubClient, subClient));
+            logger.info('✅ Socket.IO Redis pub/sub adapter attached — horizontal scaling enabled');
+        } catch (error) {
+            logger.error('❌ Failed to attach Redis adapter — falling back to single-instance mode:', error);
+        }
     }
 
     private setupMiddleware(): void {
@@ -462,362 +491,161 @@ class SimpleWebSocketService {
             : `guest_${eventId}`;
     }
 
-    // EXISTING: Single status update method (unchanged)
+    // ─────────────────────────────────────────────────────────────────────────
+    // Single media status update
+    // Emits slim guest events: new_photos_available or photo_removed
+    // Emits full details to admin room: media_status_updated
+    // ─────────────────────────────────────────────────────────────────────────
     public emitStatusUpdate(payload: StatusUpdatePayload): void {
         const adminRoom = `admin_${payload.eventId}`;
         const guestRoom = `guest_${payload.eventId}`;
+        const isNowVisible = payload.newStatus === 'approved' || payload.newStatus === 'auto_approved';
+        const wasVisible = payload.previousStatus === 'approved' || payload.previousStatus === 'auto_approved';
 
-        logger.info(`📤 Emitting status update: ${payload.mediaId.substring(0, 8)}... (${payload.previousStatus} → ${payload.newStatus})`);
+        logger.info(`📤 Status update: ${payload.mediaId.substring(0, 8)} (${payload.previousStatus} → ${payload.newStatus})`);
 
-        // Send to admin room
+        // Admin gets full detail
         this.io.to(adminRoom).emit('media_status_updated', payload);
 
-        // ALWAYS send media_status_updated to guest room for any status change
-        this.io.to(guestRoom).emit('media_status_updated', payload);
-
-        // Additional specific events for guests (optional, for specialized handling)
-        if (payload.newStatus === 'approved' || payload.newStatus === 'auto_approved') {
-            this.io.to(guestRoom).emit('media_approved', {
-                mediaId: payload.mediaId,
+        // Guest gets only meaningful state changes — no full payloads
+        if (isNowVisible && !wasVisible) {
+            // Photo became visible
+            this.io.to(guestRoom).emit('new_photos_available', {
                 eventId: payload.eventId,
-                mediaData: payload.mediaData,
-                timestamp: payload.timestamp
+                count: 1,
+                timestamp: new Date()
             });
-        } else if (['approved', 'auto_approved'].includes(payload.previousStatus) &&
-            !['approved', 'auto_approved'].includes(payload.newStatus)) {
-            this.io.to(guestRoom).emit('media_removed', {
+        } else if (wasVisible && !isNowVisible) {
+            // Previously visible photo was removed
+            this.io.to(guestRoom).emit('photo_removed', {
                 mediaId: payload.mediaId,
                 eventId: payload.eventId,
-                reason: `Status changed to ${payload.newStatus}`,
-                timestamp: payload.timestamp
+                timestamp: new Date()
             });
         }
+        // No emit for status changes that don't affect guest visibility
+        // (e.g. pending → rejected when photo was never shown)
     }
 
-    // NEW: Bulk status update methods
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bulk status update — admin gets started + complete events, guests get
+    // a single new_photos_available or photo_removed at the end.
+    // ─────────────────────────────────────────────────────────────────────────
     public async emitBulkStatusUpdate(payload: BulkStatusUpdatePayload): Promise<void> {
         try {
-            const eventId = payload.eventId;
+            const { eventId } = payload;
             const adminRoom = `admin_${eventId}`;
             const guestRoom = `guest_${eventId}`;
-
-            // Create operation ID for tracking
-            // Create operation ID for tracking
             const operationId = `bulk_${eventId}_${Date.now()}`;
+            const { mediaIds, newStatus, previousStatus, updatedBy, summary, timestamp } = payload.operation;
 
-            // Track the operation in Redis
-            const opState: BulkOperationState = {
+            // Track in Redis
+            await this.startBulkOperation({
                 operationId,
                 type: 'status_update',
                 status: 'completed',
-                progress: {
-                    completed: payload.operation.mediaIds.length,
-                    total: payload.operation.mediaIds.length,
-                    errors: payload.operation.summary.totalFailed
-                },
-                startTime: payload.operation.timestamp.getTime(),
-                userId: payload.operation.updatedBy.id,
+                progress: { completed: mediaIds.length, total: mediaIds.length, errors: summary.totalFailed },
+                startTime: timestamp.getTime(),
+                userId: updatedBy.id,
                 eventId
-            };
-            await this.startBulkOperation(opState);
+            });
 
-            const emitPayload = {
-                ...payload,
+            // Admin: single summary event (not per-batch / per-item noise)
+            this.io.to(adminRoom).emit('bulk_operation_complete', {
                 operationId,
-                timestamp: payload.operation.timestamp.toISOString()
-            };
-
-            // Emit to admin room with full details
-            this.io.to(adminRoom).emit('bulk_media_status_update', {
-                ...emitPayload,
-                details: {
-                    reason: payload.operation.reason,
-                    hideReason: payload.operation.hideReason
-                }
-            });
-
-            // Emit to guest room (filtered for guest-relevant updates)
-            if (['approved', 'auto_approved'].includes(payload.operation.newStatus)) {
-                // Guests see approved content
-                this.io.to(guestRoom).emit('bulk_media_approved', {
-                    eventId,
-                    operationId,
-                    mediaIds: payload.operation.mediaIds,
-                    newStatus: payload.operation.newStatus,
-                    summary: payload.operation.summary,
-                    timestamp: payload.operation.timestamp.toISOString()
-                });
-            } else if (['rejected', 'hidden', 'pending'].includes(payload.operation.newStatus)) {
-                // Guests see content removal
-                this.io.to(guestRoom).emit('bulk_media_removed', {
-                    eventId,
-                    operationId,
-                    mediaIds: payload.operation.mediaIds,
-                    reason: `Status changed to ${payload.operation.newStatus}`,
-                    summary: payload.operation.summary,
-                    timestamp: payload.operation.timestamp.toISOString()
-                });
-            }
-
-            logger.info(`✅ Bulk status update emitted for event ${eventId}:`, {
-                operationId,
-                mediaCount: payload.operation.mediaIds.length,
-                status: payload.operation.newStatus,
-                modifiedCount: payload.operation.summary.totalModified
-            });
-
-            // Redis TTL handles cleanup
-
-        } catch (error: any) {
-            logger.error('❌ Failed to emit bulk status update:', {
-                error: error.message,
-                eventId: payload.eventId,
-                mediaCount: payload.operation.mediaIds.length
-            });
-            throw error;
-        }
-    }
-
-    public async emitBulkStatusBatch(payload: BulkStatusBatchPayload): Promise<void> {
-        try {
-            const eventId = payload.eventId;
-            const adminRoom = `admin_${eventId}`;
-            const guestRoom = `guest_${eventId}`;
-
-            const batchPayload = {
-                ...payload,
-                timestamp: payload.timestamp.toISOString(),
-                progress: {
-                    current: payload.batchIndex + 1,
-                    total: payload.totalBatches,
-                    percentage: Math.round(((payload.batchIndex + 1) / payload.totalBatches) * 100)
-                }
-            };
-
-            // Emit to admin room
-            this.io.to(adminRoom).emit('bulk_status_batch', batchPayload);
-
-            // Emit to guest room only for relevant status changes
-            if (['approved', 'auto_approved'].includes(payload.newStatus)) {
-                this.io.to(guestRoom).emit('bulk_batch_approved', {
-                    eventId,
-                    mediaIds: payload.mediaIds,
-                    batchIndex: payload.batchIndex,
-                    totalBatches: payload.totalBatches,
-                    progress: batchPayload.progress,
-                    timestamp: batchPayload.timestamp
-                });
-            }
-
-            logger.debug(`✅ Bulk status batch emitted: ${payload.batchIndex + 1}/${payload.totalBatches}`, {
                 eventId,
-                mediaCount: payload.mediaIds.length,
-                status: payload.newStatus
+                operationType: 'status_update',
+                newStatus,
+                summary: {
+                    requested: summary.totalRequested,
+                    completed: summary.totalModified,
+                    failed: summary.totalFailed,
+                    skipped: summary.totalRequested - summary.totalModified - summary.totalFailed,
+                    duration: 0
+                },
+                updatedBy,
+                success: summary.success,
+                timestamp: timestamp.toISOString()
             });
 
-        } catch (error: any) {
-            logger.error('❌ Failed to emit bulk status batch:', {
-                error: error.message,
-                eventId: payload.eventId,
-                batchIndex: payload.batchIndex
-            });
-            throw error;
-        }
-    }
+            const isNowVisible = ['approved', 'auto_approved'].includes(newStatus);
+            const wasVisible = ['approved', 'auto_approved'].includes(previousStatus);
 
-    public async emitBulkIndividualUpdates(updates: IndividualStatusUpdate[]): Promise<void> {
-        try {
-            if (updates.length === 0) return;
-
-            const eventId = updates[0].eventId;
-            const adminRoom = `admin_${eventId}`;
-            const guestRoom = `guest_${eventId}`;
-
-            // Group updates by chunks to avoid overwhelming the network
-            const chunkSize = 5;
-            const chunks = [];
-
-            for (let i = 0; i < updates.length; i += chunkSize) {
-                chunks.push(updates.slice(i, i + chunkSize));
-            }
-
-            // Emit chunks with small delays
-            for (let index = 0; index < chunks.length; index++) {
-                const chunk = chunks[index];
-                const adminChunkPayload = {
-                    type: 'bulk_individual_updates',
+            // Guest: one notification per batch, not per item
+            if (isNowVisible && summary.totalModified > 0) {
+                this.io.to(guestRoom).emit('new_photos_available', {
                     eventId,
-                    updates: chunk.map((update: any) => ({
-                        ...update,
-                        timestamp: update.timestamp.toISOString()
-                    })),
-                    chunkInfo: {
-                        index,
-                        total: chunks.length,
-                        isLast: index === chunks.length - 1
-                    }
-                };
-
-                // Send full updates to admin room
-                this.io.to(adminRoom).emit('bulk_individual_updates', adminChunkPayload);
-
-                // Send filtered updates to guest room
-                const guestUpdates = chunk.filter((update: any) =>
-                    ['approved', 'auto_approved'].includes(update.newStatus) ||
-                    (['approved', 'auto_approved'].includes(update.previousStatus) &&
-                        !['approved', 'auto_approved'].includes(update.newStatus))
-                );
-
-                if (guestUpdates.length > 0) {
-                    this.io.to(guestRoom).emit('bulk_individual_updates', {
-                        ...adminChunkPayload,
-                        updates: guestUpdates.map((update: any) => ({
-                            ...update,
-                            timestamp: update.timestamp.toISOString()
-                        }))
+                    count: summary.totalModified,
+                    timestamp: new Date()
+                });
+            } else if (wasVisible && !isNowVisible && summary.totalModified > 0) {
+                // Emit removal for each formerly-visible photo
+                for (const mediaId of mediaIds) {
+                    this.io.to(guestRoom).emit('photo_removed', {
+                        mediaId,
+                        eventId,
+                        timestamp: new Date()
                     });
                 }
-
-                // Small delay between chunks for large operations
-                if (index < chunks.length - 1 && updates.length > 20) {
-                    await new Promise(resolve => setTimeout(resolve, 5));
-                }
             }
 
-            logger.debug(`✅ Bulk individual updates emitted: ${updates.length} updates in ${chunks.length} chunks`, {
-                eventId
-            });
-
+            logger.info(`✅ Bulk status update → bulk_operation_complete + guest event: event=${eventId}, count=${mediaIds.length}, status=${newStatus}`);
         } catch (error: any) {
-            logger.error('❌ Failed to emit bulk individual updates:', {
-                error: error.message,
-                updateCount: updates.length
-            });
+            logger.error('❌ Failed to emit bulk status update:', { error: error.message, eventId: payload.eventId });
             throw error;
         }
     }
 
-    public async emitBulkProgress(payload: BulkProgressPayload): Promise<void> {
+    /**
+     * @deprecated — per-batch events removed. Use emitBulkStatusUpdate instead.
+     * Kept as a no-op so existing callers don't break.
+     */
+    public async emitBulkStatusBatch(_payload: BulkStatusBatchPayload): Promise<void> {
+        // No-op: granular batch events replaced by single bulk_operation_complete
+        return;
+    }
+
+    /**
+     * @deprecated — per-item events removed. No-op kept for backward compat.
+     */
+    public async emitBulkIndividualUpdates(_updates: any[]): Promise<void> {
+        // No-op: replaced by single new_photos_available / photo_removed
+        return;
+    }
+
+    /**
+     * @deprecated — per-progress events removed. No-op kept for backward compat.
+     */
+    public async emitBulkProgress(_payload: any): Promise<void> {
+        // No-op: admin progress moved to SSE
+        return;
+    }
+
+    /**
+     * @deprecated — Use emitBulkStatusUpdate which now emits bulk_operation_complete internally.
+     * Kept as a thin wrapper for any external callers.
+     */
+    public async emitBulkOperationComplete(payload: any): Promise<void> {
         try {
-            const eventId = payload.eventId;
+            const { eventId, operationType, summary, updatedBy, timestamp } = payload;
             const adminRoom = `admin_${eventId}`;
-            const guestRoom = `guest_${eventId}`;
 
-            const progressPayload = {
-                type: 'bulk_progress',
-                ...payload,
-                timestamp: payload.timestamp.toISOString()
-            };
-
-            // Emit to admin room
-            this.io.to(adminRoom).volatile.emit('bulk_operation_progress', progressPayload);
-
-            // Emit simplified progress to guest room
-            this.io.to(guestRoom).volatile.emit('bulk_operation_progress', {
-                type: 'bulk_progress',
+            this.io.to(adminRoom).emit('bulk_operation_complete', {
                 eventId,
-                operationType: payload.operationType,
-                progress: {
-                    percentage: payload.progress.percentage,
-                    completed: payload.progress.completed,
-                    total: payload.progress.total
-                },
-                status: payload.status,
-                timestamp: progressPayload.timestamp
+                operationType,
+                summary,
+                updatedBy,
+                success: summary.completed > 0,
+                timestamp: timestamp instanceof Date ? timestamp.toISOString() : timestamp
             });
 
-            // Log only significant progress milestones to avoid spam
-            const { percentage } = payload.progress;
-            if (percentage % 25 === 0 || payload.status !== 'in_progress') {
-                logger.info(`📊 Bulk operation progress: ${eventId} - ${payload.operationType}`, {
-                    progress: `${payload.progress.completed}/${payload.progress.total} (${percentage}%)`,
-                    status: payload.status,
-                    errors: payload.progress.errors
-                });
-            }
-
-            // Update Redis state
-            if (this.redis) {
-                const opKey = `bulk_op:${payload.operationId || 'unknown'}`;
-                // We assume operation exists, if not we skip (or could create)
-                // For performance, we might not want to read-modify-write every progress event
-                // So we might just set specific fields if using hash, or skip frequent updates
-            }
-
+            logger.info(`🏁 Bulk operation complete: ${eventId} - ${operationType}`);
         } catch (error: any) {
-            logger.error('❌ Failed to emit bulk progress:', {
-                error: error.message,
-                eventId: payload.eventId,
-                operation: payload.operationType
-            });
-            throw error;
+            logger.error('❌ emitBulkOperationComplete failed:', { error: error.message });
         }
     }
 
-    public async emitBulkOperationComplete(payload: {
-        eventId: string;
-        operationType: 'status_update' | 'delete' | 'move';
-        summary: {
-            requested: number;
-            completed: number;
-            failed: number;
-            skipped: number;
-            duration: number; // in milliseconds
-        };
-        newStatus?: string;
-        updatedBy: {
-            id: string;
-            name: string;
-            type: string;
-        };
-        timestamp: Date;
-    }): Promise<void> {
-        try {
-            const eventId = payload.eventId;
-            const adminRoom = `admin_${eventId}`;
-            const guestRoom = `guest_${eventId}`;
-
-            const completionPayload = {
-                type: 'bulk_operation_complete',
-                ...payload,
-                timestamp: payload.timestamp.toISOString(),
-                success: payload.summary.completed > 0,
-                successRate: payload.summary.requested > 0
-                    ? Math.round((payload.summary.completed / payload.summary.requested) * 100)
-                    : 0
-            };
-
-            // Emit to admin room
-            this.io.to(adminRoom).emit('bulk_operation_complete', completionPayload);
-
-            // Emit to guest room (simplified)
-            this.io.to(guestRoom).emit('bulk_operation_complete', {
-                type: 'bulk_operation_complete',
-                eventId,
-                operationType: payload.operationType,
-                summary: {
-                    completed: payload.summary.completed,
-                    total: payload.summary.requested
-                },
-                success: completionPayload.success,
-                timestamp: completionPayload.timestamp
-            });
-
-            logger.info(`🏁 Bulk operation completed: ${eventId} - ${payload.operationType}`, {
-                summary: payload.summary,
-                duration: `${payload.summary.duration}ms`,
-                successRate: completionPayload.successRate + '%'
-            });
-
-        } catch (error: any) {
-            logger.error('❌ Failed to emit bulk operation complete:', {
-                error: error.message,
-                eventId: payload.eventId,
-                operation: payload.operationType
-            });
-            throw error;
-        }
-    }
 
     // EXISTING methods (unchanged)
     public getSubscriptionCounts(): Record<string, number> {
@@ -852,13 +680,6 @@ class SimpleWebSocketService {
             adminCount,
             guestCount,
             total
-        });
-
-        // Send to guest room (they see guest count)
-        this.io.to(guestRoom).emit('room_user_counts', {
-            eventId,
-            guestCount,
-            total: guestCount
         });
 
         logger.info(`📊 Subscription counts for ${eventId}: Admin(${adminCount}) Guest(${guestCount}) Total(${total})`);

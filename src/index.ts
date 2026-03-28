@@ -27,6 +27,7 @@ import photoWallRouter from "@routes/photo-wall.router";
 import uploadQueueRouter from "@routes/upload-queue.router";
 import bulkOperationsRouter from "@routes/bulk-operations.router";
 import bulkDownloadRouter from "@routes/bulk-download.router";
+import sseRouter from "@routes/v1/sse.routes";
 
 // Packages
 import compression from "compression";
@@ -111,6 +112,9 @@ app.use(`/api/${VERSION}/bulk`, bulkOperationsRouter);
 
 // Bulk download router
 app.use(`/api/${VERSION}/download`, bulkDownloadRouter);
+
+// SSE router for real-time telemetry (high-frequency updates)
+app.use(`/api/${VERSION}/sse`, sseRouter);
 
 // Enhanced Application Initialization
 async function initializeApplication() {

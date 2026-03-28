@@ -5,6 +5,7 @@ import { createDefaultPlans } from '@models/subscription-plan.model';
 import { logger } from '@utils/logger';
 import { ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import { keys } from '@configs/dotenv.config';
+import { startRekognitionWorker } from '@workers/rekognition.worker';
 
 export class InitializationService {
 
@@ -20,6 +21,10 @@ export class InitializationService {
         try {
             await redisConnection.connect();
             logger.info('Redis connected successfully');
+            
+            // Initialize Rekognition background worker
+            startRekognitionWorker();
+            
             return true;
         } catch (error) {
             logger.error('Failed to connect to Redis:', error);

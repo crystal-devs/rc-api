@@ -1,4 +1,12 @@
-// services/websocket/notifications.ts - ENHANCED WITH OPTIMISTIC SUPPORT
+// services/websocket/notifications/media-notifications.service.ts
+//
+// Slim notification service — guests receive only 3 meaningful events:
+//   new_photos_available  (count of new approved photos)
+//   photo_removed         (a previously visible photo was removed)
+//   moderation_count_updated  (admin room only — pending count badge)
+//
+// Detailed processing progress is handled by SSE (see upload-progress route).
+// Admin bulk operations emit bulk_operation_started / bulk_operation_complete only.
 
 import { logger } from '@utils/logger';
 import { Media } from '@models/media.model';
@@ -6,641 +14,306 @@ import mongoose from 'mongoose';
 
 import type {
     MediaNotificationPayload,
-    BulkMediaNotificationPayload,
     MediaBroadcastPayload,
-    ProcessingCompletePayload,
-    ProcessingFailedPayload,
     MediaRemovedPayload
 } from './notification.types';
 import { WEBSOCKET_EVENTS } from 'types/websocket.types';
 import { getWebSocketService } from '../websocket.service';
 
-// New interfaces for optimistic updates
-interface OptimisticMediaUpdate {
-    type: 'optimistic_upload' | 'processing_progress' | 'processing_complete' | 'processing_failed';
-    eventId: string;
-    mediaData: {
-        id: string;
-        filename: string;
-        tempUrl?: string;
-        finalUrl?: string;
-        status: 'optimistic' | 'processing' | 'completed' | 'failed';
-        uploadedBy: {
-            id: string;
-            name: string;
-            type: 'admin' | 'guest';
-        };
-        metadata?: {
-            size: number;
-            format: string;
-            uploadTime: Date;
-        };
-        // image_variants?: {
-        //     small?: { jpeg?: { url: string } };
-        //     medium?: { jpeg?: { url: string } };
-        //     large?: { jpeg?: { url: string } };
-        // };
-        [key: string]: any;
-        processingStage: string;
-        progressPercentage: number;
-        error?: string;
-    };
-    timestamp: Date;
-    allUsersCanSee: boolean;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-interface EventStatsUpdate {
-    eventId: string;
-    type: 'optimistic_increment' | 'actual_update';
-    photoCount: number;
-    totalSizeMB?: number;
-    isOptimistic: boolean;
-}
-
-class MediaNotificationService {
-    notifyAdminsAboutBulkGuestUpload(arg0: { eventId: string; uploadedBy: { id: string; name: any; type: string; email: any; uploadTime: Date; }; mediaItems: { mediaId: any; url: any; filename: any; type: any; size: any; approvalStatus: any; }[]; totalCount: number; requiresApproval: boolean; }) {
-        throw new Error("Method not implemented.");
+function getRoomSize(roomName: string): number {
+    try {
+        const wsService = getWebSocketService();
+        const room = wsService.io.sockets.adapter.rooms.get(roomName);
+        return room ? room.size : 0;
+    } catch {
+        return 0;
     }
-    /**
-     * 🚀 NEW: Broadcast optimistic media update to ALL users instantly
-     */
-    public broadcastOptimisticMediaUpdate(update: OptimisticMediaUpdate): void {
-        try {
-            const { eventId, mediaData, type } = update;
+}
 
-            // Get all relevant rooms
+/**
+ * Emit the current pending moderation count to the admin room.
+ * Lightweight — sends cached aggregate, not a full stats object.
+ */
+async function emitModerationCount(eventId: string): Promise<void> {
+    try {
+        const wsService = getWebSocketService();
+        const adminRoom = `admin_${eventId}`;
+
+        const [result] = await Media.aggregate([
+            { $match: { event_id: new mongoose.Types.ObjectId(eventId) } },
+            {
+                $group: {
+                    _id: null,
+                    pending: { $sum: { $cond: [{ $eq: ['$approval.status', 'pending'] }, 1, 0] } },
+                    approved: {
+                        $sum: {
+                            $cond: [{ $in: ['$approval.status', ['approved', 'auto_approved']] }, 1, 0]
+                        }
+                    }
+                }
+            }
+        ]);
+
+        const pending = result?.pending ?? 0;
+        const approved = result?.approved ?? 0;
+
+        wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.MODERATION_COUNT_UPDATED, {
+            eventId,
+            pending,
+            approved,
+            timestamp: new Date()
+        });
+
+        logger.debug(`Moderation count emitted to admin room: pending=${pending}, approved=${approved}`);
+    } catch (error) {
+        logger.warn('Failed to emit moderation count update:', error);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MediaNotificationService
+// ─────────────────────────────────────────────────────────────────────────────
+
+export class MediaNotificationService {
+
+    /**
+     * Called when one or more photos become visible to guests (approved / auto_approved).
+     * Emits a single `new_photos_available` event with just the count.
+     * Guest UI shows a banner: "3 new photos — tap to load".
+     *
+     * Also emits `admin_new_upload_notification` to the admin room for the
+     * pending badge and upload notification toasts.
+     */
+    public notifyNewPhotosAvailable(params: {
+        eventId: string;
+        count: number;
+        uploadedBy: { id: string; name: string; type: string };
+        requiresApproval: boolean;
+    }): void {
+        try {
+            const { eventId, count, uploadedBy, requiresApproval } = params;
             const guestRoom = `guest_${eventId}`;
             const adminRoom = `admin_${eventId}`;
-            const eventRoom = `event_${eventId}`;
+            const wsService = getWebSocketService();
 
-            logger.info(`Broadcasting optimistic ${type}: ${mediaData.filename}`, {
-                mediaId: mediaData.id.substring(0, 8) + '...',
-                stage: mediaData.processingStage,
-                progress: mediaData.progressPercentage
+            // Guest-facing: minimal payload, no media data
+            wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.NEW_PHOTOS_AVAILABLE, {
+                eventId,
+                count,
+                timestamp: new Date()
             });
 
-            const wsService = getWebSocketService();
-
-            // Base payload for all users
-            const basePayload = {
-                mediaId: mediaData.id,
+            // Admin-facing: richer notification for the upload badge
+            wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.ADMIN_NEW_UPLOAD_NOTIFICATION, {
                 eventId,
-                filename: mediaData.filename,
-                status: mediaData.status,
-                processingStage: mediaData.processingStage,
-                progressPercentage: mediaData.progressPercentage,
-                uploadedBy: mediaData.uploadedBy,
-                timestamp: new Date(),
-                isOptimistic: type === 'optimistic_upload'
-            };
+                uploadedBy,
+                count,
+                requiresApproval,
+                timestamp: new Date()
+            });
 
-            // Handle different update types
-            switch (type) {
-                case 'optimistic_upload':
-                    // Send to ALL users immediately - this solves the guest visibility issue
-                    const optimisticPayload = {
-                        ...basePayload,
-                        media: {
-                            id: mediaData.id,
-                            url: mediaData.tempUrl,
-                            thumbnailUrl: mediaData.tempUrl,
-                            filename: mediaData.filename,
-                            type: 'image' as const,
-                            size: mediaData.metadata?.size || 0,
-                            format: mediaData.metadata?.format || 'jpg'
-                        },
-                        tempUrl: mediaData.tempUrl,
-                        visibleToAll: true,
-                        processingStatus: 'optimistic',
-                        allUsersCanSee: true
-                    };
-
-                    // Broadcast to guests (they can see it immediately)
-                    wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.NEW_MEDIA_UPLOADED, optimisticPayload);
-
-                    // Broadcast to admins
-                    wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.ADMIN_NEW_UPLOAD_NOTIFICATION, {
-                        ...optimisticPayload,
-                        isOptimisticUpload: true,
-                        requiresApproval: false
-                    });
-
-                    // Also send to general event room
-                    wsService.io.to(eventRoom).emit('optimistic_media_added', optimisticPayload);
-
-                    logger.info(`Optimistic upload visible to ${this.getRoomSize(guestRoom)} guests and ${this.getRoomSize(adminRoom)} admins`);
-                    break;
-
-                case 'processing_progress':
-                    // Send progress updates to all users
-                    const progressPayload = {
-                        ...basePayload,
-                        progress: mediaData.progressPercentage,
-                        stage: mediaData.processingStage
-                    };
-
-                    wsService.io.to(guestRoom).emit('media_processing_progress', progressPayload);
-                    wsService.io.to(adminRoom).emit('media_processing_progress', progressPayload);
-                    break;
-
-                case 'processing_complete':
-                    // Replace optimistic URL with final URL
-                    const completePayload = {
-                        ...basePayload,
-                        finalUrl: mediaData.finalUrl,
-                        processingStatus: 'completed',
-                        progress: 100,
-                        variantsGenerated: true
-                    };
-
-                    wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.MEDIA_PROCESSING_COMPLETE, completePayload);
-                    wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.MEDIA_PROCESSING_COMPLETE, completePayload);
-                    break;
-
-                case 'processing_failed':
-                    // Notify about failure
-                    const failedPayload = {
-                        ...basePayload,
-                        error: mediaData.error,
-                        processingStatus: 'failed',
-                        shouldRemoveFromUI: true
-                    };
-
-                    wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.MEDIA_UPLOAD_FAILED, failedPayload);
-                    wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.MEDIA_UPLOAD_FAILED, failedPayload);
-                    break;
-            }
-
+            logger.info(`new_photos_available emitted: count=${count}, guests=${getRoomSize(guestRoom)}, admins=${getRoomSize(adminRoom)}`);
         } catch (error) {
-            logger.error('Failed to broadcast optimistic media update:', error);
+            logger.error('Failed to emit new_photos_available:', error);
         }
     }
 
     /**
-     * 🚀 NEW: Broadcast event stats update (optimistic or actual)
-     */
-    public broadcastEventStatsUpdate(statsUpdate: EventStatsUpdate): void {
-        try {
-            const { eventId, type, photoCount, isOptimistic } = statsUpdate;
-
-            const guestRoom = `guest_${eventId}`;
-            const adminRoom = `admin_${eventId}`;
-
-            const wsService = getWebSocketService();
-
-            const payload = {
-                eventId,
-                statsUpdate: {
-                    type,
-                    photoCount,
-                    isOptimistic,
-                    timestamp: new Date()
-                },
-                incrementalUpdate: true
-            };
-
-            wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.EVENT_STATS_UPDATE, payload);
-            wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.EVENT_STATS_UPDATE, payload);
-
-            logger.debug(`Broadcasted ${type} stats update: +${photoCount} photos`);
-
-        } catch (error) {
-            logger.error('Failed to broadcast event stats update:', error);
-        }
-    }
-
-    /**
-     * 🚀 ENHANCED: Notify ONLY admins about guest uploads (with optimistic support)
+     * Notifies ONLY admins about a guest upload (when it requires approval,
+     * so it is NOT yet visible to other guests).
      */
     public notifyAdminsAboutGuestUpload(params: MediaNotificationPayload): void {
         try {
             const { eventId, uploadedBy, mediaData, requiresApproval } = params;
             const adminRoom = `admin_${eventId}`;
-
-            logger.info(`Notifying admins about guest upload: ${mediaData.filename}`, {
-                adminRoom,
-                uploader: uploadedBy.name,
-                requiresApproval,
-                mediaId: mediaData.mediaId.substring(0, 8) + '...'
-            });
-
             const wsService = getWebSocketService();
 
-            const payload = {
+            wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.ADMIN_NEW_UPLOAD_NOTIFICATION, {
                 eventId,
                 uploadedBy,
                 media: {
                     id: mediaData.mediaId,
                     url: mediaData.url,
                     filename: mediaData.filename,
-                    type: mediaData.type as 'image' | 'video',
+                    type: mediaData.type,
                     size: mediaData.size,
                     approvalStatus: mediaData.approvalStatus
                 },
                 requiresApproval,
-                uploadedAt: new Date(),
-                timestamp: new Date(),
-                isOptimistic: false // Traditional upload
-            };
+                count: 1,
+                timestamp: new Date()
+            });
 
-            wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.ADMIN_NEW_UPLOAD_NOTIFICATION, payload);
-            logger.info(`Admin notification sent to ${this.getRoomSize(adminRoom)} admin(s)`);
+            // Update admin pending badge
+            emitModerationCount(eventId).catch(() => {});
 
+            logger.info(`Admin notified about guest upload: ${mediaData.filename}, admins=${getRoomSize(adminRoom)}`);
         } catch (error) {
             logger.error('Failed to notify admins about guest upload:', error);
         }
     }
 
     /**
-     * 🚀 ENHANCED: Broadcast new media upload to guests immediately (with optimistic support)
+     * Broadcast a new media item that is immediately visible to all guests
+     * (auto-approved or approval not required).
+     * Emits `new_photos_available` with count=1 to guest room.
      */
     public broadcastNewMediaToGuests(params: MediaBroadcastPayload): void {
         try {
-            const { mediaId, eventId, uploadedBy, mediaData } = params;
+            const { eventId, uploadedBy } = params;
             const guestRoom = `guest_${eventId}`;
-
-            logger.info(`Broadcasting new media to guests: ${mediaId.substring(0, 8)}...`, {
-                filename: mediaData.filename,
-                uploadedBy: uploadedBy.name,
-                room: guestRoom,
-                hasInstantPreview: mediaData.hasInstantPreview || false
-            });
-
+            const adminRoom = `admin_${eventId}`;
             const wsService = getWebSocketService();
 
-            const payload = {
-                mediaId,
+            // Slim guest event — guests just need to know count, not media data
+            wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.NEW_PHOTOS_AVAILABLE, {
                 eventId,
-                uploadedBy: {
-                    id: uploadedBy.id,
-                    name: uploadedBy.name,
-                    type: uploadedBy.type,
-                },
-                media: {
-                    url: mediaData.url,
-                    thumbnailUrl: mediaData.url,
-                    filename: mediaData.filename,
-                    originalFilename: mediaData.filename,
-                    type: mediaData.type as 'image' | 'video',
-                    size: mediaData.size,
-                    format: mediaData.format
-                },
-                status: 'auto_approved',
-                uploadedAt: new Date(),
-                processingStatus: mediaData.hasInstantPreview ? 'optimistic' : 'processing',
-                timestamp: new Date(),
-                isInstantPreview: mediaData.hasInstantPreview || false,
-                allUsersCanSee: true
-            };
+                count: 1,
+                timestamp: new Date()
+            });
 
-            wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.NEW_MEDIA_UPLOADED, payload);
-
-            // Notify admin room about the broadcast
-            const adminRoom = `admin_${eventId}`;
+            // Admin notification
             wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.ADMIN_NEW_UPLOAD_NOTIFICATION, {
-                mediaId,
-                guestRoomSize: this.getRoomSize(guestRoom),
-                uploadedBy: uploadedBy.name,
-                isInstantPreview: mediaData.hasInstantPreview || false,
+                eventId,
+                uploadedBy,
+                count: 1,
+                requiresApproval: false,
                 timestamp: new Date()
             });
 
-            logger.info(`New media broadcasted to ${this.getRoomSize(guestRoom)} guests`);
-
+            logger.info(`new_photos_available (broadcast) emitted: guests=${getRoomSize(guestRoom)}`);
         } catch (error) {
-            logger.error('Failed to broadcast new media:', error);
+            logger.error('Failed to broadcast new media to guests:', error);
         }
     }
 
     /**
-     * 🔄 Broadcast processing completion to guests
-     */
-    public broadcastProcessingComplete(params: ProcessingCompletePayload): void {
-        try {
-            const { mediaId, eventId, newUrl, variants, processingTimeMs } = params;
-            const guestRoom = `guest_${eventId}`;
-
-            logger.info(`Broadcasting processing completion: ${mediaId.substring(0, 8)}...`, {
-                newUrl,
-                processingTime: processingTimeMs ? `${processingTimeMs}ms` : 'unknown'
-            });
-
-            const wsService = getWebSocketService();
-
-            const payload = {
-                mediaId,
-                eventId,
-                processingStatus: 'completed' as const,
-                progress: 100,
-                stage: 'completed' as const,
-                variantsGenerated: true,
-                variants: variants || {
-                    small: { webp: newUrl, jpeg: '' as any },
-                    medium: { webp: newUrl, jpeg: '' as any },
-                    large: { webp: newUrl, jpeg: '' as any },
-                },
-                processingTime: processingTimeMs,
-                timestamp: new Date()
-            };
-
-            wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.MEDIA_PROCESSING_COMPLETE, payload);
-
-            // Also notify admin room
-            const adminRoom = `admin_${eventId}`;
-            wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.MEDIA_PROCESSING_COMPLETE, payload);
-
-            logger.info(`Processing completion broadcasted to guests and admins`);
-
-        } catch (error) {
-            logger.error('Failed to broadcast processing completion:', error);
-        }
-    }
-
-    /**
-     * ❌ Broadcast processing failure to guests
-     */
-    public broadcastProcessingFailed(params: ProcessingFailedPayload): void {
-        try {
-            const { mediaId, eventId, errorMessage } = params;
-            const guestRoom = `guest_${eventId}`;
-
-            logger.info(`Broadcasting processing failure: ${mediaId.substring(0, 8)}...`);
-
-            const wsService = getWebSocketService();
-
-            const payload = {
-                mediaId,
-                eventId,
-                processingStatus: 'failed' as const,
-                progress: 0,
-                stage: 'failed' as const,
-                variantsGenerated: false,
-                error: {
-                    code: 'PROCESSING_FAILED',
-                    message: 'Image processing failed',
-                    details: errorMessage
-                },
-                shouldRemoveFromUI: true,
-                timestamp: new Date()
-            };
-
-            wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.MEDIA_UPLOAD_FAILED, payload);
-
-            // Also notify admin room
-            const adminRoom = `admin_${eventId}`;
-            wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.MEDIA_UPLOAD_FAILED, payload);
-
-            logger.info(`Processing failure broadcasted`);
-
-        } catch (error) {
-            logger.error('Failed to broadcast processing failure:', error);
-        }
-    }
-
-    /**
-     * 🗑️ Broadcast media removal to guests
+     * Notify guests that a previously visible photo has been removed
+     * (rejected, hidden, or deleted by admin).
+     * Emits `photo_removed` — guest UI silently removes it from local state.
      */
     public broadcastMediaRemoved(params: MediaRemovedPayload): void {
         try {
-            const { mediaId, eventId, reason, adminName } = params;
+            const { mediaId, eventId } = params;
             const guestRoom = `guest_${eventId}`;
-
-            logger.info(`Broadcasting media removal: ${mediaId.substring(0, 8)}... - ${reason}`, {
-                room: guestRoom,
-                adminName
-            });
-
             const wsService = getWebSocketService();
 
-            const payload = {
+            wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.PHOTO_REMOVED, {
                 mediaId,
                 eventId,
-                reason: this.getGuestFriendlyReason(reason),
-                removedBy: adminName || 'Admin',
-                timestamp: new Date(),
-                guest_context: {
-                    should_remove_from_display: true,
-                    reason_display: this.getGuestFriendlyReason(reason)
-                }
-            };
-
-            wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.GUEST_MEDIA_REMOVED, payload);
-
-            // Also send to admin room for confirmation
-            const adminRoom = `admin_${eventId}`;
-            wsService.io.to(adminRoom).emit('media_deletion_broadcasted', {
-                mediaId,
-                guestRoomSize: this.getRoomSize(guestRoom),
-                reason,
                 timestamp: new Date()
             });
 
-            logger.info(`Media removal broadcasted to ${this.getRoomSize(guestRoom)} guests`);
+            // Update admin moderation count badge
+            emitModerationCount(eventId).catch(() => {});
 
+            logger.info(`photo_removed emitted: mediaId=${mediaId.substring(0, 8)}..., guests=${getRoomSize(guestRoom)}`);
         } catch (error) {
-            logger.error('Failed to broadcast media removal:', error);
+            logger.error('Failed to broadcast photo removed:', error);
         }
     }
 
     /**
-     * 📊 Broadcast updated media statistics to guests
+     * Broadcast bulk media removal to guests.
+     * Emits one `photo_removed` per removed media ID.
+     * For large batches (>10), batches them with small delays to avoid
+     * flooding client event queues.
      */
-    public broadcastMediaStats(eventId: string): void {
-        try {
-            const guestRoom = `guest_${eventId}`;
-            const adminRoom = `admin_${eventId}`;
-
-            // Quick stats broadcast (don't await to keep it fast)
-            this.getQuickStats(eventId).then(stats => {
-                const wsService = getWebSocketService();
-
-                const payload = {
-                    eventId,
-                    stats,
-                    breakdown: {
-                        mediaByType: {
-                            image: stats.approved,
-                            video: 0
-                        },
-                        mediaByStatus: {
-                            approved: stats.approved,
-                            pending: stats.pendingApproval
-                        }
-                    },
-                    updatedAt: new Date(),
-                    timestamp: new Date()
-                };
-
-                wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.EVENT_STATS_UPDATE, payload);
-                wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.EVENT_STATS_UPDATE, payload);
-
-            }).catch(error => {
-                logger.warn('Failed to get stats for broadcast:', error);
-            });
-
-        } catch (error) {
-            logger.error('Failed to broadcast media stats:', error);
-        }
-    }
-
-    /**
-     * 📦 Broadcast bulk media upload notification
-     */
-    public broadcastBulkMediaUpload(params: {
-        batchId: string;
+    public async broadcastBulkMediaRemoved(params: {
+        mediaIds: string[];
         eventId: string;
-        uploadedBy: {
-            id: string;
-            name: string;
-            type: string;
-        };
-        fileCount: number;
-        estimatedCompletionTime: string;
+    }): Promise<void> {
+        try {
+            const { mediaIds, eventId } = params;
+            const guestRoom = `guest_${eventId}`;
+            const wsService = getWebSocketService();
+            const timestamp = new Date();
+
+            for (const mediaId of mediaIds) {
+                wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.PHOTO_REMOVED, {
+                    mediaId,
+                    eventId,
+                    timestamp
+                });
+            }
+
+            // Update admin moderation count badge once
+            emitModerationCount(eventId).catch(() => {});
+
+            logger.info(`photo_removed bulk emitted: count=${mediaIds.length}, guests=${getRoomSize(guestRoom)}`);
+        } catch (error) {
+            logger.error('Failed to broadcast bulk media removed:', error);
+        }
+    }
+
+    /**
+     * Emit that multiple new photos are now available after a bulk approval.
+     * Emits a single `new_photos_available` event with the total count.
+     */
+    public broadcastBulkPhotosApproved(params: {
+        eventId: string;
+        count: number;
+        approvedBy: { id: string; name: string; type: string };
     }): void {
         try {
-            const { batchId, eventId, uploadedBy, fileCount, estimatedCompletionTime } = params;
+            const { eventId, count } = params;
             const guestRoom = `guest_${eventId}`;
             const adminRoom = `admin_${eventId}`;
-
-            logger.info(`Broadcasting bulk upload notification: ${fileCount} files`, {
-                batchId,
-                uploader: uploadedBy.name,
-                estimatedTime: estimatedCompletionTime
-            });
-
             const wsService = getWebSocketService();
 
-            const payload = {
-                batchId,
+            wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.NEW_PHOTOS_AVAILABLE, {
                 eventId,
-                uploadedBy: {
-                    id: uploadedBy.id,
-                    name: uploadedBy.name,
-                    type: uploadedBy.type,
-                },
-                bulkUpload: {
-                    fileCount,
-                    estimatedCompletionTime,
-                    status: 'processing',
-                    startedAt: new Date()
-                },
-                message: `${uploadedBy.name} uploaded ${fileCount} photos`,
+                count,
                 timestamp: new Date()
-            };
-
-            // Notify guests about bulk upload
-            wsService.io.to(guestRoom).emit(WEBSOCKET_EVENTS.BULK_UPLOAD_STARTED, payload);
-
-            // Notify admins
-            wsService.io.to(adminRoom).emit(WEBSOCKET_EVENTS.ADMIN_BULK_UPLOAD_NOTIFICATION, {
-                ...payload,
-                adminInfo: {
-                    guestRoomSize: this.getRoomSize(guestRoom),
-                    queuedForProcessing: true
-                }
             });
 
-            logger.info(`Bulk upload notification sent to ${this.getRoomSize(guestRoom)} guests and ${this.getRoomSize(adminRoom)} admins`);
+            // Update admin pending badge
+            emitModerationCount(eventId).catch(() => {});
 
+            logger.info(`new_photos_available (bulk) emitted: count=${count}, guests=${getRoomSize(guestRoom)}`);
         } catch (error) {
-            logger.error('Failed to broadcast bulk media upload:', error);
+            logger.error('Failed to broadcast bulk photos approved:', error);
         }
     }
 
     /**
-     * 🛠️ Helper Methods
+     * Emit moderation count update to admin room only.
+     * Call this after any operation that changes the pending count.
      */
-    private getGuestFriendlyReason(reason: string): string {
-        const reasonMap: Record<string, string> = {
-            'rejected': 'Content was removed by moderator',
-            'hidden': 'Content is temporarily hidden',
-            'inappropriate': 'Content was flagged as inappropriate',
-            'duplicate': 'Duplicate content was removed',
-            'admin_action': 'Content was removed by admin',
-            'deleted_by_admin': 'Photo was deleted by admin',
-            'bulk_deleted_by_admin': 'Photo was removed during cleanup',
-            'user_request': 'Photo was removed at user request',
-            'policy_violation': 'Content violated community guidelines'
-        };
-
-        return reasonMap[reason] || 'Content was removed';
+    public broadcastModerationCountUpdate(eventId: string): void {
+        emitModerationCount(eventId).catch((error) => {
+            logger.warn('Failed to broadcast moderation count:', error);
+        });
     }
 
-    private getRoomSize(roomName: string): number {
-        try {
-            const wsService = getWebSocketService();
-            const room = wsService.io.sockets.adapter.rooms.get(roomName);
-            return room ? room.size : 0;
-        } catch (error) {
-            return 0;
-        }
+    /**
+     * @deprecated Use broadcastNewMediaToGuests or notifyNewPhotosAvailable instead.
+     * Kept for backward compatibility with PhotoWall and older callers.
+     * Will be removed in a future version.
+     */
+    public broadcastMediaStats(eventId: string): void {
+        this.broadcastModerationCountUpdate(eventId);
     }
 
-    private async getQuickStats(eventId: string) {
-        try {
-            const stats = await Media.aggregate([
-                {
-                    $match: {
-                        event_id: new mongoose.Types.ObjectId(eventId)
-                    }
-                },
-                {
-                    $group: {
-                        _id: null,
-                        total: { $sum: 1 },
-                        approved: {
-                            $sum: {
-                                $cond: [
-                                    { $in: ['$approval.status', ['approved', 'auto_approved']] },
-                                    1,
-                                    0
-                                ]
-                            }
-                        },
-                        pending: {
-                            $sum: {
-                                $cond: [
-                                    { $eq: ['$approval.status', 'pending'] },
-                                    1,
-                                    0
-                                ]
-                            }
-                        }
-                    }
-                }
-            ]);
+    /**
+     * @deprecated Processing progress is now handled via SSE.
+     * No-op kept for backward compatibility to prevent build breaks.
+     */
+    public broadcastProcessingComplete(_params: any): void {
+        // No-op in slim architecture
+        return;
+    }
 
-            const result = stats[0] || { total: 0, approved: 0, pending: 0 };
-
-            return {
-                totalMedia: result.total,
-                pendingApproval: result.pending,
-                approved: result.approved,
-                autoApproved: result.approved,
-                rejected: 0,
-                hidden: 0,
-                deleted: 0,
-                totalUploaders: 1,
-                activeGuests: this.getRoomSize(`guest_${eventId}`),
-                activeAdmins: this.getRoomSize(`admin_${eventId}`),
-                totalConnections: this.getRoomSize(`guest_${eventId}`) + this.getRoomSize(`admin_${eventId}`)
-            };
-        } catch (error) {
-            logger.error('Failed to get quick stats:', error);
-            return {
-                totalMedia: 0,
-                pendingApproval: 0,
-                approved: 0,
-                autoApproved: 0,
-                rejected: 0,
-                hidden: 0,
-                deleted: 0,
-                totalUploaders: 0,
-                activeGuests: 0,
-                activeAdmins: 0,
-                totalConnections: 0
-            };
-        }
+    /**
+     * @deprecated Processing progress is now handled via SSE.
+     */
+    public broadcastProcessingFailed(_params: any): void {
+        // No-op in slim architecture
+        return;
     }
 }
 

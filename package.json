@@ -13,7 +13,9 @@
     "@middlewares": "./dist/middlewares",
     "@configs": "./dist/configs",
     "@routes": "./dist/routes",
-    "@services": "./dist/services"
+    "@services": "./dist/services",
+    "@workers": "./dist/workers",
+    "@queues": "./dist/queues"
   },
   "scripts": {
     "dev": "cross-env NODE_ENV=development ts-node-dev --require tsconfig-paths/register src/index.ts",

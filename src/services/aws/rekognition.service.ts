@@ -1,4 +1,5 @@
 import { RekognitionClient, CreateCollectionCommand, IndexFacesCommand, SearchFacesByImageCommand, FaceMatch, SearchFacesCommand, SearchFacesCommandOutput } from "@aws-sdk/client-rekognition";
+import { rekognitionQueue } from "@queues/rekognition.queue";
 import { keys } from "@configs/dotenv.config";
 import { logger } from "@utils/logger";
 
@@ -203,6 +204,26 @@ export const rekognitionService = {
                 return [];
             }
             throw error;
+        }
+    },
+    /**
+     * Queue a face indexing job for background processing
+     */
+    queueIndexFaces: async (bucket: string, key: string, mediaId: string, eventId: string) => {
+        try {
+            await rekognitionQueue.add('index-faces', {
+                bucket,
+                key,
+                mediaId,
+                eventId
+            });
+            logger.info(`📝 Queued indexing job for media ${mediaId} in event ${eventId}`);
+        } catch (error) {
+            logger.error(`❌ Failed to queue indexing job for ${mediaId}:`, error);
+            // Fallback to direct indexing if queueing fails (safest approach)
+            rekognitionService.indexFaces(bucket, key, mediaId, eventId).catch(e => 
+                logger.error(`Direct indexing fallback failed for ${mediaId}:`, e)
+            );
         }
     },
 };
