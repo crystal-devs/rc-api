@@ -292,47 +292,11 @@ export const updateMediaStatusController: RequestHandler = async (
             reason
         });
 
-        // Send HTTP response first
+        // Note: WebSocket notification for guests (photo_removed / new_photos_available)
+        // is handled directly in updateMediaStatusService for reliability.
+        // The controller does not need to emit an additional event.
+
         res.status(response.code).json(response);
-
-        // Then handle WebSocket updates (non-blocking)
-        if (response.status && response.data) {
-            try {
-                const webSocketService = getWebSocketService();
-
-                const statusUpdatePayload = {
-                    mediaId: media_id,
-                    eventId: response.data.event_id.toString(),
-                    previousStatus: response.other?.previousStatus || 'unknown',
-                    newStatus: status,
-                    updatedBy: {
-                        name: userName,
-                        type: 'admin' // You can determine this based on user role
-                    },
-                    timestamp: new Date(),
-                    mediaData: {
-                        url: response.data.original?.public_id || response.data.url,
-                        thumbnail: (response.data.type === 'image' ? response.data.variants?.images?.small?.public_id : response.data.variants?.thumbnails?.preview?.public_id) || response.data.original?.public_id,
-                        filename: response.data.original?.filename || response.data.upload_id
-                    }
-                };
-
-                // Emit status update to appropriate rooms
-                webSocketService.emitStatusUpdate(statusUpdatePayload);
-
-                logger.info('✅ Status update broadcasted via WebSocket:', {
-                    mediaId: media_id,
-                    eventId: response.data.event_id,
-                    from: statusUpdatePayload.previousStatus,
-                    to: status,
-                    by: userName
-                });
-
-            } catch (wsError: any) {
-                logger.error('❌ WebSocket broadcast failed:', wsError.message);
-                // Don't fail the main operation if WebSocket fails
-            }
-        }
 
         logger.info('✅ Media status updated:', {
             mediaId: media_id,

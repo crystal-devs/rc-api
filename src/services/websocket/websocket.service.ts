@@ -515,8 +515,9 @@ class SimpleWebSocketService {
                 count: 1,
                 timestamp: new Date()
             });
-        } else if (wasVisible && !isNowVisible) {
-            // Previously visible photo was removed
+        } else if (!isNowVisible) {
+            // Unconditionally emit removal for non-visible statuses
+            // The guest UI ignores mediaIds it doesn't currently display
             this.io.to(guestRoom).emit('photo_removed', {
                 mediaId: payload.mediaId,
                 eventId: payload.eventId,
@@ -570,7 +571,6 @@ class SimpleWebSocketService {
             });
 
             const isNowVisible = ['approved', 'auto_approved'].includes(newStatus);
-            const wasVisible = ['approved', 'auto_approved'].includes(previousStatus);
 
             // Guest: one notification per batch, not per item
             if (isNowVisible && summary.totalModified > 0) {
@@ -579,8 +579,9 @@ class SimpleWebSocketService {
                     count: summary.totalModified,
                     timestamp: new Date()
                 });
-            } else if (wasVisible && !isNowVisible && summary.totalModified > 0) {
-                // Emit removal for each formerly-visible photo
+            } else if (!isNowVisible && summary.totalModified > 0) {
+                // Emitting removal unconditionally for non-visible statuses.
+                // The guest frontend safely ignores mediaIds it doesn't currently display.
                 for (const mediaId of mediaIds) {
                     this.io.to(guestRoom).emit('photo_removed', {
                         mediaId,
