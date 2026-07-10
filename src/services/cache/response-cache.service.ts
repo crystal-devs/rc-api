@@ -34,9 +34,11 @@ export class ResponseCacheService {
     }
 
     /**
-     * Generate cache key from request parameters
+     * Generate cache key from request parameters.
+     * Public so the stampede-protection helper (cached-fetch.service) can build
+     * the exact same key, keeping existing pattern-based invalidation working.
      */
-    private generateCacheKey(endpoint: string, params: Record<string, any>): string {
+    public buildKey(endpoint: string, params: Record<string, any>): string {
         // Sort params for consistent hashing
         const sortedParams = Object.keys(params)
             .sort()
@@ -49,6 +51,10 @@ export class ResponseCacheService {
         const hash = crypto.createHash('md5').update(paramsString).digest('hex');
 
         return `${this.PREFIX}${endpoint}:${hash}`;
+    }
+
+    private generateCacheKey(endpoint: string, params: Record<string, any>): string {
+        return this.buildKey(endpoint, params);
     }
 
     /**
