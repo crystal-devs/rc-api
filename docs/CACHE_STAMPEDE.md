@@ -28,7 +28,8 @@ as a single reusable helper, `cachedFetch()`, which stacks the three industry-st
 | Technique | What it does | Solves |
 |---|---|---|
 | **Jittered TTL** | Each TTL is randomized ±10% | Synchronized expiry — keys no longer expire in lockstep |
-| **Single-flight lock** | On a true miss, one request wins a Redis `SET NX PX` lock and queries the DB; concurrent callers short-poll for its result instead of hitting the DB | N concurrent DB hits → **1** |
+| **Single-flight lock** | On a true miss, one request wins a Redis `SET NX PX` lock and queries the DB; concurrent callers read-before-acquire and return the winner's value the instant it lands instead of hitting the DB | N concurrent DB hits → **1** |
+| **Lock heartbeat + short TTL** | The lock has a short TTL (4s) but the holder renews it while producing. A live-but-slow query keeps the lock (no duplicate fetch); a **crashed** holder's lock frees within the TTL, and exactly one waiter (its poll window outlasts TTL + one produce) takes over and refills the cache | A crashed leader costs **1** extra DB query, not a herd |
 | **Stale-while-revalidate** | Values carry a logical `staleAt` shorter than the physical Redis TTL; a stale-but-present value is served instantly while **one** background worker (lock-guarded) refreshes it | Readers never block on a cold recompute; the DB sees a trickle of single refreshes, not a wall |
 
 Plus two properties that were already correct and are preserved:
@@ -52,7 +53,8 @@ return await cachedFetch<ServiceResponse<T>>(
     ttl: (resp) => (resp.data?.length ? 600 : 300),
     // optional: extra seconds served while revalidating (default = 50% of fresh TTL)
     // staleTtl: 300,
-    // optional: lockTimeoutMs (default 10_000), maxPollAttempts (40), pollIntervalMs (50)
+    // optional: lockTimeoutMs (default 4_000, auto-renewed while producing),
+    //           maxPollAttempts (default 80), pollIntervalMs (default 100) => ~8s wait window
   }
 );
 ```

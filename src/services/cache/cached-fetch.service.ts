@@ -29,11 +29,32 @@ import crypto from 'crypto';
 
 const LOCK_PREFIX = 'response_lock:';
 
+// Defaults tuned so a crashed leader is recovered by exactly ONE waiter instead of a herd:
+//   - the lock TTL is short, so a dead leader's lock frees quickly, but
+//   - a live leader RENEWS (heartbeats) its lock while producing, so a legitimately slow query
+//     never loses the lock (no double-fetch), and
+//   - the poll window comfortably outlasts the lock TTL + one takeover produce, so a waiter is
+//     still polling when a dead lock expires and can take over, refill the cache, and let
+//     everyone else read the refilled value instead of stampeding the DB.
+const DEFAULT_LOCK_TTL_MS = 4_000;        // short: dead-leader lock frees within ~4s
+const DEFAULT_POLL_INTERVAL_MS = 100;
+const DEFAULT_MAX_POLL_ATTEMPTS = 80;     // 80 x 100ms = ~8s window (> lock TTL + a produce)
+
 // Lua: release the lock only if we still own it (compare-and-delete). Prevents a slow worker
 // from deleting a lock that has since expired and been re-acquired by someone else.
 const RELEASE_LOCK_LUA = `
 if redis.call("get", KEYS[1]) == ARGV[1] then
   return redis.call("del", KEYS[1])
+else
+  return 0
+end`;
+
+// Lua: extend our lock's TTL only if we still own it (compare-and-pexpire). Used by the
+// heartbeat so a live leader keeps the lock while a long producer runs, without ever being
+// able to extend a lock that already expired and was taken over by someone else.
+const RENEW_LOCK_LUA = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("pexpire", KEYS[1], ARGV[2])
 else
   return 0
 end`;
@@ -45,11 +66,13 @@ export interface CachedFetchOptions<T> {
     /** Extra seconds the value stays servable (stale) while a background refresh runs.
      *  Defaults to 50% of the resolved fresh TTL. */
     staleTtl?: number | ((data: T) => number);
-    /** Max time one producer run may hold the lock before it self-expires. Default 10s. */
+    /** Lock TTL in ms; a live leader renews it automatically while producing, so this only bounds
+     *  how long a CRASHED leader blocks a takeover. Default 4s. */
     lockTimeoutMs?: number;
-    /** How many times a waiter polls for the winner's value before falling back. Default 40. */
+    /** How many times a waiter polls before falling back to a direct read. Default 80. */
     maxPollAttempts?: number;
-    /** Delay between waiter polls, ms. Default 50 (=> up to ~2s total wait by default). */
+    /** Delay between waiter polls, ms. Default 100 (=> up to ~8s total wait by default, long
+     *  enough to outlast a crashed leader's lock and a single takeover produce). */
     pollIntervalMs?: number;
 }
 
@@ -195,13 +218,54 @@ async function releaseLock(
 }
 
 /**
+ * We already hold the lock (`token`) for `lockKey`. Run the producer, keeping the lock alive with
+ * a heartbeat so a legitimately slow query never loses it (which would let a second worker start
+ * a duplicate produce), then store the result and release. On any exit the heartbeat is stopped
+ * and the lock released — so if THIS process crashes, the lock simply self-expires and one waiter
+ * takes over.
+ */
+async function produceUnderLock<T>(
+    redis: NonNullable<ReturnType<typeof getRedis>>,
+    dataKey: string,
+    lockKey: string,
+    token: string,
+    producer: () => Promise<T>,
+    opts: CachedFetchOptions<T>
+): Promise<T> {
+    const lockTtlMs = opts.lockTimeoutMs ?? DEFAULT_LOCK_TTL_MS;
+    // Renew at half the TTL so the lock is refreshed well before it can expire under us.
+    const renew = setInterval(() => {
+        redis
+            .eval(RENEW_LOCK_LUA, { keys: [lockKey], arguments: [token, String(lockTtlMs)] })
+            .catch((err) => logger.debug('[cachedFetch] lock renew failed:', err));
+    }, Math.max(500, Math.floor(lockTtlMs / 2)));
+    // Don't let the heartbeat keep the process alive on its own.
+    if (typeof renew.unref === 'function') renew.unref();
+
+    try {
+        const data = await producer();
+        await store(redis, dataKey, data, opts).catch((err) =>
+            logger.error('[cachedFetch] store error:', err)
+        );
+        return data;
+    } finally {
+        clearInterval(renew);
+        await releaseLock(redis, lockKey, token);
+    }
+}
+
+/**
  * Blocking single-flight: win the lock and compute, or wait for the winner's value.
  *
  * Each iteration reads the cache BEFORE trying the lock. That ordering matters:
  *  - a waiter returns the winner's value the instant it is stored (no redundant DB query), and
  *  - it only acquires the lock (and runs the producer) when the value is genuinely absent, i.e.
- *    the previous holder died before storing and its lock has since self-expired.
- * So the producer runs at most once per key at a time even across the wait path.
+ *    the previous holder died before storing and its (short-TTL) lock has since self-expired.
+ *
+ * Because a live leader renews its lock, the only way the lock frees while the value is still
+ * missing is a crashed leader. The poll window outlasts the lock TTL plus one takeover produce,
+ * so exactly ONE waiter then becomes the new leader, refills the cache, and everyone else reads
+ * that refilled value — a crashed leader costs ONE extra DB query, not a herd.
  */
 async function computeWithLock<T>(
     endpoint: string,
@@ -214,11 +278,9 @@ async function computeWithLock<T>(
     const redis = getRedis();
     if (!redis) return producer();
 
-    const lockTimeoutMs = opts.lockTimeoutMs ?? 10_000;
-    // Poll window must comfortably exceed producer latency (counts + find + signed-URL batch),
-    // otherwise waiters give up and stampede the DB. Default ~2s (40 x 50ms).
-    const maxAttempts = opts.maxPollAttempts ?? 40;
-    const interval = opts.pollIntervalMs ?? 50;
+    const lockTimeoutMs = opts.lockTimeoutMs ?? DEFAULT_LOCK_TTL_MS;
+    const maxAttempts = opts.maxPollAttempts ?? DEFAULT_MAX_POLL_ATTEMPTS;
+    const interval = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
     for (let i = 0; i < maxAttempts; i++) {
         // Prefer a value someone else already stored.
@@ -239,23 +301,16 @@ async function computeWithLock<T>(
         const token = await acquireLock(redis, lockKey, lockTimeoutMs);
         if (token) {
             logger.debug(`[cachedFetch] MISS ${endpoint} -> won lock, querying source`);
-            try {
-                const data = await producer();
-                await store(redis, dataKey, data, opts).catch((err) =>
-                    logger.error(`[cachedFetch] store error for ${endpoint}:`, err)
-                );
-                return data;
-            } finally {
-                await releaseLock(redis, lockKey, token);
-            }
+            return produceUnderLock(redis, dataKey, lockKey, token, producer, opts);
         }
 
         // Someone else holds the lock -> wait, then re-check the cache.
         await sleep(interval);
     }
 
-    // Winner is slower than the whole poll window (or a persistent failure). Serve from the source
-    // directly rather than stalling the request. The lock self-expires (PX), so the system recovers.
+    // Reached only if the lock stayed held AND no value appeared for the whole window — e.g. Redis
+    // itself is flaky, or the produce keeps failing. Serve from the source directly rather than
+    // stalling the request; the short-TTL lock self-expires so the system recovers on the next call.
     logger.warn(`[cachedFetch] MISS ${endpoint} -> waiter timed out after ${maxAttempts} polls, falling back to producer`);
     return producer();
 }
@@ -272,17 +327,14 @@ async function backgroundRefresh<T>(
     const redis = getRedis();
     if (!redis) return;
 
-    const lockTimeoutMs = opts.lockTimeoutMs ?? 10_000;
+    const lockTimeoutMs = opts.lockTimeoutMs ?? DEFAULT_LOCK_TTL_MS;
     const token = await acquireLock(redis, lockKey, lockTimeoutMs);
     if (!token) return; // another worker is already refreshing
 
     try {
-        const data = await producer();
-        await store(redis, dataKey, data, opts);
+        await produceUnderLock(redis, dataKey, lockKey, token, producer, opts);
         logger.debug(`[cachedFetch] background refresh done ${endpoint}`);
     } catch (err) {
         logger.error(`[cachedFetch] background refresh failed ${endpoint}:`, err);
-    } finally {
-        await releaseLock(redis, lockKey, token);
     }
 }
