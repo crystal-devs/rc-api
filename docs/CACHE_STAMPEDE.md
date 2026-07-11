@@ -98,28 +98,47 @@ against. It should be migrated to `SCAN` (or index sets) in a follow-up. Not bun
 
 ## CDN layer — CloudFront (for whoever owns the AWS infra)
 
-CloudFront is configured but currently **off** (`USE_CLOUDFRONT=false`; media is served via S3
-signed URLs today). When it is enabled, the CDN becomes the **first** line of stampede defense —
-if configured as follows:
+### Current status (verified 2026-07-11)
 
-1. **Enable Origin Shield** on the distribution, in the AWS region closest to the API origin.
-   Origin Shield adds a **regional caching tier** that **collapses concurrent cache misses into a
-   single origin request** — thousands of simultaneous edge misses become one fetch to our origin.
-   This is AWS's native answer to the thundering herd, one layer further out than the Redis lock.
+CloudFront **is enabled and live** — `USE_CLOUDFRONT=true`, domain `d3t4yv5dvx0a0c.cloudfront.net`,
+serving from the Mumbai (MAA51) edge with a valid trusted key group. `isCloudFrontEnabled()` returns
+true, so `file.util.ts` hands out **CloudFront signed URLs** for media.
 
-2. **Cache policy — cache on meaningful keys only.** Include just the query params that change the
-   response (`page`, `limit`, `status`, `quality`) in the cache key. Including volatile/irrelevant
-   params (or all of them) fragments the cache into unshareable entries and defeats collapsing.
+**Scope:** CloudFront fronts the media **files** (image/video bytes from the private S3 bucket
+`rc-media-bucket`, accessed via an Origin Access Control). It does **not** front the media-list API
+JSON — that is served directly by the API and is protected by the Redis stampede layer above.
 
-3. **Make the media-list responses cacheable.** Request collapsing only applies to responses
-   CloudFront is allowed to cache — set an explicit `Cache-Control: max-age=...` on the list
-   responses (they are currently uncacheable API JSON). Keep it short (e.g. 30–60s); the Redis
-   layer already handles longer-lived caching.
+Origin config confirmed correct: single S3 origin in `ap-south-1`, OAC-secured (bucket is private,
+only CloudFront can read it).
 
-### Caveat: per-user signed URLs
+### DEFERRED decision — Origin Shield (not enabled)
 
-Media-list responses currently embed **per-request S3 signed URLs**, which differ every time and
-make the JSON body effectively uncacheable at the CDN. This is fine for the Redis response cache
-(short TTL, shared within the TTL window) but must be resolved before CloudFront can cache these
-list responses — e.g. by returning stable CloudFront URLs (signed cookies / long-lived signed
-URLs) instead of per-request S3 presigned URLs. Tracked as a separate task.
+**Origin Shield is currently OFF** ("Origin Shield region: -" on the origin). It is a **paid** AWS
+feature and has been intentionally deferred for now.
+
+What it would do: add a **regional caching tier** in front of S3 that **collapses concurrent edge
+misses into a single origin request** — e.g. when many guests open the same gallery / the live wall
+at once and hit different edge locations, S3 sees one fetch instead of many. It's the CDN-layer
+equivalent of the Redis single-flight lock, one layer further out, and it's a good fit for this app's
+spiky "everyone views the same photos at once" pattern.
+
+**When ready to enable:** Origins → select the origin → Edit → Origin Shield: **Yes**, region **Asia
+Pacific (Mumbai) `ap-south-1`** (best practice = same region as the origin bucket) → Save.
+
+**Precondition — confirm images actually cache first.** Origin Shield only helps if the media files
+are cacheable at the edge. The app currently signs S3 GETs with `Cache-Control: private, max-age=...`
+([cloudfront-url.util.ts](../src/utils/cloudfront-url.util.ts)); the `private` directive can prevent
+edge caching. Before (or alongside) enabling Origin Shield, verify the edge cache-hit ratio in the
+distribution's Monitoring tab and check that header — a CDN that never caches gains nothing from
+Origin Shield.
+
+### If the media-list API JSON is ever put behind CloudFront (separate, larger task)
+
+Not the case today (only media files are on the CDN). If it were ever done:
+
+- **Cache on meaningful keys only** (`page`, `limit`, `status`, `quality`), not all query params.
+- **Make the responses cacheable** with an explicit short `Cache-Control: max-age` (30–60s).
+- **Caveat — per-user signed URLs:** the list responses embed per-request S3/CloudFront signed URLs
+  that differ every time, making the JSON body effectively uncacheable at the CDN. This would need
+  resolving first (e.g. stable CloudFront URLs via signed cookies) before CDN caching of the API
+  JSON is worthwhile.
