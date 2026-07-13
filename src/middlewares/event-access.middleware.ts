@@ -8,9 +8,17 @@ import { Event } from "@models/event.model";
 import { EventParticipant } from "@models/event-participants.model";
 import { EventInvitation } from "@models/event-invitations.model";
 import { User } from "@models/user.model";
+import { normalizeRole } from "@utils/role.utils";
+import bcrypt from "bcryptjs";
+import {
+    Action,
+    EventGuestSettings,
+    PolicyRole,
+    effectivePermissions
+} from "@configs/permissions.policy";
 
-// Clean role types
-export type EventRole = 'creator' | 'co_host' | 'moderator' | 'guest' | 'viewer' | 'authenticated_guest';
+// Clean role types — three canonical roles plus the synthetic token-access role
+export type EventRole = 'creator' | 'co_host' | 'guest' | 'authenticated_guest';
 
 // FIXED: Updated EventAccess interface to match actual usage
 export interface EventAccess {
@@ -37,6 +45,47 @@ export interface EventAccess {
     joinMethod?: string;
     joinedAt?: Date;
     lastActivity?: Date;
+    // RBAC (computed per request from ROLE_POLICY — see configs/permissions.policy.ts
+    // and rc-frontend/docs/RBAC_DESIGN.md). Attached by attachPolicy(); the
+    // legacy boolean fields above are deprecated in favour of can().
+    permissions?: ReadonlySet<Action>;
+    can?: (action: Action) => boolean;
+}
+
+/**
+ * Attach the computed permission set for this role (and, for guests, this
+ * event's host-configured toggles) to an access object. Single place where
+ * role → permissions is resolved on the request path.
+ */
+export function attachPolicy(
+    access: EventAccess,
+    guestSettings?: EventGuestSettings | null
+): EventAccess {
+    const permissions = effectivePermissions(access.role as PolicyRole, guestSettings);
+    access.permissions = permissions;
+    access.can = (action: Action) => permissions.has(action);
+
+    // Overwrite the legacy boolean fields from the computed policy so the
+    // stored per-participant permission blob (drift-prone, being removed —
+    // see rc-frontend/docs/RBAC_DESIGN.md Phase 3) no longer influences any
+    // request-path decision. Prefer access.can(action) in new code.
+    access.canView = permissions.has('event.view');
+    access.canUpload = permissions.has('media.upload');
+    access.canDownload = permissions.has('media.download');
+    access.canEdit = permissions.has('event.update');
+    access.canDelete = permissions.has('event.delete');
+    access.canManageParticipants = permissions.has('participants.manage');
+    access.canInviteOthers = permissions.has('participants.invite');
+    access.canModerateContent = permissions.has('media.approve');
+    access.canApproveContent = permissions.has('media.approve');
+    access.canExportData = permissions.has('data.export');
+    access.canManageSettings = permissions.has('event.update');
+    access.canViewAnalytics = permissions.has('analytics.view');
+    access.canTransferOwnership = permissions.has('event.transfer');
+    access.canManageGuests = permissions.has('participants.manage');
+    access.canManageContent = permissions.has('media.approve');
+
+    return access;
 }
 
 /**
@@ -134,7 +183,7 @@ export const eventAccessMiddleware = async (
         // FIXED: Proper boolean conversion and type safety
         req.eventAccess = {
             eventId: event_id,
-            role: participant.role as EventRole,
+            role: normalizeRole(participant.role),
             participantId: participant._id?.toString() || "",
 
             // Basic access permissions - ensure boolean values
@@ -179,6 +228,7 @@ export const eventAccessMiddleware = async (
                         ? participant.last_activity_at
                         : new Date()
         }
+        attachPolicy(req.eventAccess, event.permissions as EventGuestSettings);
         next();
     } catch (error: any) {
         console.error(`💥 [eventAccessMiddleware] Error: ${error.message}`);
@@ -195,27 +245,6 @@ export const eventAccessMiddleware = async (
             other: null
         });
     }
-};
-
-/**
- * Middleware to check if user can manage guests
- */
-export const requireGuestManagementAccess = async (
-    req: injectedRequest,
-    res: Response,
-    next: NextFunction
-) => {
-    if (!req.eventAccess?.canManageGuests) {
-        return sendResponse(res, {
-            status: false,
-            code: 403,
-            message: "You don't have permission to manage guests for this event",
-            data: null,
-            error: { message: "Guest management access required" },
-            other: null
-        });
-    }
-    next();
 };
 
 /**
@@ -243,7 +272,10 @@ export const tokenAccessMiddleware = async (
 
         // Find event by share_token
         const event = await Event.findOne({ share_token: token_id })
-            .select('_id title visibility share_settings permissions created_by')
+            // share_settings subfields listed explicitly: selecting the parent
+            // path together with +share_settings.password is a Mongo path
+            // collision; the PIN hash must be opted into for the compare below.
+            .select('_id title visibility permissions created_by share_settings.is_active share_settings.expires_at share_settings.has_password +share_settings.password')
             .lean();
 
         if (!event) {
@@ -286,7 +318,10 @@ export const tokenAccessMiddleware = async (
         }
 
         // Set clean event access
-        req.eventAccess = accessResult.eventAccess!;
+        req.eventAccess = attachPolicy(
+            accessResult.eventAccess!,
+            event.permissions as EventGuestSettings
+        );
         logger.info(`[tokenAccessMiddleware] Access granted: ${accessResult.eventAccess!.role} for token ${token_id}`);
 
         next();
@@ -335,7 +370,9 @@ function validateShareSettings(shareSettings: any, tokenId: string, eventId: str
 
 function checkEventPassword(shareSettings: any, providedPassword: any, tokenId: string): any {
     if (shareSettings?.password) {
-        if (!providedPassword || providedPassword !== shareSettings.password) {
+        const matches = typeof providedPassword === 'string'
+            && bcrypt.compareSync(providedPassword, shareSettings.password);
+        if (!matches) {
             logger.warn(`[tokenAccessMiddleware] Password required for token ${tokenId}`);
             return {
                 status: false,
@@ -543,7 +580,7 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                 success: true,
                 eventAccess: {
                     eventId,
-                    role: participant.role as EventRole,
+                    role: normalizeRole(participant.role),
                     participantId: participant._id?.toString(),
                     canView: true,
                     canUpload: true,

@@ -1,9 +1,10 @@
 import { EventParticipant } from '@models/event-participants.model';
 import { Event } from '@models/event.model';
+import { normalizeRole, isAdminRole, type CanonicalRole } from '@utils/role.utils';
 import mongoose from 'mongoose';
 
 export interface UserEventRole {
-    role: 'creator' | 'co_host' | 'moderator' | 'guest' | 'viewer' | null;
+    role: CanonicalRole | null;
     canAutoApprove: boolean;
 }
 
@@ -28,16 +29,12 @@ export const getUserEventRole = async (
             };
         }
 
-        // Auto-approve based on role or specific permission
-        const canAutoApprove =
-            (typeof participant.role === 'string' && ['creator', 'co_host'].includes(participant.role)) ||
-            Boolean(participant.permissions && (participant.permissions as any).can_approve_content);
+        // Auto-approve based on role (legacy values normalized) — the stored
+        // permission blob is deprecated and no longer consulted.
+        const canAutoApprove = isAdminRole(participant.role);
 
         return {
-            role: typeof participant.role === 'string' &&
-                  ['creator', 'co_host', 'moderator', 'guest', 'viewer'].includes(participant.role)
-                ? participant.role as UserEventRole['role']
-                : null,
+            role: normalizeRole(participant.role),
             canAutoApprove
         };
     } catch (error) {

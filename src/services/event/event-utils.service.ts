@@ -7,6 +7,7 @@ import { User } from "@models/user.model";
 import { ActivityLog } from "@models/activity-log.model";
 import { logger } from "@utils/logger";
 import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
 import type {
     EventStats,
     LocationData,
@@ -248,19 +249,35 @@ export const processPermissionsData = (permissionsData: any): PermissionsData =>
     return processed;
 };
 
-export const processShareSettingsData = (shareSettingsData: any): ShareSettingsData => {
+/**
+ * Returns dot-notation $set keys so partial updates never replace the whole
+ * share_settings subdocument (which would silently wipe the stored PIN hash).
+ *
+ * Password semantics: key absent = unchanged; null/'' = clear; string = set
+ * (stored as a bcrypt hash — the plaintext PIN is never persisted).
+ */
+export const processShareSettingsData = (shareSettingsData: any): Record<string, any> => {
     if (!shareSettingsData || typeof shareSettingsData !== 'object') {
-        return { is_active: true, password: null, expires_at: null };
+        return {};
     }
 
-    const processed: ShareSettingsData = {};
+    const processed: Record<string, any> = {};
 
     if (shareSettingsData.is_active !== undefined) {
-        processed.is_active = Boolean(shareSettingsData.is_active);
+        processed['share_settings.is_active'] = Boolean(shareSettingsData.is_active);
     }
 
     if (shareSettingsData.password !== undefined) {
-        processed.password = shareSettingsData.password ? shareSettingsData.password.trim() : null;
+        const raw = typeof shareSettingsData.password === 'string'
+            ? shareSettingsData.password.trim()
+            : null;
+        if (raw) {
+            processed['share_settings.password'] = bcrypt.hashSync(raw, 10);
+            processed['share_settings.has_password'] = true;
+        } else {
+            processed['share_settings.password'] = null;
+            processed['share_settings.has_password'] = false;
+        }
     }
 
     if (shareSettingsData.expires_at !== undefined) {
@@ -272,9 +289,9 @@ export const processShareSettingsData = (shareSettingsData: any): ShareSettingsD
             if (expiresDate <= new Date()) {
                 throw new Error('Expiration date must be in the future');
             }
-            processed.expires_at = expiresDate;
+            processed['share_settings.expires_at'] = expiresDate;
         } else {
-            processed.expires_at = null;
+            processed['share_settings.expires_at'] = null;
         }
     }
 
@@ -338,29 +355,6 @@ export const addCreatorAsParticipant = async (
     } catch (error) {
         logger.error(`[addCreatorAsParticipant] Error: ${error.message}`);
         throw error;
-    }
-};
-
-export const checkUpdatePermission = async (
-    eventId: string,
-    userId: string
-): Promise<boolean> => {
-    try {
-        const participant = await EventParticipant.findOne({
-            user_id: new mongoose.Types.ObjectId(userId),
-            event_id: new mongoose.Types.ObjectId(eventId),
-            status: 'active'
-        });
-
-        if (!participant) {
-            return false;
-        }
-
-        // Check if user has edit permissions based on their role and permissions
-        return participant.permissions?.can_edit_event === true;
-    } catch (error) {
-        logger.error('Error checking update permission:', error);
-        return false;
     }
 };
 

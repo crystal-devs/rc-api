@@ -18,10 +18,13 @@ import {
     updateMediaStatusService,
 } from "@services/media";
 import { GuestSessionHelper } from "@services/guest/guest-session-helper";
+import { getOrCreateDefaultAlbum } from "@services/album";
 import { softDeleteMediaService, bulkSoftDeleteMediaService } from "@services/media/media-management.service";
 import sharp from "sharp";
 import { queueImageProcessing } from "@services/upload/shared/queue-processing.service";
 import { unifiedProgressService } from "@services/websocket/unified-progress.service";
+import { uploadFileToS3, cleanupFile } from "@utils/file.util";
+import { getCachedSignedUrl } from "@utils/cloudfront-url.util";
 
 // Enhanced interface for authenticated requests
 interface AuthenticatedRequest extends Request {
@@ -148,6 +151,95 @@ export const getMediaByEventController: RequestHandler = async (
 };
 
 /**
+ * Get media counts by approval status for the moderation tabs
+ * (Published/Pending/Rejected/Hidden badges)
+ */
+export const getEventMediaCountsController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { eventId } = req.params;
+        const userId = req.user?._id?.toString();
+
+        if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid event ID',
+                data: null,
+                error: { message: 'A valid event ID is required' }
+            });
+            return;
+        }
+
+        const event = await Event.findById(eventId).select('created_by').lean();
+        if (!event) {
+            res.status(404).json({
+                status: false,
+                code: 404,
+                message: 'Event not found',
+                data: null,
+                error: { message: 'Event not found' }
+            });
+            return;
+        }
+
+        let isPrivilegedUser = event.created_by.toString() === userId;
+        if (!isPrivilegedUser && userId) {
+            const participant = await EventParticipant.findOne({
+                user_id: new mongoose.Types.ObjectId(userId),
+                event_id: new mongoose.Types.ObjectId(eventId),
+                role: 'co_host',
+                status: 'active'
+            }).lean();
+            isPrivilegedUser = !!participant;
+        }
+
+        if (!isPrivilegedUser) {
+            res.status(403).json({
+                status: false,
+                code: 403,
+                message: 'Only the event creator or co-hosts can view moderation counts',
+                data: null,
+                error: { message: 'Permission denied' }
+            });
+            return;
+        }
+
+        const grouped = await Media.aggregate([
+            { $match: { event_id: new mongoose.Types.ObjectId(eventId), deletedAt: null } },
+            { $group: { _id: '$approval.status', count: { $sum: 1 } } }
+        ]);
+
+        const byStatus: Record<string, number> = {};
+        grouped.forEach(g => { byStatus[g._id || 'pending'] = g.count; });
+
+        const approved = (byStatus.approved || 0) + (byStatus.auto_approved || 0);
+        const pending = byStatus.pending || 0;
+        const rejected = byStatus.rejected || 0;
+        const hidden = byStatus.hidden || 0;
+
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: 'Media counts retrieved successfully',
+            data: { approved, pending, rejected, hidden, total: approved + pending + rejected + hidden }
+        });
+    } catch (error: any) {
+        logger.error('❌ Error in getEventMediaCountsController:', error);
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Failed to get media counts',
+            data: null,
+            error: { message: error.message }
+        });
+    }
+};
+
+/**
  * Get media by album ID with enhanced variant support
  */
 export const getMediaByAlbumController: RequestHandler = async (
@@ -242,17 +334,7 @@ export const updateMediaStatusController: RequestHandler = async (
             return;
         }
 
-        // Block guest users
-        if (req.user?.role === 'guest') {
-            res.status(403).json({
-                status: false,
-                code: 403,
-                message: 'Guest users are not allowed to update media status',
-                data: null,
-                error: { message: 'Permission denied' }
-            });
-            return;
-        }
+        // Access gated by mediaAccessMiddleware + authorize('media.approve')
 
         if (!status) {
             res.status(400).json({
@@ -552,19 +634,7 @@ export const deleteMediaController: RequestHandler = async (
             return;
         }
 
-        // Block guest users
-        if (req.user?.role === 'guest') {
-            res.status(403).json({
-                status: false,
-                code: 403,
-                message: "Guest users are not allowed to delete media",
-                data: null,
-                error: { message: "Permission denied" },
-                other: null
-            });
-            return;
-        }
-
+        // Access gated by mediaAccessMiddleware + authorize('media.delete')
         logger.info('Deleting media:', {
             media_id,
             user_id: user_id.toString()
@@ -635,6 +705,23 @@ export const guestUploadMediaController: RequestHandler = async (
 
         GuestSessionHelper.setCookie(res, guestSession.session_id);
 
+        // Guest uploads always land in the event's default album
+        const albumResult = await getOrCreateDefaultAlbum(
+            event._id.toString(),
+            event.created_by.toString()
+        );
+        if (!albumResult.status || !albumResult.data) {
+            await cleanupFiles(files);
+            res.status(500).json({
+                status: false,
+                code: 500,
+                message: "Failed to resolve event album",
+                data: null
+            });
+            return;
+        }
+        const albumId = albumResult.data._id;
+
         // Process files
         const processPromises = files.map(async (file) => {
             const mediaId = new mongoose.Types.ObjectId();
@@ -648,6 +735,11 @@ export const guestUploadMediaController: RequestHandler = async (
             } catch (err) {
                 logger.warn(`Failed to get metadata for file ${file.originalname}`, err);
             }
+
+            // Upload the actual file to S3 — without this, the media record
+            // points at an object that doesn't exist and never renders
+            const s3Key = await uploadFileToS3(file, event._id.toString(), mediaId.toString());
+            await cleanupFile(file);
 
             // Initialize progress
             unifiedProgressService.initializeUpload(
@@ -663,32 +755,14 @@ export const guestUploadMediaController: RequestHandler = async (
                 upload_id: mediaId.toString(),
                 type: file.mimetype.startsWith('video') ? 'video' : 'image',
                 event_id: event._id,
-                album_id: new mongoose.Types.ObjectId(event.template), // Assuming template is mapped to album or default album logic needed. 
-                // Wait, event.template is a string? event.album_id?
-                // The event model has 'template' but maybe not 'album_id' directly linked?
-                // Usually events have a default album.
-                // Let's assume we can use a placeholder or find it.
-                // Re-checking Guest Upload Service usage: it used `event._id` and `albumId`.
-                // For now, I will use `event._id` as album_id if not present, OR look up standard album.
-                // But to be safe, I'll use `event._id` cast to ObjectId if no album_id.
-                // Actually, let's just use event._id for album_id as a fallback.
-                // Correct logic: Events usually have a one-to-one or one-to-many relationship.
-                // If I don't have album_id, I might fail validation if schema requires it.
-                // Schema says: album_id: { type: ObjectId, required: true }.
-                // `uploadMediaController` gets `album_id` from body.
-                // Guest upload doesn't pass `album_id`.
-                // I will assume `event._id` serves as `album_id` or find the default album.
-                // Let's create a new ObjectId for now or query? Querying is better.
-                // `const defaultAlbum = await Album.findOne({ event_id: event._id, is_default: true });`
-                // I don't have Album imported.
-                // I will use `event._id` as album_id for now as is common in some setups.
+                album_id: albumId,
                 owner: {
                     type: 'guest',
                     guest_id: guestSession._id.toString(),
                     display_name: guest_name || 'Guest'
                 },
                 original: {
-                    public_id: `upload_${mediaId.toString()}`,
+                    public_id: s3Key,
                     filename: file.originalname,
                     width,
                     height,
@@ -701,7 +775,7 @@ export const guestUploadMediaController: RequestHandler = async (
                     stage: 'uploading',
                     progress: 0
                 },
-                approval: { status: (event as any).default_guest_permissions?.upload ? 'approved' : 'pending' },
+                approval: { status: event.permissions?.require_approval ? 'pending' : 'auto_approved' },
                 deleteGroup: `event-${event._id.toString()}-upload-${mediaId.toString()}`
             });
 
@@ -712,7 +786,7 @@ export const guestUploadMediaController: RequestHandler = async (
                 file,
                 mediaId.toString(),
                 event._id.toString(),
-                event._id.toString(), // albumId
+                albumId.toString(),
                 {
                     userId: 'guest',
                     userName: guest_name || 'Guest',
@@ -725,9 +799,11 @@ export const guestUploadMediaController: RequestHandler = async (
                 await media.save();
             }
 
+            const originalUrl = await getCachedSignedUrl(s3Key);
+
             return {
                 mediaId: mediaId.toString(),
-                originalUrl: `https://dummy-s3-url/${media.original.public_id}`, // Placeholder until processed. Frontend needs handling or real URL.
+                originalUrl,
                 width,
                 height,
                 approval: media.approval
@@ -764,9 +840,10 @@ export const guestUploadMediaController: RequestHandler = async (
 };
 
 /**
- * 🚀 NEW: Cleanup multiple files utility (if not already available)
+ * Cleanup multiple local (multer temp) files
  */
 const cleanupFiles = async (files: Express.Multer.File[]): Promise<void> => {
+    await Promise.all(files.map(file => cleanupFile(file)));
 };
 
 /**

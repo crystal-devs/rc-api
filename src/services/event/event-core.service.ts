@@ -11,7 +11,10 @@ import { ServiceResponse } from "@services/media";
 import { EventType } from "./event.types";
 import { getPhotoWallWebSocketService } from "@services/photoWallWebSocketService";
 import { Media } from "@models/media.model";
+import { GuestSession } from "@models/guest-session.model";
+import { rekognitionService } from "@services/aws/rekognition.service";
 import { getEventDetailService } from "./event-query.service";
+import { normalizeRole, isAdminRole } from "@utils/role.utils";
 
 // Role permissions template
 const ROLE_PERMISSIONS = {
@@ -180,7 +183,9 @@ export const deleteEventService = async (
             status: 'active'
         }).session(session);
 
-        if (!userParticipant || !userParticipant.permissions.can_delete_event) {
+        // Role-based check (policy: event.delete is creator-only) — the stored
+        // permission blob is deprecated and no longer consulted.
+        if (!userParticipant || normalizeRole(userParticipant.role) !== 'creator') {
             await session.abortTransaction();
             return {
                 status: false,
@@ -233,6 +238,17 @@ export const deleteEventService = async (
         await session.commitTransaction();
         logger.info(`[deleteEventService] Successfully deleted event: ${eventId}`);
 
+        // DPDP: biometric data must not outlive the event. Runs after the
+        // commit (AWS calls can't join the Mongo transaction). A failure here
+        // only leaves an orphan AWS collection — logged for manual cleanup.
+        rekognitionService.deleteCollection(eventId)
+            .then(() => GuestSession.updateMany(
+                { event_id: new mongoose.Types.ObjectId(eventId) },
+                { $set: { aws_face_id: null, selfie_url: null, 'face_consent.withdrawn_at': new Date() } }
+            ))
+            .then(() => logger.info(`[deleteEventService] Face collection + guest face data cleared for event ${eventId}`))
+            .catch((err) => logger.error(`[deleteEventService] Face data cleanup failed for event ${eventId}:`, err));
+
         return {
             status: true,
             code: 200,
@@ -277,7 +293,9 @@ export const updateEventService = async (
             status: 'active'
         }).session(session);
 
-        if (!userParticipant || !userParticipant.permissions.can_edit_event) {
+        // Role-based check (policy: event.update = creator or co_host) — the
+        // stored permission blob is deprecated and no longer consulted.
+        if (!userParticipant || !isAdminRole(userParticipant.role)) {
             await session.abortTransaction();
             return {
                 status: false,

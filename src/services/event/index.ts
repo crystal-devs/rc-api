@@ -22,7 +22,6 @@ export {
     processShareSettingsData,
     validateCoHosts,
     addCreatorAsParticipant,
-    checkUpdatePermission,
     getUserEventStats,
     recordEventActivity,
     handleVisibilityTransition

@@ -8,6 +8,7 @@ import { EventInvitation } from "@models/event-invitations.model";
 import { ActivityLog } from "@models/activity-log.model";
 import mongoose from "mongoose";
 import { logger } from "@utils/logger";
+import { isAdminRole } from "@utils/role.utils";
 
 // Role permissions template
 const ROLE_PERMISSIONS = {
@@ -66,15 +67,9 @@ export const checkParticipantManagementPermission = async (
             status: 'active'
         });
 
-        console.log(participant, userId, eventId, 'permissionsss');
-        if (
-            participant &&
-            participant.permissions &&
-            typeof participant.permissions.can_manage_participants === 'boolean'
-        ) {
-            return participant.permissions.can_manage_participants;
-        }
-        return false;
+        // Role-based check (policy: participants.manage = creator or co_host) —
+        // the stored permission blob is deprecated and no longer consulted.
+        return !!participant && isAdminRole(participant.role);
     } catch (error) {
         logger.error('Error checking participant management permission:', error);
         return false;

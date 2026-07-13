@@ -9,7 +9,6 @@ import { sendResponse } from "@utils/express.util";
 import { Event, EventType } from "@models/event.model";
 import {
     addCreatorAsParticipant,
-    checkUpdatePermission,
     createEventService,
     deleteEventService,
     getEventDetailService,
@@ -19,6 +18,7 @@ import {
 } from "@services/event";
 import { createDefaultAlbumForEvent } from "@services/album";
 import { eventCacheService } from "@services/cache/event-cache.service";
+import { getTemplateDefaults } from "@services/event/template-defaults";
 
 interface InjectedRequest extends Request {
     user: {
@@ -60,6 +60,9 @@ interface EventCreationInput {
         password?: string;
         expires_at?: string | Date;
     };
+    face_recognition?: {
+        enabled?: boolean;
+    };
     co_hosts?: Array<{
         user_id: string | mongoose.Types.ObjectId;
         invited_by: string | mongoose.Types.ObjectId;
@@ -81,7 +84,7 @@ export const createEventController = async (req: injectedRequest, res: Response,
             throw new Error('User authentication required');
         }
 
-        const { title, template, start_date, end_date } = trimObject(req.body) as EventCreationInput;
+        const { title, template, start_date, end_date, face_recognition } = trimObject(req.body) as EventCreationInput;
 
         // Validation
         if (!title?.trim()) throw new Error('Event title is required');
@@ -100,16 +103,25 @@ export const createEventController = async (req: injectedRequest, res: Response,
         if (startDate && endDate && startDate >= endDate)
             throw new Error('End date must be after start date');
 
-        // Prepare event data (minimal, relying on schema defaults)
+        // Template-driven defaults (Phase 1.1): the server applies visibility
+        // and permissions per template so clients can't skip policy. Biometrics
+        // (face_recognition) are enabled only on an explicit boolean opt-in.
+        const templateDefaults = getTemplateDefaults(template);
+
         const eventData: Partial<EventType> = {
             title: title.trim(),
             template,
             created_by: new mongoose.Types.ObjectId(req.user._id), // Set created_by explicitly
             start_date: startDate,
             end_date: endDate,
-            // Other fields (description, timezone, location, cover_image, visibility, permissions, share_settings, co_hosts, stats)
+            visibility: templateDefaults.visibility,
+            permissions: templateDefaults.permissions,
+            face_recognition: {
+                enabled: face_recognition?.enabled === true,
+            },
+            // Other fields (description, timezone, location, cover_image, share_settings, co_hosts, stats)
             // are omitted to use schema defaults
-        };
+        } as Partial<EventType>;
 
         const response = await createEventService(eventData);
 
@@ -219,6 +231,36 @@ export const getEventController = async (req: injectedRequest, res: Response, ne
     }
 };
 
+/**
+ * GET /event/:event_id/my-access
+ * The client's single source of truth for role-based UI. Returns the caller's
+ * role and computed permission set for this event — resolved by the exact same
+ * policy the authorize() middleware enforces, so client and server can never
+ * disagree. See rc-frontend/docs/RBAC_DESIGN.md.
+ */
+export const getMyAccessController = async (req: injectedRequest, res: Response): Promise<void> => {
+    const access = req.eventAccess;
+
+    if (!access) {
+        res.status(500).json({
+            status: false,
+            message: 'Access context missing — eventAccessMiddleware must run first',
+            data: null
+        });
+        return;
+    }
+
+    res.status(200).json({
+        status: true,
+        message: 'Access resolved',
+        data: {
+            event_id: access.eventId,
+            role: access.role,
+            permissions: Array.from(access.permissions ?? [])
+        }
+    });
+};
+
 export const updateEventController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
         const { event_id } = trimObject(req.params);
@@ -229,27 +271,6 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             res.status(400).json({
                 status: false,
                 message: 'Valid event ID is required',
-                data: null
-            });
-            return;
-        }
-
-        // Block guest users
-        if ((req.user as any)?.role === 'guest') {
-            res.status(403).json({
-                status: false,
-                message: "Guests are not allowed to update events",
-                data: null
-            });
-            return;
-        }
-
-        // Validate update permissions
-        const hasPermission = await checkUpdatePermission(event_id, userId);
-        if (!hasPermission) {
-            res.status(403).json({
-                status: false,
-                message: "You don't have permission to update this event",
                 data: null
             });
             return;
@@ -271,6 +292,27 @@ export const updateEventController = async (req: injectedRequest, res: Response,
 
         // Process and validate update data
         const currentEvent = await Event.findById(event_id);
+
+        // Route-level authorize('event.update') has already gated this request.
+        // Closing/reopening the event rides through this payload as
+        // share_settings.is_active — that field is creator-only (product
+        // decision 2026-07-11). Clients send it on every save, so only gate
+        // when the value actually flips.
+        if (
+            updateData?.share_settings &&
+            'is_active' in updateData.share_settings &&
+            currentEvent &&
+            Boolean(currentEvent.share_settings?.is_active) !== Boolean(updateData.share_settings.is_active) &&
+            !req.eventAccess?.can?.('event.archive')
+        ) {
+            res.status(403).json({
+                status: false,
+                message: "Only the event creator can close or reopen the event",
+                data: null,
+                error: { message: "Requires 'event.archive' permission", code: 'FORBIDDEN', action: 'event.archive' }
+            });
+            return;
+        }
         const processedUpdateData = await processEventUpdateData(updateData, currentEvent);
         const response = await updateEventService(event_id, processedUpdateData, userId);
 
@@ -308,16 +350,8 @@ export const deleteEventController = async (req: injectedRequest, res: Response,
             throw new Error("Valid event ID is required");
         }
 
-        // Block guest users
-        if ((req.user as any)?.role === 'guest') {
-            res.status(403).json({
-                status: false,
-                message: "Guests are not allowed to delete events",
-                data: null
-            });
-            return;
-        }
-
+        // Route-level authorize('event.delete') gates this to the creator;
+        // deleteEventService keeps its own owner check as defense in depth.
         const response = await deleteEventService(event_id, userId);
         // Invalidate caches regardless of response status to be safe
         try {

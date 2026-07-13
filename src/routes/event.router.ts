@@ -8,8 +8,8 @@ import { getEventGuestSessionsController, revokeGuestSessionController } from "@
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
 import { checkEventLimitMiddleware } from "@middlewares/subscription-limit.middleware";
 import { eventAccessMiddleware } from "@middlewares/event-access.middleware";
+import { authorize } from "@middlewares/authorize.middleware";
 import { getEventParticipantsController } from "@controllers/participant.controller";
-import { requireInviteAccess, requireParticipantManagementAccess } from "@middlewares/participant-access.middleware";
 
 const eventRouter = express.Router();
 
@@ -23,6 +23,9 @@ eventRouter.get("/", eventController.getUserEventsController);
 // Get specific event details
 eventRouter.get("/:event_id", eventAccessMiddleware, eventController.getEventController);
 
+// Caller's role + computed permissions for this event (drives client-side RBAC UI)
+eventRouter.get("/:event_id/my-access", eventAccessMiddleware, eventController.getMyAccessController);
+
 // Create new event
 eventRouter.post("/",
     checkEventLimitMiddleware as RequestHandler,
@@ -32,12 +35,14 @@ eventRouter.post("/",
 // Update event (only owner/co-hosts)
 eventRouter.patch("/:event_id",
     eventAccessMiddleware,
+    authorize('event.update'),
     eventController.updateEventController
 );
 
 // Delete event (only owner)
 eventRouter.delete("/:event_id",
     eventAccessMiddleware,
+    authorize('event.delete'),
     eventController.deleteEventController
 );
 
@@ -55,12 +60,14 @@ eventRouter.get("/discover/featured", eventController.getFeaturedEventsControlle
 // Get comprehensive event statistics
 eventRouter.get("/:event_id/analytics",
     eventAccessMiddleware,
+    authorize('analytics.view'),
     eventController.getEventAnalyticsController
 );
 
 // Get real-time activity feed
 eventRouter.get("/:event_id/activity",
     eventAccessMiddleware,
+    authorize('analytics.view'),
     eventController.getEventActivityController
 );
 
@@ -68,42 +75,42 @@ eventRouter.get("/:event_id/activity",
 // Get event participants with filtering and pagination
 eventRouter.get("/:event_id/participants",
     eventAccessMiddleware,
-    requireParticipantManagementAccess,
+    authorize('participants.manage'),
     participantController.getEventParticipantsController
 );
 
 // Invite participants (bulk support)
 eventRouter.post("/:event_id/participants/invite",
     eventAccessMiddleware,
-    requireInviteAccess,
+    authorize('participants.invite'),
     participantController.inviteParticipantsController
 );
 
 // Update participant permissions/role
 eventRouter.patch("/:event_id/participants/:participant_id",
     eventAccessMiddleware,
-    requireParticipantManagementAccess,
+    authorize('participants.update'),
     participantController.updateParticipantController
 );
 
 // Remove participant
 eventRouter.delete("/:event_id/participants/:participant_id",
     eventAccessMiddleware,
-    requireParticipantManagementAccess,
+    authorize('participants.remove'),
     participantController.removeParticipantController
 );
 
 // Get participant activity logs
 eventRouter.get("/:event_id/participants/:participant_id/activity",
     eventAccessMiddleware,
-    requireParticipantManagementAccess,
+    authorize('participants.manage'),
     participantController.getParticipantActivityController
 );
 
 // Get participant statistics
 eventRouter.get("/:event_id/participants/:participant_id/stats",
     eventAccessMiddleware,
-    requireParticipantManagementAccess,
+    authorize('participants.manage'),
     participantController.getParticipantStatsController
 );
 
@@ -111,21 +118,21 @@ eventRouter.get("/:event_id/participants/:participant_id/stats",
 // Send invitations (simple format)
 eventRouter.post("/:event_id/invitations",
     eventAccessMiddleware,
-    requireInviteAccess,
+    authorize('participants.invite'),
     invitationController.sendInvitationsController
 );
 
 // Get event invitations
 eventRouter.get("/:event_id/invitations",
     eventAccessMiddleware,
-    requireParticipantManagementAccess,
+    authorize('participants.manage'),
     invitationController.getEventInvitationsController
 );
 
 // Revoke invitation
 eventRouter.delete("/:event_id/invitations/:invitation_id",
     eventAccessMiddleware,
-    requireParticipantManagementAccess,
+    authorize('participants.invite'),
     invitationController.revokeInvitationController
 );
 
@@ -133,12 +140,14 @@ eventRouter.delete("/:event_id/invitations/:invitation_id",
 // Get event albums
 eventRouter.get("/:event_id/albums",
     eventAccessMiddleware,
+    authorize('event.view'),
     eventController.getEventAlbumsController
 );
 
 // Create album within event
 eventRouter.post("/:event_id/albums",
     eventAccessMiddleware,
+    authorize('album.manage'),
     eventController.createEventAlbumController
 );
 
@@ -146,18 +155,21 @@ eventRouter.post("/:event_id/albums",
 // Update privacy settings
 eventRouter.patch("/:event_id/privacy",
     eventAccessMiddleware,
+    authorize('event.update'),
     eventController.updateEventPrivacyController
 );
 
 // Update default guest permissions
 eventRouter.patch("/:event_id/permissions",
     eventAccessMiddleware,
+    authorize('event.update'),
     eventController.updateDefaultPermissionsController
 );
 
-// Archive/Unarchive event
+// Archive/Unarchive event — creator only (product decision 2026-07-11)
 eventRouter.patch("/:event_id/archive",
     eventAccessMiddleware,
+    authorize('event.archive'),
     eventController.toggleEventArchiveController
 );
 
@@ -166,19 +178,22 @@ eventRouter.patch("/:event_id/archive",
 // ✅ FIXED: Complete co-host routes
 // Create co-host invite link
 eventRouter.post('/:event_id/cohost-invite',
-    authMiddleware,
+    eventAccessMiddleware,
+    authorize('cohost.invite'),
     cohostController.createCoHostInviteController
 );
 
 // Get co-host invite details
 eventRouter.get('/:event_id/cohost-invite',
-    authMiddleware,
+    eventAccessMiddleware,
+    authorize('cohost.invite'),
     cohostController.getCoHostInviteController
 );
 
 // Revoke co-host invite
 eventRouter.delete('/:event_id/cohost-invite/:invitation_id',
-    authMiddleware,
+    eventAccessMiddleware,
+    authorize('cohost.invite'),
     cohostController.revokeCoHostInviteController
 );
 
@@ -190,13 +205,16 @@ eventRouter.post('/join-cohost/:token',
 
 // Get all co-hosts for an event
 eventRouter.get('/:event_id/cohosts',
-    authMiddleware,
+    eventAccessMiddleware,
+    authorize('participants.manage'),
     cohostController.getEventCoHostsController
 );
 
-// Manage specific co-host (approve, reject, remove, block, unblock)
+// Manage specific co-host (approve, reject, remove, block, unblock) — creator only.
+// The service had NO caller check at all before this gate was added.
 eventRouter.patch('/:event_id/cohosts/:user_id',
-    authMiddleware,
+    eventAccessMiddleware,
+    authorize('cohost.manage'),
     cohostController.manageCoHostController
 );
 
@@ -204,14 +222,14 @@ eventRouter.patch('/:event_id/cohosts/:user_id',
 // Get active guest sessions (Host Dashboard)
 eventRouter.get("/:eventId/guest-sessions",
     eventAccessMiddleware,
-    requireParticipantManagementAccess,
+    authorize('participants.manage'),
     getEventGuestSessionsController as unknown as express.RequestHandler
 );
 
 // Revoke guest session
 eventRouter.patch("/:eventId/guest-sessions/:sessionId/revoke",
     eventAccessMiddleware,
-    requireParticipantManagementAccess,
+    authorize('participants.remove'),
     revokeGuestSessionController as unknown as express.RequestHandler
 );
 
