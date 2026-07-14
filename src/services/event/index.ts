@@ -32,6 +32,14 @@ export {
     processEventUpdateData
 } from './event-management.service';
 
+export {
+    listSubEvents,
+    addSubEvent,
+    updateSubEvent,
+    deleteSubEvent,
+    isValidSubEventForEvent
+} from './sub-event.service';
+
 // Export types
 export type {
     EventCreationData,

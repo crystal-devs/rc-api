@@ -73,6 +73,21 @@ const permissionsSchema = new mongoose.Schema({
     max_file_size_mb: { type: Number }
 }, { _id: false });
 
+// Sub-events: the India-native multi-function structure (e.g. haldi / sangeet /
+// wedding / reception). Embedded on the event because functions are bounded
+// (<=~10), always fetched with the event, and avoid N+1 lookups. Media links to
+// a function via media.sub_event_id (null = the whole event / main gallery), so
+// existing single-function events are untouched and need no migration.
+// Progressive disclosure: only surfaced for templates that need it (e.g.
+// wedding). See docs/ROADMAP.md Phase 1.
+const subEventSchema = new mongoose.Schema({
+    _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
+    name: { type: String, required: true, trim: true, maxlength: 80 },
+    date: { type: Date, default: null },
+    // Display order in the function timeline; ties broken by date.
+    order: { type: Number, default: 0 },
+});
+
 // Main event schema
 const eventSchema = new mongoose.Schema({
     _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
@@ -105,6 +120,10 @@ const eventSchema = new mongoose.Schema({
         enum: ['wedding', 'birthday', 'concert', 'corporate', 'vacation', 'custom'],
         default: 'custom',
     },
+
+    // Multi-function structure (sub-events). Empty by default so casual events
+    // (birthday/trip) never see it. See docs/ROADMAP.md Phase 1.
+    sub_events: { type: [subEventSchema], default: [] },
 
     // DPDP: biometric processing is opt-in per event (default OFF). Face
     // indexing on upload, face login, and selfie search all require this.

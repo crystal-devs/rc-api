@@ -173,6 +173,33 @@ eventRouter.patch("/:event_id/archive",
     eventController.toggleEventArchiveController
 );
 
+// ============= SUB-EVENTS (multi-function structure) =============
+// List functions for an event (any participant may view)
+eventRouter.get("/:event_id/sub-events",
+    eventAccessMiddleware,
+    authorize('event.view'),
+    eventController.getSubEventsController
+);
+
+// Create / update / delete a function — hosts only (creator + co-host)
+eventRouter.post("/:event_id/sub-events",
+    eventAccessMiddleware,
+    authorize('event.update'),
+    eventController.createSubEventController
+);
+
+eventRouter.patch("/:event_id/sub-events/:sub_event_id",
+    eventAccessMiddleware,
+    authorize('event.update'),
+    eventController.updateSubEventController
+);
+
+eventRouter.delete("/:event_id/sub-events/:sub_event_id",
+    eventAccessMiddleware,
+    authorize('event.update'),
+    eventController.deleteSubEventController
+);
+
 // ============= CO-HOST MANAGEMENT =============
 
 // ✅ FIXED: Complete co-host routes

@@ -15,7 +15,11 @@ import {
     getUserEventsService,
     processEventUpdateData,
     updateEventService,
-    toggleEventArchiveService
+    toggleEventArchiveService,
+    listSubEvents,
+    addSubEvent,
+    updateSubEvent,
+    deleteSubEvent
 } from "@services/event";
 import { createDefaultAlbumForEvent } from "@services/album";
 import { eventCacheService } from "@services/cache/event-cache.service";
@@ -563,6 +567,75 @@ export const toggleEventArchiveController = async (req: injectedRequest, res: Re
                 console.warn('Cache invalidation failed after archive toggle:', e);
             }
         }
+        sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ============= SUB-EVENTS (multi-function structure) =============
+
+const invalidateEventCachesQuietly = async (eventId: string, userId: string) => {
+    try {
+        await Promise.all([
+            eventCacheService.invalidateEventCaches(eventId),
+            eventCacheService.invalidateUserCaches(userId)
+        ]);
+    } catch (e) {
+        console.warn('Cache invalidation failed after sub-event change:', e);
+    }
+};
+
+export const getSubEventsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+        sendResponse(res, await listSubEvents(event_id));
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const createSubEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        const { name, date, order } = trimObject(req.body);
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+        const response = await addSubEvent(event_id, { name, date, order });
+        if (response.status) await invalidateEventCachesQuietly(event_id, req.user._id.toString());
+        sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const updateSubEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id, sub_event_id } = trimObject(req.params);
+        const { name, date, order } = trimObject(req.body);
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+        const response = await updateSubEvent(event_id, sub_event_id, { name, date, order });
+        if (response.status) await invalidateEventCachesQuietly(event_id, req.user._id.toString());
+        sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const deleteSubEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id, sub_event_id } = trimObject(req.params);
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+        const response = await deleteSubEvent(event_id, sub_event_id);
+        if (response.status) await invalidateEventCachesQuietly(event_id, req.user._id.toString());
         sendResponse(res, response);
     } catch (error) {
         next(error);
