@@ -7,6 +7,7 @@ import { injectedRequest } from "types/injected-types";
 import mongoose from "mongoose";
 import { logger } from "@utils/logger";
 import { sendResponse, handleControllerError } from "@utils/express.util";
+import { normalizeRole } from "@utils/role.utils";
 import * as participantService from "@services/participant.service";
 
 // Input validation helper
@@ -133,9 +134,13 @@ export const inviteParticipantsController = async (
             if (invite.role && !['co_host', 'moderator', 'guest', 'viewer'].includes(invite.role)) {
                 return sendResponse(res, {
                     status: false,
-                    message: 'Invalid role. Use: co_host, moderator, guest, viewer',
+                    message: 'Invalid role. Use: co_host, guest',
                     data: null
                 });
+            }
+            // Normalize legacy values (moderator -> co_host, viewer -> guest)
+            if (invite.role) {
+                invite.role = normalizeRole(invite.role);
             }
         }
 
@@ -192,11 +197,12 @@ export const updateParticipantController = async (
             if (!['co_host', 'moderator', 'guest', 'viewer'].includes(role)) {
                 return sendResponse(res, {
                     status: false,
-                    message: 'Invalid role. Use: co_host, moderator, guest, viewer',
+                    message: 'Invalid role. Use: co_host, guest',
                     data: null
                 });
             }
-            updates.role = role;
+            // Normalize legacy values (moderator -> co_host, viewer -> guest)
+            updates.role = normalizeRole(role);
         }
 
         if (permissions) {

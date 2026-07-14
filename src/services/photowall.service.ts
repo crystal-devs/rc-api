@@ -27,7 +27,7 @@ export const getPhotoWallDisplayService = async (
   try {
     // Get event with photowall settings in single query
     const event = await Event.findOne({ share_token: shareToken })
-      .select('_id title photowall_settings share_settings')
+      .select('_id title photowall_settings share_settings.is_active share_settings.expires_at share_settings.has_password')
       .lean();
 
     if (!event || !event.share_settings?.is_active) {

@@ -1,5 +1,6 @@
 import mongoose, { InferSchemaType } from "mongoose";
 import { MODEL_NAMES } from "./names";
+import { normalizeRole } from "../utils/role.utils";
 
 // Separate schema for role-based permissions template
 const rolePermissionsSchema = new mongoose.Schema({
@@ -61,10 +62,11 @@ const eventParticipantSchema = new mongoose.Schema({
         required: true
     },
 
-    // Hierarchical role system
+    // Hierarchical role system — exactly three roles (see utils/role.utils.ts).
+    // Legacy values (moderator/viewer) are migrated by scripts/normalize-participant-roles.ts
     role: {
         type: String,
-        enum: ['creator', 'co_host', 'moderator', 'guest', 'viewer'],
+        enum: ['creator', 'co_host', 'guest'],
         default: 'guest',
         required: true
     },
@@ -217,21 +219,6 @@ function getDefaultPermissions(role: string) {
             can_view_analytics: true,
             can_manage_settings: false
         },
-        moderator: {
-            can_view: true,
-            can_upload: true,
-            can_download: true,
-            can_invite_others: false,
-            can_moderate_content: true,
-            can_manage_participants: false,
-            can_edit_event: false,
-            can_delete_event: false,
-            can_transfer_ownership: false,
-            can_approve_content: true,
-            can_export_data: false,
-            can_view_analytics: false,
-            can_manage_settings: false
-        },
         guest: {
             can_view: true,
             can_upload: true,
@@ -247,24 +234,9 @@ function getDefaultPermissions(role: string) {
             can_view_analytics: false,
             can_manage_settings: false
         },
-        viewer: {
-            can_view: true,
-            can_upload: false,
-            can_download: false,
-            can_invite_others: false,
-            can_moderate_content: false,
-            can_manage_participants: false,
-            can_edit_event: false,
-            can_delete_event: false,
-            can_transfer_ownership: false,
-            can_approve_content: false,
-            can_export_data: false,
-            can_view_analytics: false,
-            can_manage_settings: false
-        }
     } as const;
 
-    return permissionSets[role as keyof typeof permissionSets] || permissionSets.guest;
+    return permissionSets[normalizeRole(role) as keyof typeof permissionSets] || permissionSets.guest;
 }
 
 // Pre-save middleware for permission management

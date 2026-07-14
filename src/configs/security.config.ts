@@ -92,7 +92,29 @@ export const authRateLimiter = rateLimit({
   }
 });
 
-/** 
+/**
+ * 🚦 Face search / face login rate limiter
+ * - These endpoints accept arbitrary image buffers and run AWS Rekognition
+ *   searches against an event's face collection — effectively a biometric
+ *   oracle, and each call costs money. Throttle hard.
+ */
+export const faceSearchRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // 20 face searches / logins per 15 minutes per device
+  message: {
+    error: "Too many face search attempts. Please wait a few minutes and try again.",
+    code: "FACE_SEARCH_RATE_LIMIT_EXCEEDED",
+    retryAfter: 900
+  },
+  headers: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    return `${req.ip}-${req.get('User-Agent')?.substring(0, 50) || 'unknown'}`;
+  }
+});
+
+/**
  * 🚦 NEW: Media-specific rate limiter
  * - More generous limits for authenticated media operations
  * - Handles bulk admin operations better

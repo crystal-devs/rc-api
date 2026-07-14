@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import fs from 'fs';
 import { rekognitionService } from '@services/aws/rekognition.service';
 import { Media } from '@models/media.model';
+import { Event } from '@models/event.model';
 import { logger } from '@utils/logger';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -47,6 +48,16 @@ export const searchFacesController = async (
             return res.status(400).json({
                 status: false,
                 message: 'Selfie image is required',
+            });
+        }
+
+        // DPDP gate: selfie search is biometric processing — only allowed on
+        // events whose host opted in to face recognition.
+        const event = await Event.findById(eventId).select('face_recognition.enabled').lean();
+        if (!event?.face_recognition?.enabled) {
+            return res.status(403).json({
+                status: false,
+                message: 'Face features are not enabled for this event',
             });
         }
 

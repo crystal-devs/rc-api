@@ -265,7 +265,7 @@ export const getGuestMediaService = async (
         // Find event by share token
         const event = await Event.findOne({
             share_token: shareToken
-        }).select('_id title permissions share_settings').lean();
+        }).select('_id title permissions share_settings.is_active share_settings.expires_at share_settings.has_password').lean();
 
         if (!event) {
             logger.warn(`❌ Event not found for share token: ${shareToken}`);
@@ -299,11 +299,10 @@ export const getGuestMediaService = async (
             };
         }
 
-        // Query only approved photos for guests
+        // Query approved media for guests (photos and videos)
         const query = {
             event_id: event._id,
-            'approval.status': { $in: ['approved', 'auto_approved'] },
-            type: 'image'
+            'approval.status': { $in: ['approved', 'auto_approved'] }
         };
 
         // Get total count

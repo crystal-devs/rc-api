@@ -2,10 +2,21 @@
 
 import { logger } from './logger';
 import { getCachedSignedUrl, getCachedSignedUrlsBatch } from './cloudfront-url.util';
+import { keys } from '@configs/dotenv.config';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import fs from 'fs';
 import { promisify } from 'util';
 
 const unlinkAsync = promisify(fs.unlink);
+const readFileAsync = promisify(fs.readFile);
+
+const s3Client = new S3Client({
+    region: keys.awsRegion as string,
+    credentials: {
+        accessKeyId: keys.awsAccessKeyId as string,
+        secretAccessKey: keys.awsSecretAccessKey as string,
+    },
+});
 
 export const cleanupFile = async (file: Express.Multer.File | { path: string }) => {
     if (!file || !file.path) return;
@@ -14,6 +25,31 @@ export const cleanupFile = async (file: Express.Multer.File | { path: string }) 
     } catch (error) {
         logger.warn(`Failed to delete temporary file: ${file.path}`, error);
     }
+};
+
+/**
+ * Upload a locally-buffered (multer) file to S3 and return the object key,
+ * using the same `events/{eventId}/original/{id}.{ext}` convention as the
+ * presigned-URL upload flow.
+ */
+export const uploadFileToS3 = async (
+    file: Express.Multer.File,
+    eventId: string,
+    uploadId: string
+): Promise<string> => {
+    const extension = file.originalname.split('.').pop() || (file.mimetype.split('/')[1] || 'jpg');
+    const key = `events/${eventId}/original/${uploadId}.${extension}`;
+    const body = await readFileAsync(file.path);
+
+    await s3Client.send(new PutObjectCommand({
+        Bucket: keys.s3BucketName as string,
+        Key: key,
+        Body: body,
+        ContentType: file.mimetype,
+        CacheControl: 'max-age=31536000, immutable',
+    }));
+
+    return key;
 };
 
 /**
@@ -175,18 +211,26 @@ async function getResponsiveImageUrlsWithCache(
     // Unified Schema Support (variants.images OR variants.thumbnails for videos)
     if (mediaItem.variants) {
         // VIDEO HANDLING
-        if (mediaItem.type === 'video' && mediaItem.variants.thumbnails) {
+        if (mediaItem.type === 'video') {
             const thumbs = mediaItem.variants.thumbnails;
 
             // Prefer poster for static grid, preview for hover
-            const posterUrl = thumbs.poster?.public_id ? (urlCache.get(thumbs.poster.public_id) || await getCachedSignedUrl(thumbs.poster.public_id)) : null;
-            const previewUrl = thumbs.preview?.public_id ? (urlCache.get(thumbs.preview.public_id) || await getCachedSignedUrl(thumbs.preview.public_id)) : null;
+            const posterUrl = thumbs?.poster?.public_id ? (urlCache.get(thumbs.poster.public_id) || await getCachedSignedUrl(thumbs.poster.public_id)) : null;
+            const previewUrl = thumbs?.preview?.public_id ? (urlCache.get(thumbs.preview.public_id) || await getCachedSignedUrl(thumbs.preview.public_id)) : null;
+
+            // Playback prefers the compressed 720p transcode once processing has
+            // produced one — the raw original (often 4K/HEVC phone camera output)
+            // is a fallback only while processing is still in flight.
+            const compressedVariant = mediaItem.variants.videos?.p720 || mediaItem.variants.videos?.p1080 || mediaItem.variants.videos?.p360;
+            const playbackUrl = compressedVariant?.public_id
+                ? (urlCache.get(compressedVariant.public_id) || await getCachedSignedUrl(compressedVariant.public_id))
+                : originalUrl;
 
             return {
                 thumbnail: posterUrl || previewUrl || originalUrl, // Lightweight preview
                 display: posterUrl || previewUrl || originalUrl,   // Lightweight preview
-                full: originalUrl, // Click to play full video
-                original: originalUrl,
+                full: playbackUrl, // Compressed transcode when ready, else raw original
+                original: originalUrl, // Always the true raw upload (download original)
             };
         }
 

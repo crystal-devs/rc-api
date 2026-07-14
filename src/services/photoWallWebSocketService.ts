@@ -108,7 +108,7 @@ export class PhotoWallWebSocketService {
     try {
       // 🚀 Get event and photowall settings
       const event = await Event.findOne({ share_token: shareToken })
-        .select('_id photowall_settings share_settings')
+        .select('_id photowall_settings share_settings.is_active share_settings.expires_at share_settings.has_password')
         .lean();
 
       if (!event || !event.share_settings?.is_active || !event.photowall_settings?.isEnabled) {

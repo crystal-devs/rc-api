@@ -8,6 +8,7 @@ import { logger } from '@utils/logger';
 import { Event } from '@models/event.model';
 import type { AuthData, WebSocketUser, ClientConnectionState } from '../websocket.types';
 import { EventParticipant } from '@models/event-participants.model';
+import { isAdminRole, roleToSocketType } from '@utils/role.utils';
 import mongoose from 'mongoose';
 
 export const authenticateConnection = async (
@@ -19,14 +20,22 @@ export const authenticateConnection = async (
         let event;
         let actualEventId: string;
 
-        if (authData.eventId.startsWith('evt_')) {
-            event = await Event.findOne({ share_token: authData.eventId })
+        // Photo wall (and other share-link clients) connect with only a share
+        // token — fall back to it when no eventId is sent.
+        const eventRef = authData.eventId || authData.shareToken;
+        if (!eventRef) {
+            socket.emit('auth_error', { message: 'Authentication required' });
+            return;
+        }
+
+        if (eventRef.startsWith('evt_')) {
+            event = await Event.findOne({ share_token: eventRef })
                 .populate('created_by', 'name email');
             actualEventId = event?._id.toString() || '';
         } else {
-            event = await Event.findById(authData.eventId)
+            event = await Event.findById(eventRef)
                 .populate('created_by', 'name email');
-            actualEventId = authData.eventId;
+            actualEventId = eventRef;
         }
 
         if (!event) {
@@ -38,20 +47,29 @@ export const authenticateConnection = async (
 
         if (authData.token && !authData.shareToken) {
             const decoded = jwt.verify(authData.token, keys.jwtSecret as string) as any;
+            const userId: string = decoded.user_id;
 
-            // FIX: Use user_id instead of userId
-            if (event.created_by._id.toString() === decoded.user_id) {
+            if (event.created_by._id.toString() === userId) {
                 user = {
-                    id: decoded.user_id, // CHANGED: use user_id
+                    id: userId,
                     name: (event.created_by as any).name || 'Admin',
                     type: 'admin',
                     eventId: actualEventId
                 };
             } else {
+                // Type from the participant record — a valid JWT alone proves identity,
+                // not event privileges. Non-participants and guest-role participants
+                // connect as guests (guest room, view-level broadcasts only).
+                const participant = await EventParticipant.findOne({
+                    user_id: new mongoose.Types.ObjectId(userId),
+                    event_id: new mongoose.Types.ObjectId(actualEventId),
+                    status: 'active'
+                }).select('role').lean();
+
                 user = {
-                    id: decoded.user_id, // CHANGED: use user_id
-                    name: decoded.name || 'Co-host',
-                    type: 'co_host',
+                    id: userId,
+                    name: decoded.name || 'Member',
+                    type: roleToSocketType(participant?.role),
                     eventId: actualEventId
                 };
             }
@@ -165,6 +183,21 @@ export const handleSubscription = async (
 
         // For guest users
         else if (user.type === 'guest') {
+            // Logged-in users with guest-level role have a real user id (anonymous
+            // guests get a synthetic `guest_...` id) — validate via participant record.
+            if (user.id && mongoose.isValidObjectId(user.id)) {
+                const isParticipant = await EventParticipant.exists({
+                    user_id: new mongoose.Types.ObjectId(user.id),
+                    event_id: new mongoose.Types.ObjectId(eventId),
+                    status: 'active'
+                });
+
+                if (isParticipant) {
+                    logger.info(`✅ Logged-in guest ${user.id} granted access to event ${eventId}`);
+                    return true;
+                }
+            }
+
             const tokenToValidate = shareToken || user.shareToken || user.eventId;
             const hasAccess = await validateGuestEventAccess(eventId, tokenToValidate);
 
@@ -228,6 +261,14 @@ export const validateAdminEventAccess = async (
     try {
         logger.info(`Validating admin access: userId=${userId}, eventId=${eventId}`);
 
+        // The event creator always has admin access, even if their participant
+        // record is missing or carries a stale role (legacy data).
+        const event = await Event.findById(eventId).select('created_by').lean();
+        if (event?.created_by?.toString() === userId) {
+            logger.info(`User ${userId} has admin access to event ${eventId} (event creator)`);
+            return true;
+        }
+
         const participant = await EventParticipant.findOne({
             user_id: new mongoose.Types.ObjectId(userId),
             event_id: new mongoose.Types.ObjectId(eventId),
@@ -239,9 +280,8 @@ export const validateAdminEventAccess = async (
             return false;
         }
 
-        // Check if user has admin-level permissions
-        const hasAdminAccess = participant.role === 'creator' ||
-            participant.role === 'co_host' ||
+        // Normalize legacy role values (moderator/viewer/...) before comparing
+        const hasAdminAccess = isAdminRole(participant.role) ||
             participant.permissions?.can_manage_participants === true;
 
         if (hasAdminAccess) {
@@ -249,7 +289,7 @@ export const validateAdminEventAccess = async (
             return true;
         }
 
-        logger.info(`User ${userId} has no admin access to event ${eventId}`);
+        logger.info(`User ${userId} has no admin access to event ${eventId} (role: ${participant.role})`);
         return false;
 
     } catch (error) {

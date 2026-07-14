@@ -6,6 +6,7 @@ import { logger } from '@utils/logger';
 import { ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import { keys } from '@configs/dotenv.config';
 import { startRekognitionWorker } from '@workers/rekognition.worker';
+import { startVideoProcessingWorker } from '@workers/video-processing.worker';
 
 export class InitializationService {
 
@@ -24,6 +25,9 @@ export class InitializationService {
             
             // Initialize Rekognition background worker
             startRekognitionWorker();
+
+            // Initialize video processing (poster + 720p compression) worker
+            startVideoProcessingWorker();
             
             return true;
         } catch (error) {

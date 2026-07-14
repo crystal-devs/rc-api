@@ -1,5 +1,6 @@
 import mongoose, { InferSchemaType } from 'mongoose';
 import { MODEL_NAMES } from './names';
+import { generateSecureToken } from '../utils/secure-token.util';
 
 // Nested schemas
 const locationSchema = new mongoose.Schema({
@@ -52,7 +53,11 @@ const stylingConfigSchema = new mongoose.Schema({
 
 const shareSettingsSchema = new mongoose.Schema({
     is_active: { type: Boolean, default: true },
-    password: { type: String, default: null },
+    // bcrypt hash — select:false so it can never leak into API responses;
+    // comparison sites must opt in with .select('+share_settings.password')
+    password: { type: String, default: null, select: false },
+    // Safe-to-expose flag so the host UI can show "PIN is set" without the hash
+    has_password: { type: Boolean, default: false },
     expires_at: { type: Date, default: null },
 }, { _id: false });
 
@@ -99,6 +104,17 @@ const eventSchema = new mongoose.Schema({
         type: String,
         enum: ['wedding', 'birthday', 'concert', 'corporate', 'vacation', 'custom'],
         default: 'custom',
+    },
+
+    // DPDP: biometric processing is opt-in per event (default OFF). Face
+    // indexing on upload, face login, and selfie search all require this.
+    face_recognition: {
+        enabled: { type: Boolean, default: false },
+        consent_version: { type: String, default: 'v1' },
+        // Days after end_date before the face collection is auto-deleted
+        retention_days: { type: Number, default: 60 },
+        // Set by the retention sweep / event deletion once the collection is gone
+        collection_deleted_at: { type: Date, default: null },
     },
 
     // Styling configuration - Clean and organized
@@ -162,9 +178,9 @@ eventSchema.pre('save', function (next) {
             return next(new Error('created_by is required before generating co_host_invite_token'));
         }
 
-        // Generate share_token
+        // Generate share_token (crypto-grade: this token alone grants gallery access)
         if (!this.share_token) {
-            this.share_token = `evt_${Math.random().toString(36).slice(2, 8)}`;
+            this.share_token = generateSecureToken('evt');
         }
 
     }

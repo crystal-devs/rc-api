@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { MODEL_NAMES } from "./names";
+import { generateSecureToken } from "../utils/secure-token.util";
 
 const eventInvitationSchema = new mongoose.Schema({
     _id: {
@@ -40,10 +41,10 @@ const eventInvitationSchema = new mongoose.Schema({
         required: true
     },
 
-    // What role they'll get when they join
+    // What role they'll get when they join (creator cannot be invited)
     intended_role: {
         type: String,
-        enum: ['co_host', 'moderator', 'guest', 'viewer'],
+        enum: ['co_host', 'guest'],
         default: 'guest'
     },
 
@@ -123,10 +124,7 @@ eventInvitationSchema.pre('validate', function (next) {
         };
 
         const prefix = prefixMap[this.invitation_type] || 'inv';
-        const objectId = new mongoose.Types.ObjectId().toString();
-        const random = Math.random().toString(36).slice(2, 8);
-
-        this.token = `${prefix}_${objectId.slice(-8)}_${random}`;
+        this.token = generateSecureToken(prefix);
     }
 
     next();

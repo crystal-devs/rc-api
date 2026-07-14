@@ -401,11 +401,13 @@ const addEnrichmentStages = (pipeline: any[]): void => {
                 }
             }
         },
-        // Remove unnecessary fields
+        // Remove unnecessary fields (aggregations bypass schema select:false,
+        // so the PIN hash must be excluded explicitly)
         {
             $project: {
                 participant_stats: 0,
-                recent_activity: 0
+                recent_activity: 0,
+                'share_settings.password': 0
             }
         }
     );
@@ -461,7 +463,7 @@ const buildEventDetailPipeline = (matchCondition: any, userId: string): mongoose
                         else: {
                             $ifNull: [
                                 { $arrayElemAt: ["$user_participation.role", 0] },
-                                "viewer" // Default role if no participation found
+                                "guest" // Default role if no participation found
                             ]
                         }
                     }
@@ -609,10 +611,11 @@ const buildEventDetailPipeline = (matchCondition: any, userId: string): mongoose
             }
         },
 
-        // Clean up
+        // Clean up (aggregations bypass schema select:false — exclude PIN hash)
         {
             $project: {
-                user_participation: 0
+                user_participation: 0,
+                'share_settings.password': 0
             }
         }
     ];

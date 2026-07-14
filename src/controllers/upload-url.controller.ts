@@ -178,11 +178,11 @@ export const generateBatchUploadUrlsController = async (
         });
       }
 
-      // Validate file type (only images allowed)
-      if (!file.fileType.startsWith('image/')) {
+      // Validate file type (images and videos allowed)
+      if (!file.fileType.startsWith('image/') && !file.fileType.startsWith('video/')) {
         return res.status(400).json({
           status: false,
-          message: `File at index ${i} must be an image type`
+          message: `File at index ${i} must be an image or video type`
         });
       }
     }
@@ -237,9 +237,10 @@ export const generateBatchUploadUrlsController = async (
 
 
           // Create Media Record
+          const isVideo = file.fileType.startsWith('video/');
           const media = new Media({
             upload_id: uploadId,
-            type: 'image',
+            type: isVideo ? 'video' : 'image',
             event_id: eventId,
             album_id: eventId,
 
@@ -253,8 +254,9 @@ export const generateBatchUploadUrlsController = async (
               public_id: key,
               filename: file.fileName,
               format: fileExtension,
-              width: 0,   // Placeholder
-              height: 0,  // Placeholder
+              width: isVideo ? undefined : 0,     // Placeholder — images only
+              height: isVideo ? undefined : 0,    // Placeholder — images only
+              duration: isVideo ? 0 : undefined,  // Placeholder — videos only
               size_mb: 0  // Placeholder
             },
 

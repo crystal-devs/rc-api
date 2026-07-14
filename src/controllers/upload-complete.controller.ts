@@ -9,6 +9,7 @@ import { logger } from '@utils/logger';
 import { Event } from '@models/event.model';
 import { validatePermissionsAndGetApproval } from '@utils/media.utils';
 import { rekognitionService } from '@services/aws/rekognition.service';
+import { videoProcessingQueue } from '@queues/video-processing.queue';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -33,6 +34,17 @@ interface AuthenticatedRequest extends Request {
     role?: string;
   };
 }
+
+// DPDP: face indexing only runs for events whose host opted in
+const isFaceIndexingEnabled = async (eventId: string): Promise<boolean> => {
+  try {
+    const event = await Event.findById(eventId).select('face_recognition.enabled').lean();
+    return !!event?.face_recognition?.enabled;
+  } catch (error) {
+    logger.error(`Failed to read face_recognition setting for event ${eventId}:`, error);
+    return false;
+  }
+};
 
 /**
  * Handle upload completion - save to MongoDB and emit WebSocket event
@@ -140,14 +152,24 @@ export const uploadCompleteController = async (
       logger.info(`Media created (fallback): ${savedMedia._id}, upload_id: ${upload_id}`);
     }
 
-    // ────────────────────── ASYNC: INDEX FACES ──────────────────────
-    if (savedMedia.type === 'image') {
+    // ────────────────────── ASYNC: INDEX FACES (consent-gated) ──────────────────────
+    if (savedMedia.type === 'image' && await isFaceIndexingEnabled(eventId)) {
       rekognitionService.queueIndexFaces(
         keys.s3BucketName as string,
         key,
         savedMedia._id.toString(),
         eventId
       );
+    }
+
+    // ────────────────────── ASYNC: VIDEO PROCESSING (poster + 720p) ──────────────────────
+    if (savedMedia.type === 'video') {
+      videoProcessingQueue.add('process-video', {
+        mediaId: savedMedia._id.toString(),
+        eventId,
+        uploadId: upload_id,
+        s3Key: key,
+      });
     }
 
     // ────────────────────── WEBSOCKET: photo-uploading ──────────────────────
@@ -255,6 +277,7 @@ export const uploadBatchCompleteController = async (req: AuthenticatedRequest, r
     });
 
     // 3. Process records in memory and build bulk operations
+    const faceIndexingEnabled = await isFaceIndexingEnabled(eventId);
     for (const item of processedItems) {
       const media = existingMediaRecords.find(m => 
         m.upload_id === item.upload_id || m.original?.public_id === item.key
@@ -299,14 +322,24 @@ export const uploadBatchCompleteController = async (req: AuthenticatedRequest, r
           approval_status: (updateData['approval.status'] || media.approval?.status) === 'approved'
         });
 
-        // Queue Rekognition
-        if (media.type === 'image') {
+        // Queue Rekognition (consent-gated)
+        if (media.type === 'image' && faceIndexingEnabled) {
           rekognitionService.queueIndexFaces(
             keys.s3BucketName as string,
             item.key,
             mediaIdStr,
             eventId
           );
+        }
+
+        // Queue video processing (poster + 720p)
+        if (media.type === 'video') {
+          videoProcessingQueue.add('process-video', {
+            mediaId: mediaIdStr,
+            eventId,
+            uploadId: item.upload_id,
+            s3Key: item.key,
+          });
         }
 
         // WebSocket events

@@ -106,12 +106,20 @@ export const processEventUpdateData = async (
 
         // Share settings
         if (updateData.share_settings !== undefined) {
-            processed.share_settings = processShareSettingsData(updateData.share_settings);
+            // Dot-notation keys: a partial update must not wipe the stored PIN hash
+            Object.assign(processed, processShareSettingsData(updateData.share_settings));
+        }
+
+        // Face recognition opt-in (DPDP): host can toggle per event
+        if (updateData.face_recognition !== undefined) {
+            if (typeof updateData.face_recognition?.enabled === 'boolean') {
+                processed['face_recognition.enabled'] = updateData.face_recognition.enabled;
+            }
         }
 
         // Share token validation
         if (updateData.share_token !== undefined && updateData.share_token !== currentEvent.share_token) {
-            if (updateData.share_token && !/^evt_[a-zA-Z0-9]{6}$/.test(updateData.share_token)) {
+            if (updateData.share_token && !/^evt_[A-Za-z0-9_-]{22}$/.test(updateData.share_token)) {
                 throw new Error('Invalid share token format');
             }
             processed.share_token = updateData.share_token;
@@ -150,7 +158,7 @@ const processCoHostInviteTokenData = (tokenData: any): any => {
     const processed: any = {};
 
     if (tokenData.token !== undefined) {
-        if (tokenData.token && !/^coh_[a-zA-Z0-9]{24}_[a-zA-Z0-9]{6}$/.test(tokenData.token)) {
+        if (tokenData.token && !/^coh_[A-Za-z0-9_-]{22}$/.test(tokenData.token)) {
             throw new Error('Invalid co-host invite token format');
         }
         processed.token = tokenData.token;
