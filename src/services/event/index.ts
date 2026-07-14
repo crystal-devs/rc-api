@@ -6,7 +6,8 @@
 export {
     createEventService,
     deleteEventService,
-    updateEventService
+    updateEventService,
+    toggleEventArchiveService
 } from './event-core.service';
 
 export {

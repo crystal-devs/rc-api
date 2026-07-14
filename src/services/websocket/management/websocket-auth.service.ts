@@ -273,16 +273,16 @@ export const validateAdminEventAccess = async (
             user_id: new mongoose.Types.ObjectId(userId),
             event_id: new mongoose.Types.ObjectId(eventId),
             status: 'active'
-        });
+        }).select('role');
 
         if (!participant) {
             logger.warn(`User ${userId} is not a participant in event ${eventId}`);
             return false;
         }
 
-        // Normalize legacy role values (moderator/viewer/...) before comparing
-        const hasAdminAccess = isAdminRole(participant.role) ||
-            participant.permissions?.can_manage_participants === true;
+        // Admin access is purely role-based (creator/co_host). The per-participant
+        // permission blob was removed in RBAC Phase 3 — role is authoritative.
+        const hasAdminAccess = isAdminRole(participant.role);
 
         if (hasAdminAccess) {
             logger.info(`User ${userId} has admin access to event ${eventId} (role: ${participant.role})`);

@@ -88,6 +88,49 @@ export function attachPolicy(
     return access;
 }
 
+/** Coerce a lean Mongo date field (Date | string | number) to a Date. */
+function toDate(value: unknown): Date | undefined {
+    if (value instanceof Date) return value;
+    if (typeof value === 'string' || typeof value === 'number') return new Date(value);
+    return undefined;
+}
+
+/**
+ * Build an EventAccess shell for a role. Every capability boolean starts false;
+ * attachPolicy() is the only thing that sets them (from the RBAC policy), so
+ * callers MUST run attachPolicy() before the object drives any decision. This
+ * keeps the deprecated per-participant permission blob off the request path.
+ */
+function baseEventAccess(
+    eventId: string,
+    role: EventRole,
+    extra?: Pick<Partial<EventAccess>, 'participantId' | 'joinMethod' | 'joinedAt' | 'lastActivity'>
+): EventAccess {
+    return {
+        eventId,
+        role,
+        participantId: extra?.participantId,
+        canView: false,
+        canUpload: false,
+        canDownload: false,
+        canEdit: false,
+        canDelete: false,
+        canManageParticipants: false,
+        canInviteOthers: false,
+        canModerateContent: false,
+        canApproveContent: false,
+        canExportData: false,
+        canManageSettings: false,
+        canViewAnalytics: false,
+        canTransferOwnership: false,
+        canManageGuests: false,
+        canManageContent: false,
+        joinMethod: extra?.joinMethod,
+        joinedAt: extra?.joinedAt,
+        lastActivity: extra?.lastActivity,
+    };
+}
+
 /**
  * Middleware to check if user has access to an event
  * Adds event access info to req.eventAccess
@@ -102,41 +145,24 @@ export const eventAccessMiddleware = async (
         const event_id = req.params.event_id || req.params.eventId || req.params.id;
         const userId = req.user._id.toString();
 
-        console.log(`🔍 [eventAccessMiddleware] Raw params:`, req.params);
-        console.log(`🔍 [eventAccessMiddleware] Extracted event_id: ${event_id}`);
-        console.log(`🔍 [eventAccessMiddleware] Checking access for user ${userId} to event ${event_id}`);
-
         // Validate event_id
-        if (!event_id) {
-            console.log(`❌ [eventAccessMiddleware] No event_id found in params`);
-            return sendResponse(res, {
-                status: false,
-                code: 400,
-                message: "Event ID is required",
-                data: null,
-                error: { message: "Missing event ID in request params" },
-                other: null
-            });
-        }
-
-        if (!mongoose.Types.ObjectId.isValid(event_id)) {
-            console.log(`❌ [eventAccessMiddleware] Invalid ObjectId format: ${event_id}`);
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
             return sendResponse(res, {
                 status: false,
                 code: 400,
                 message: "Valid event ID is required",
                 data: null,
-                error: { message: "Invalid ObjectId format" },
+                error: { message: "Missing or invalid event ID in request params" },
                 other: null
             });
         }
 
-        // Query the event
-        console.log(`🔍 [eventAccessMiddleware] Querying database for event: ${event_id}`);
-        const event = await Event.findById(event_id).lean();
+        // Only the guest-settings subdocument is consulted here (attachPolicy →
+        // effectivePermissions). Project to it so this per-request fetch stays
+        // cheap; routes that need the full event fetch it themselves.
+        const event = await Event.findById(event_id).select('permissions').lean();
 
         if (!event) {
-            console.log(`❌ [eventAccessMiddleware] Event ${event_id} not found in database`);
             return sendResponse(res, {
                 status: false,
                 code: 404,
@@ -147,23 +173,14 @@ export const eventAccessMiddleware = async (
             });
         }
 
-        console.log(`✅ [eventAccessMiddleware] Event found: ${event.title}`);
-        console.log(`🔍 [eventAccessMiddleware] Event created_by: ${event.created_by.toString()}`);
-
-        // Get user's participant record
+        // Get user's active participant record. Role is all we need — capabilities
+        // come from the policy, not the stored permission blob (RBAC Phase 3).
         const participant = await EventParticipant.findOne({
             user_id: new mongoose.Types.ObjectId(userId),
             event_id: new mongoose.Types.ObjectId(event_id),
             status: 'active'
-        }).lean();
+        }).select('role join_method joined_at last_activity_at').lean();
 
-        console.log(`🔍 [eventAccessMiddleware] Participant record:`, participant ? {
-            role: participant.role,
-            status: participant.status,
-            permissions: participant.permissions
-        } : 'Not found');
-
-        // Check if user has access to this event
         if (!participant) {
             return sendResponse(res, {
                 status: false,
@@ -175,64 +192,20 @@ export const eventAccessMiddleware = async (
             });
         }
 
-        // FIXED: Proper type handling for permissions
-        const effectivePermissions = participant.permissions || {};
-
-        console.log(`🔍 [eventAccessMiddleware] Effective permissions:`, effectivePermissions);
-
-        // FIXED: Proper boolean conversion and type safety
-        req.eventAccess = {
-            eventId: event_id,
-            role: normalizeRole(participant.role),
-            participantId: participant._id?.toString() || "",
-
-            // Basic access permissions - ensure boolean values
-            canView: Boolean(effectivePermissions.can_view),
-            canUpload: Boolean(effectivePermissions.can_upload),
-            canDownload: Boolean(effectivePermissions.can_download),
-
-            // Management permissions
-            canEdit: Boolean(effectivePermissions.can_edit_event),
-            canDelete: Boolean(effectivePermissions.can_delete_event),
-            canManageParticipants: Boolean(effectivePermissions.can_manage_participants),
-            canInviteOthers: Boolean(effectivePermissions.can_invite_others),
-
-            // Content permissions
-            canModerateContent: Boolean(effectivePermissions.can_moderate_content),
-            canApproveContent: Boolean(effectivePermissions.can_approve_content),
-            canExportData: Boolean(effectivePermissions.can_export_data),
-
-            // Settings and analytics
-            canManageSettings: Boolean(effectivePermissions.can_manage_settings),
-            canViewAnalytics: Boolean(effectivePermissions.can_view_analytics),
-            canTransferOwnership: Boolean(effectivePermissions.can_transfer_ownership),
-
-            // Legacy aliases for backward compatibility
-            canManageGuests: Boolean(effectivePermissions.can_manage_participants),
-            canManageContent: Boolean(effectivePermissions.can_moderate_content),
-
-            // FIXED: Proper date handling
-            joinMethod: typeof participant.join_method === 'string' ? participant.join_method : undefined,
-            joinedAt: participant.joined_at && typeof participant.joined_at === 'string'
-                ? new Date(participant.joined_at)
-                : participant.joined_at && typeof participant.joined_at === 'number'
-                    ? new Date(participant.joined_at)
-                    : participant.joined_at && participant.joined_at instanceof Date
-                        ? participant.joined_at
-                        : new Date(),
-            lastActivity: participant.last_activity_at && typeof participant.last_activity_at === 'string'
-                ? new Date(participant.last_activity_at)
-                : participant.last_activity_at && typeof participant.last_activity_at === 'number'
-                    ? new Date(participant.last_activity_at)
-                    : participant.last_activity_at && participant.last_activity_at instanceof Date
-                        ? participant.last_activity_at
-                        : new Date()
-        }
-        attachPolicy(req.eventAccess, event.permissions as EventGuestSettings);
+        req.eventAccess = attachPolicy(
+            baseEventAccess(event_id, normalizeRole(participant.role), {
+                participantId: participant._id?.toString(),
+                joinMethod: typeof participant.join_method === 'string' ? participant.join_method : undefined,
+                // Fall back to now (matches prior behavior); both fields are
+                // schema-required with Date.now defaults, so this is defensive.
+                joinedAt: toDate(participant.joined_at) ?? new Date(),
+                lastActivity: toDate(participant.last_activity_at) ?? new Date(),
+            }),
+            event.permissions as EventGuestSettings
+        );
         next();
     } catch (error: any) {
-        console.error(`💥 [eventAccessMiddleware] Error: ${error.message}`);
-        console.error(`💥 [eventAccessMiddleware] Stack: ${error.stack}`);
+        logger.error(`[eventAccessMiddleware] ${error.message}`, { stack: error.stack });
         return sendResponse(res, {
             status: false,
             code: 500,
@@ -306,10 +279,6 @@ export const tokenAccessMiddleware = async (
 
         // Get user ID if authenticated (optional)
         const userId = req.user?._id?.toString();
-
-        console.log(`🔍 [tokenAccessMiddleware] Processing token ${token_id}`);
-        console.log(`🔍 [tokenAccessMiddleware] User authenticated: ${!!userId}`);
-        console.log(`🔍 [tokenAccessMiddleware] Event visibility: ${event.visibility}`);
 
         // Handle visibility-based access with optional user
         const accessResult = await handleEventVisibility(event, userId);
@@ -394,39 +363,17 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
 }> {
     const eventId = event._id.toString();
 
-    console.log(`🔍 [handleEventVisibility] Processing visibility: ${event.visibility}`);
-    console.log(`🔍 [handleEventVisibility] User ID: ${userId || 'none'}`);
-
-    // FIXED: Complete EventAccess objects with all required properties
+    // Capability booleans are set by attachPolicy() at the call site — these
+    // branches only resolve the role (and, for private events, the participant).
     switch (event.visibility) {
         case 'anyone_with_link':
-            console.log('✅ [handleEventVisibility] Public access granted');
             return {
                 success: true,
-                eventAccess: {
-                    eventId,
-                    role: 'guest' as EventRole,
-                    canView: true,
-                    canUpload: Boolean(event.permissions?.can_upload),
-                    canDownload: Boolean(event.permissions?.can_download),
-                    canEdit: false,
-                    canDelete: false,
-                    canManageParticipants: false,
-                    canInviteOthers: false,
-                    canModerateContent: false,
-                    canApproveContent: false,
-                    canExportData: false,
-                    canManageSettings: false,
-                    canViewAnalytics: false,
-                    canTransferOwnership: false,
-                    canManageGuests: false,
-                    canManageContent: false,
-                }
+                eventAccess: baseEventAccess(eventId, 'guest')
             };
 
         case 'invited_only':
             if (!userId) {
-                console.log('❌ [handleEventVisibility] Auth required for invited_only');
                 return {
                     success: false,
                     error: {
@@ -444,7 +391,6 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
             try {
                 const user = await User.findById(userId).select('email').lean();
                 if (!user?.email) {
-                    console.log('❌ [handleEventVisibility] User email not found');
                     return {
                         success: false,
                         error: {
@@ -481,7 +427,6 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                 }
 
                 if (!isInvited) {
-                    console.log(`❌ [handleEventVisibility] User ${userId} not invited to event ${eventId}`);
                     return {
                         success: false,
                         error: {
@@ -495,31 +440,12 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                     };
                 }
 
-                console.log(`✅ [handleEventVisibility] Invited access granted for user ${userId}`);
                 return {
                     success: true,
-                    eventAccess: {
-                        eventId,
-                        role: 'authenticated_guest' as EventRole,
-                        canView: true,
-                        canUpload: Boolean(event.permissions?.can_upload),
-                        canDownload: Boolean(event.permissions?.can_download),
-                        canEdit: false,
-                        canDelete: false,
-                        canManageParticipants: false,
-                        canInviteOthers: false,
-                        canModerateContent: false,
-                        canApproveContent: false,
-                        canExportData: false,
-                        canManageSettings: false,
-                        canViewAnalytics: false,
-                        canTransferOwnership: false,
-                        canManageGuests: false,
-                        canManageContent: false,
-                    }
+                    eventAccess: baseEventAccess(eventId, 'authenticated_guest')
                 };
             } catch (error) {
-                console.error('❌ [handleEventVisibility] Error checking invitation:', error);
+                logger.error(`[handleEventVisibility] Error checking invitation: ${(error as Error).message}`);
                 return {
                     success: false,
                     error: {
@@ -535,7 +461,6 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
 
         case 'private':
             if (!userId) {
-                console.log('❌ [handleEventVisibility] Private event - no user');
                 return {
                     success: false,
                     error: {
@@ -554,14 +479,13 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                 user_id: new mongoose.Types.ObjectId(userId),
                 event_id: new mongoose.Types.ObjectId(eventId),
                 status: 'active'
-            }).lean();
+            }).select('role join_method joined_at last_activity_at').lean();
 
             if (
                 !participant ||
                 typeof participant.role !== 'string' ||
                 !['creator', 'co_host'].includes(participant.role)
             ) {
-                console.log(`❌ [handleEventVisibility] Private event - access denied for user ${userId}`);
                 return {
                     success: false,
                     error: {
@@ -575,41 +499,17 @@ async function handleEventVisibility(event: any, userId?: string): Promise<{
                 };
             }
 
-            console.log(`✅ [handleEventVisibility] Private event access granted - role: ${participant.role}`);
             return {
                 success: true,
-                eventAccess: {
-                    eventId,
-                    role: normalizeRole(participant.role),
+                eventAccess: baseEventAccess(eventId, normalizeRole(participant.role), {
                     participantId: participant._id?.toString(),
-                    canView: true,
-                    canUpload: true,
-                    canDownload: true,
-                    canEdit: Boolean(participant.permissions?.can_edit_event),
-                    canDelete: Boolean(participant.permissions?.can_delete_event),
-                    canManageParticipants: Boolean(participant.permissions?.can_manage_participants),
-                    canInviteOthers: Boolean(participant.permissions?.can_invite_others),
-                    canModerateContent: Boolean(participant.permissions?.can_moderate_content),
-                    canApproveContent: Boolean(participant.permissions?.can_approve_content),
-                    canExportData: Boolean(participant.permissions?.can_export_data),
-                    canManageSettings: Boolean(participant.permissions?.can_manage_settings),
-                    canViewAnalytics: Boolean(participant.permissions?.can_view_analytics),
-                    canTransferOwnership: Boolean(participant.permissions?.can_transfer_ownership),
-                    canManageGuests: Boolean(participant.permissions?.can_manage_participants),
-                    canManageContent: Boolean(participant.permissions?.can_moderate_content),
                     joinMethod: typeof participant.join_method === 'string' ? participant.join_method : undefined,
-                    joinedAt: participant.joined_at && typeof participant.joined_at === 'string'
-                        ? new Date(participant.joined_at)
-                        : undefined,
-                    lastActivity: participant.last_activity_at && typeof participant.last_activity_at === 'string'
-                        ? new Date(participant.last_activity_at)
-                        : undefined,
-
-                }
+                    joinedAt: toDate(participant.joined_at),
+                    lastActivity: toDate(participant.last_activity_at),
+                })
             };
 
         default:
-            console.log(`❌ [handleEventVisibility] Unknown visibility: ${event.visibility}`);
             return {
                 success: false,
                 error: {

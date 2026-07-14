@@ -467,12 +467,6 @@ const buildEventDetailPipeline = (matchCondition: any, userId: string): mongoose
                             ]
                         }
                     }
-                },
-                user_permissions: {
-                    $ifNull: [
-                        { $arrayElemAt: ["$user_participation.permissions", 0] },
-                        null
-                    ]
                 }
             }
         },

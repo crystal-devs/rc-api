@@ -14,7 +14,8 @@ import {
     getEventDetailService,
     getUserEventsService,
     processEventUpdateData,
-    updateEventService
+    updateEventService,
+    toggleEventArchiveService
 } from "@services/event";
 import { createDefaultAlbumForEvent } from "@services/album";
 import { eventCacheService } from "@services/cache/event-cache.service";
@@ -290,29 +291,12 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             'styling_config'
         ];
 
-        // Process and validate update data
+        // Process and validate update data. Closing/reopening the event
+        // (share_settings.is_active) is NOT handled here — it is a creator-only
+        // action owned by PATCH /:event_id/archive, and processShareSettingsData
+        // ignores is_active — so the generic update no longer needs to special-
+        // case it or re-fetch the event to detect a flip.
         const currentEvent = await Event.findById(event_id);
-
-        // Route-level authorize('event.update') has already gated this request.
-        // Closing/reopening the event rides through this payload as
-        // share_settings.is_active — that field is creator-only (product
-        // decision 2026-07-11). Clients send it on every save, so only gate
-        // when the value actually flips.
-        if (
-            updateData?.share_settings &&
-            'is_active' in updateData.share_settings &&
-            currentEvent &&
-            Boolean(currentEvent.share_settings?.is_active) !== Boolean(updateData.share_settings.is_active) &&
-            !req.eventAccess?.can?.('event.archive')
-        ) {
-            res.status(403).json({
-                status: false,
-                message: "Only the event creator can close or reopen the event",
-                data: null,
-                error: { message: "Requires 'event.archive' permission", code: 'FORBIDDEN', action: 'event.archive' }
-            });
-            return;
-        }
         const processedUpdateData = await processEventUpdateData(updateData, currentEvent);
         const response = await updateEventService(event_id, processedUpdateData, userId);
 
@@ -566,8 +550,20 @@ export const toggleEventArchiveController = async (req: injectedRequest, res: Re
             throw new Error("Valid event ID is required");
         }
 
-        // const response = await eventService.toggleEventArchiveService(event_id, userId, archive);
-        // sendResponse(res, response);
+        // Route-level authorize('event.archive') already gated this to the creator.
+        const response = await toggleEventArchiveService(event_id, userId, Boolean(archive));
+
+        if (response.status) {
+            try {
+                await Promise.all([
+                    eventCacheService.invalidateEventCaches(event_id),
+                    eventCacheService.invalidateUserCaches(userId)
+                ]);
+            } catch (e) {
+                console.warn('Cache invalidation failed after archive toggle:', e);
+            }
+        }
+        sendResponse(res, response);
     } catch (error) {
         next(error);
     }

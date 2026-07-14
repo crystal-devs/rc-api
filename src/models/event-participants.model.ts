@@ -1,24 +1,10 @@
 import mongoose, { InferSchemaType } from "mongoose";
 import { MODEL_NAMES } from "./names";
-import { normalizeRole } from "../utils/role.utils";
 
-// Separate schema for role-based permissions template
-const rolePermissionsSchema = new mongoose.Schema({
-    can_view: { type: Boolean, default: true },
-    can_upload: { type: Boolean, default: false },
-    can_download: { type: Boolean, default: false },
-    can_invite_others: { type: Boolean, default: false },
-    can_moderate_content: { type: Boolean, default: false },
-    can_manage_participants: { type: Boolean, default: false },
-    can_edit_event: { type: Boolean, default: false },
-    can_delete_event: { type: Boolean, default: false },
-    can_transfer_ownership: { type: Boolean, default: false },
-    // Additional granular permissions
-    can_approve_content: { type: Boolean, default: false },
-    can_export_data: { type: Boolean, default: false },
-    can_view_analytics: { type: Boolean, default: false },
-    can_manage_settings: { type: Boolean, default: false }
-}, { _id: false });
+// RBAC Phase 3: the per-participant permission blob has been removed. What a
+// role may do is computed at request time from the central policy
+// (configs/permissions.policy.ts) — the stored `role` is the only assignment we
+// persist. See rc-frontend/docs/RBAC_DESIGN.md.
 
 // Activity and engagement tracking
 const participantStatsSchema = new mongoose.Schema({
@@ -133,14 +119,6 @@ const eventParticipantSchema = new mongoose.Schema({
     removed_at: { type: Date, default: null },
     expires_at: { type: Date, default: null }, // For temporary access
 
-    // Dynamic permissions (can override role defaults)
-    permissions: {
-        type: rolePermissionsSchema,
-        default: function () {
-            return getDefaultPermissions(this.role);
-        }
-    },
-
     // Activity and engagement metrics
     stats: {
         type: participantStatsSchema,
@@ -167,14 +145,7 @@ const eventParticipantSchema = new mongoose.Schema({
 
 }, {
     timestamps: true,
-    toJSON: {
-        virtuals: true,
-        transform: function (doc, ret) {
-            // Convert permission_overrides Map to object for JSON
-            ret.permission_overrides = Object.fromEntries(ret.permission_overrides || new Map());
-            return ret;
-        }
-    },
+    toJSON: { virtuals: true },
     toObject: { virtuals: true }
 });
 
@@ -186,71 +157,11 @@ eventParticipantSchema.virtual('is_active').get(function () {
         !this.deleted_at;
 });
 
-// Helper function to get default permissions based on role
-function getDefaultPermissions(role: string) {
-    const permissionSets = {
-        creator: {
-            can_view: true,
-            can_upload: true,
-            can_download: true,
-            can_invite_others: true,
-            can_moderate_content: true,
-            can_manage_participants: true,
-            can_edit_event: true,
-            can_delete_event: true,
-            can_transfer_ownership: true,
-            can_approve_content: true,
-            can_export_data: true,
-            can_view_analytics: true,
-            can_manage_settings: true
-        },
-        co_host: {
-            can_view: true,
-            can_upload: true,
-            can_download: true,
-            can_invite_others: true,
-            can_moderate_content: true,
-            can_manage_participants: true,
-            can_edit_event: true,
-            can_delete_event: false,
-            can_transfer_ownership: false,
-            can_approve_content: true,
-            can_export_data: true,
-            can_view_analytics: true,
-            can_manage_settings: false
-        },
-        guest: {
-            can_view: true,
-            can_upload: true,
-            can_download: false,
-            can_invite_others: false,
-            can_moderate_content: false,
-            can_manage_participants: false,
-            can_edit_event: false,
-            can_delete_event: false,
-            can_transfer_ownership: false,
-            can_approve_content: false,
-            can_export_data: false,
-            can_view_analytics: false,
-            can_manage_settings: false
-        },
-    } as const;
-
-    return permissionSets[normalizeRole(role) as keyof typeof permissionSets] || permissionSets.guest;
-}
-
-// Pre-save middleware for permission management
+// Pre-save middleware
 eventParticipantSchema.pre('save', function (next) {
-    if (this.isNew || this.isModified('role')) {
-        // Set default permissions based on role
-        if (!this.permissions || Object.keys(this.permissions).length === 0) {
-            this.permissions = getDefaultPermissions(this.role);
-        }
-
-        // Set status based on join method
-        if (this.join_method === 'created_event') {
-            this.status = 'active';
-        }
+    // Creators are active from the moment the event is created
+    if ((this.isNew || this.isModified('role')) && this.join_method === 'created_event') {
+        this.status = 'active';
     }
 
     // Update last activity
@@ -277,27 +188,6 @@ eventParticipantSchema.pre('validate', function (next) {
 
 
 // Instance methods
-eventParticipantSchema.methods.hasPermission = function (permission: string): boolean {
-    const effectivePerms = this.effective_permissions;
-    return effectivePerms && typeof effectivePerms === 'object'
-        ? effectivePerms[permission] === true
-        : false;
-};
-
-eventParticipantSchema.methods.grantPermission = function (permission: string) {
-    if (!this.permission_overrides) {
-        this.permission_overrides = new Map();
-    }
-    this.permission_overrides.set(permission, true);
-};
-
-eventParticipantSchema.methods.revokePermission = function (permission: string) {
-    if (!this.permission_overrides) {
-        this.permission_overrides = new Map();
-    }
-    this.permission_overrides.set(permission, false);
-};
-
 eventParticipantSchema.methods.updateStats = async function (statType: string, increment: number = 1) {
     if (!this.stats) {
         this.stats = {};

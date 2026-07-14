@@ -20,55 +20,6 @@ interface ServiceResponse<T> {
     error?: any;
 }
 
-// Role permissions template
-const ROLE_PERMISSIONS = {
-    creator: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: true,
-        can_moderate_content: true,
-        can_manage_participants: true,
-        can_edit_event: true,
-        can_delete_event: true,
-        can_transfer_ownership: true,
-        can_approve_content: true,
-        can_export_data: true,
-        can_view_analytics: true,
-        can_manage_settings: true
-    },
-    co_host: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: true,
-        can_moderate_content: true,
-        can_manage_participants: true,
-        can_edit_event: true,
-        can_delete_event: false,
-        can_transfer_ownership: false,
-        can_approve_content: true,
-        can_export_data: true,
-        can_view_analytics: true,
-        can_manage_settings: false
-    },
-    guest: {
-        can_view: true,
-        can_upload: true,
-        can_download: false,
-        can_invite_others: false,
-        can_moderate_content: false,
-        can_manage_participants: false,
-        can_edit_event: false,
-        can_delete_event: false,
-        can_transfer_ownership: false,
-        can_approve_content: false,
-        can_export_data: false,
-        can_view_analytics: false,
-        can_manage_settings: false
-    },
-};
-
 // Get event participants with filtering and pagination
 export const getEventParticipants = async (
     eventId: string,
@@ -208,8 +159,7 @@ export const getEventParticipants = async (
                 last_activity_at: participant.last_activity_at,
                 removed_at: participant.removed_at,
 
-                // Permissions and stats
-                permissions: participant.permissions,
+                // Stats (capabilities are role-derived — see permissions.policy.ts)
                 stats: participant.stats
             };
         });
@@ -433,7 +383,6 @@ export const updateParticipant = async (
         const normalizedRole = updates.role ? normalizeRole(updates.role) : undefined;
         if (normalizedRole && normalizedRole !== participant.role) {
             updateData.role = normalizedRole;
-            updateData.permissions = ROLE_PERMISSIONS[normalizedRole];
 
             // Update event stats for role changes
             if (previousRole === 'co_host' && normalizedRole !== 'co_host') {
@@ -441,14 +390,6 @@ export const updateParticipant = async (
             } else if (previousRole !== 'co_host' && normalizedRole === 'co_host') {
                 statsUpdate['stats.co_hosts_count'] = 1;
             }
-        }
-
-        // Handle custom permissions
-        if (updates.permissions) {
-            updateData.permissions = {
-                ...participant.permissions,
-                ...updates.permissions
-            };
         }
 
         // Handle status change
@@ -500,8 +441,7 @@ export const updateParticipant = async (
                 changes: {
                     role: { from: previousRole, to: normalizedRole },
                     status: { from: previousStatus, to: updates.status }
-                },
-                updated_permissions: updates.permissions ? Object.keys(updates.permissions) : []
+                }
             }
         }], { session });
 
@@ -781,7 +721,6 @@ export const getParticipantStats = async (
                 last_activity_at: participant.last_activity_at,
                 stats: participant.stats,
                 activity_breakdown: activityStats,
-                permissions: participant.permissions,
                 invited_by: participant.invited_by
             }
         };

@@ -263,9 +263,10 @@ export const processShareSettingsData = (shareSettingsData: any): Record<string,
 
     const processed: Record<string, any> = {};
 
-    if (shareSettingsData.is_active !== undefined) {
-        processed['share_settings.is_active'] = Boolean(shareSettingsData.is_active);
-    }
+    // NOTE: share_settings.is_active (close/reopen for guests) is intentionally
+    // NOT processed here — it is a creator-only action owned by
+    // toggleEventArchiveService (PATCH /:event_id/archive). Ignoring it in the
+    // generic update prevents a co-host's routine save from flipping it.
 
     if (shareSettingsData.password !== undefined) {
         const raw = typeof shareSettingsData.password === 'string'

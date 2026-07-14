@@ -10,43 +10,6 @@ import mongoose from "mongoose";
 import { logger } from "@utils/logger";
 import { isAdminRole } from "@utils/role.utils";
 
-// Role permissions template
-const ROLE_PERMISSIONS = {
-    creator: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: true,
-        can_moderate_content: true,
-        can_manage_participants: true,
-        can_edit_event: true,
-        can_delete_event: true,
-        can_transfer_ownership: true
-    },
-    co_host: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: true,
-        can_moderate_content: true,
-        can_manage_participants: true,
-        can_edit_event: true,
-        can_delete_event: false,
-        can_transfer_ownership: false
-    },
-    guest: {
-        can_view: true,
-        can_upload: false,
-        can_download: false,
-        can_invite_others: false,
-        can_moderate_content: false,
-        can_manage_participants: false,
-        can_edit_event: false,
-        can_delete_event: false,
-        can_transfer_ownership: false
-    }
-};
-
 // Service Response Type
 interface ServiceResponse<T> {
     status: boolean;
@@ -289,7 +252,6 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<Servi
                 // Update existing participant to co-host
                 existingParticipant.role = 'co_host';
                 existingParticipant.status = 'active';
-                existingParticipant.permissions = ROLE_PERMISSIONS.co_host;
                 existingParticipant.join_method = 'co_host_invite';
                 existingParticipant.invited_by = invitation.invited_by;
                 existingParticipant.invited_at = invitation.createdAt;
@@ -323,7 +285,6 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<Servi
                 invited_at: invitation.createdAt,
                 joined_at: new Date(),
                 last_activity_at: new Date(),
-                permissions: ROLE_PERMISSIONS.co_host,
                 stats: {
                     uploads_count: 0,
                     downloads_count: 0,
@@ -625,7 +586,6 @@ export const getEventCoHosts = async (eventId: string): Promise<ServiceResponse<
                     profile_pic: userInfo?.profile_pic
                 },
                 status: coHost.status,
-                permissions: coHost.permissions,
                 invited_by: inviterInfo ? {
                     id: inviterInfo._id,
                     name: inviterInfo.name

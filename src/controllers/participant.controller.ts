@@ -184,7 +184,7 @@ export const updateParticipantController = async (
 ): Promise<void> => {
     try {
         const { event_id, participant_id } = req.params;
-        const { role, permissions, status } = req.body;
+        const { role, status } = req.body;
         const updatedBy = req.user._id.toString();
 
         validateObjectId(event_id, 'event ID');
@@ -205,16 +205,8 @@ export const updateParticipantController = async (
             updates.role = normalizeRole(role);
         }
 
-        if (permissions) {
-            if (typeof permissions !== 'object' || Array.isArray(permissions)) {
-                return sendResponse(res, {
-                    status: false,
-                    message: 'Permissions must be an object with boolean values',
-                    data: null
-                });
-            }
-            updates.permissions = permissions;
-        }
+        // Per-participant permission overrides are not accepted (RBAC Phase 3,
+        // no-overrides decision 2026-07-11): capabilities follow the role.
 
         if (status) {
             if (!['active', 'pending', 'blocked', 'removed'].includes(status)) {
@@ -230,7 +222,7 @@ export const updateParticipantController = async (
         if (Object.keys(updates).length === 0) {
             return sendResponse(res, {
                 status: false,
-                message: 'At least one field (role, permissions, status) must be provided',
+                message: 'At least one field (role, status) must be provided',
                 data: null
             });
         }
