@@ -53,6 +53,18 @@ export const buildMediaQuery = (
         query['processing.status'] = 'completed';
     }
 
+    // Sub-event (function) filter — Phase 1. 'none' = only untagged media (the
+    // whole-event gallery); an id = that function; omitted = no filter (all).
+    if (options.subEventId) {
+        if (options.subEventId === 'none') {
+            query.sub_event_id = null;
+        } else if (mongoose.Types.ObjectId.isValid(options.subEventId)) {
+            query.sub_event_id = new mongoose.Types.ObjectId(options.subEventId);
+        } else {
+            logger.warn('Ignoring invalid subEventId filter:', options.subEventId);
+        }
+    }
+
     // Apply date filter
     if (options.since) {
         try {
@@ -123,7 +135,7 @@ export const getMediaByEventService = async (
 
         // Execute query
         const mediaItems = await Media.find(query)
-            .select('_id type event_id album_id original variants processing approval owner stats created_at updated_at')
+            .select('_id type event_id album_id sub_event_id original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)
@@ -200,7 +212,7 @@ export const getMediaByAlbumService = async (
 
         // Get media with pagination
         const mediaItems = await Media.find(query)
-            .select('_id type event_id album_id original variants processing approval owner stats created_at updated_at')
+            .select('_id type event_id album_id sub_event_id original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)
@@ -300,10 +312,21 @@ export const getGuestMediaService = async (
         }
 
         // Query approved media for guests (photos and videos)
-        const query = {
+        const query: any = {
             event_id: event._id,
             'approval.status': { $in: ['approved', 'auto_approved'] }
         };
+
+        // Sub-event (function) filter — same semantics as the host gallery.
+        // The guest gallery groups by sub_event_id for section dividers, so this
+        // is optional; it exists for per-function views.
+        if (options.subEventId) {
+            if (options.subEventId === 'none') {
+                query.sub_event_id = null;
+            } else if (mongoose.Types.ObjectId.isValid(options.subEventId)) {
+                query.sub_event_id = new mongoose.Types.ObjectId(options.subEventId);
+            }
+        }
 
         // Get total count
         const totalCount = await Media.countDocuments(query);

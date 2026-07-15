@@ -29,7 +29,7 @@ export class ShareTokenService {
             const event = await Event.findOne({
                 share_token: tokenId
             })
-                .select('_id title description start_date location cover_image visibility permissions created_by co_hosts styling_config share_settings.is_active share_settings.expires_at share_settings.has_password')
+                .select('_id title description start_date location cover_image visibility permissions created_by co_hosts styling_config sub_events share_settings.is_active share_settings.expires_at share_settings.has_password')
                 .lean();
 
             if (!event) {

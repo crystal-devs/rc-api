@@ -22,6 +22,12 @@ export interface MediaQueryOptions {
     quality?: 'small' | 'medium' | 'large' | 'original'
     format?: 'webp' | 'jpeg' | 'auto';
     context?: 'mobile' | 'desktop' | 'lightbox';
+    /**
+     * Sub-event (function) filter — Phase 1. An ObjectId limits results to that
+     * function; the literal 'none' returns only media not tagged to any function
+     * (the whole-event / main gallery). Omit for every item in the event.
+     */
+    subEventId?: string;
 }
 
 export interface StatusUpdateOptions {

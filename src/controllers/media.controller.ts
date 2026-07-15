@@ -55,7 +55,7 @@ export const getMediaByEventController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { eventId } = req.params;
-        const { page, limit, status, quality } = req.query;
+        const { page, limit, status, quality, sub_event_id } = req.query;
         const userId = req.user?._id?.toString();
 
         if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
@@ -119,7 +119,9 @@ export const getMediaByEventController: RequestHandler = async (
             page: parseInt(page as string) || 1,
             limit: parseInt(limit as string) || 20,
             status: effectiveStatus,
-            quality: validatedQuality
+            quality: validatedQuality,
+            // Sub-event filter chips: an id, or 'none' for untagged media
+            subEventId: typeof sub_event_id === 'string' ? sub_event_id : undefined
         };
 
         logger.info(`📱 Admin getting media for event ${eventId}`, {
@@ -856,7 +858,7 @@ export const getGuestMediaController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { shareToken } = req.params;
-        const { page, limit, quality } = req.query;
+        const { page, limit, quality, sub_event_id } = req.query;
 
         if (!shareToken) {
             res.status(400).json({
@@ -872,7 +874,9 @@ export const getGuestMediaController: RequestHandler = async (
         const options = {
             page: parseInt(page as string) || 1,
             limit: Math.min(parseInt(limit as string) || 20, 50), // Limit guests to 50
-            quality: quality as string || 'medium'
+            quality: quality as string || 'medium',
+            // Optional per-function view; the gallery otherwise groups client-side
+            subEventId: typeof sub_event_id === 'string' ? sub_event_id : undefined
         };
 
         logger.info(`🔗 Guest accessing media:`, {

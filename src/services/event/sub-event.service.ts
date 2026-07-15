@@ -30,6 +30,13 @@ const byTimeline = (a: any, b: any) =>
     (a.date ? +new Date(a.date) : 0) - (b.date ? +new Date(b.date) : 0) ||
     String(a.name).localeCompare(String(b.name));
 
+/**
+ * Functions in timeline order. Every surface that renders sub-events (host
+ * chips, guest section dividers) must use this so the order agrees everywhere.
+ */
+export const sortSubEvents = <T>(subs: T[] | null | undefined): T[] =>
+    (subs ?? []).slice().sort(byTimeline);
+
 function parseName(value: unknown): { name?: string; error?: string } {
     if (typeof value !== 'string' || !value.trim()) return { error: 'Sub-event name is required' };
     const name = value.trim();
@@ -48,8 +55,7 @@ export const listSubEvents = async (eventId: string): Promise<ServiceResponse<an
     try {
         const event = await Event.findById(eventId).select('sub_events').lean();
         if (!event) return fail(404, 'Event not found');
-        const subs = (event.sub_events ?? []).slice().sort(byTimeline);
-        return ok(subs, 'Sub-events retrieved');
+        return ok(sortSubEvents(event.sub_events), 'Sub-events retrieved');
     } catch (error: any) {
         logger.error(`[listSubEvents] ${error.message}`);
         return fail(500, error.message || 'Failed to list sub-events');

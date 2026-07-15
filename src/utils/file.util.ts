@@ -159,6 +159,8 @@ function getUploaderDisplayName(mediaItem: any): string {
 export interface MediaMetadata {
     _id: string;
     type: string;
+    /** Function (sub-event) this item belongs to; null = whole-event gallery */
+    sub_event_id: string | null;
     url: string;
     processing_status: string;
     processing?: {
@@ -333,6 +335,7 @@ async function getMediaMetadataWithCache(mediaItem: any, urlCache: Map<string, s
     return {
         _id: mediaItem._id?.toString() || mediaItem._id,
         type: mediaItem.type,
+        sub_event_id: mediaItem.sub_event_id?.toString() || null,
         url: mainUrl,
         processing_status: mediaItem.processing?.status || 'unknown',
         processing: {
