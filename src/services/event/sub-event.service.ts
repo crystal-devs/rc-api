@@ -147,8 +147,9 @@ export const deleteSubEvent = async (eventId: string, subEventId: string): Promi
 };
 
 /**
- * True when subEventId is a function of this event. Used by upload flows to
- * validate a client-supplied sub_event_id before tagging media with it.
+ * True when subEventId is a function of this event. Used by upload flows that
+ * don't already have the event in hand to validate a client-supplied
+ * sub_event_id before tagging media with it.
  */
 export const isValidSubEventForEvent = async (
     eventId: string | mongoose.Types.ObjectId,
@@ -157,4 +158,27 @@ export const isValidSubEventForEvent = async (
     if (!subEventId || !mongoose.Types.ObjectId.isValid(subEventId)) return false;
     const event = await Event.findOne({ _id: eventId, 'sub_events._id': subEventId }).select('_id').lean();
     return !!event;
+};
+
+/**
+ * Resolve a client-supplied function tag against an already-fetched event's
+ * functions (no extra query). Returns the id only when it really is a function
+ * of THIS event — which stops media being tagged with another event's function.
+ *
+ * An absent/unknown id resolves to null (the whole-event gallery) rather than
+ * failing: the guest picker defaults to "the whole event", and a host may delete
+ * a function while a guest still has it selected. An upload must never be lost
+ * over a stale tag.
+ */
+export const resolveSubEventTag = (
+    subEvents: any[] | null | undefined,
+    candidate: unknown
+): mongoose.Types.ObjectId | null => {
+    if (typeof candidate !== 'string' || !mongoose.Types.ObjectId.isValid(candidate)) return null;
+    const belongs = (subEvents ?? []).some((s: any) => s?._id?.toString() === candidate);
+    if (!belongs) {
+        logger.warn(`Ignoring unknown sub_event_id '${candidate}' — tagging media to the whole event`);
+        return null;
+    }
+    return new mongoose.Types.ObjectId(candidate);
 };

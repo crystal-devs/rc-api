@@ -18,6 +18,7 @@ import {
     updateMediaStatusService,
 } from "@services/media";
 import { GuestSessionHelper } from "@services/guest/guest-session-helper";
+import { resolveSubEventTag } from "@services/event/sub-event.service";
 import { getOrCreateDefaultAlbum } from "@services/album";
 import { softDeleteMediaService, bulkSoftDeleteMediaService } from "@services/media/media-management.service";
 import sharp from "sharp";
@@ -668,7 +669,7 @@ export const guestUploadMediaController: RequestHandler = async (
     try {
         const { share_token } = req.params;
         const files = (req.files as Express.Multer.File[]) || [];
-        const { guest_name, guest_email, guest_phone } = req.body;
+        const { guest_name, guest_email, guest_phone, sub_event_id } = req.body;
 
         if (!share_token || !files.length) {
             res.status(400).json({
@@ -691,6 +692,11 @@ export const guestUploadMediaController: RequestHandler = async (
             });
             return;
         }
+
+        // Which function (sub-event) these photos belong to. The event is already
+        // loaded, so this validates without another query; unknown/absent tags
+        // fall back to the whole-event gallery. (Phase 1)
+        const subEventTag = resolveSubEventTag(event.sub_events, sub_event_id);
 
         // Get or create guest session
         const guestInfo = {
@@ -758,6 +764,7 @@ export const guestUploadMediaController: RequestHandler = async (
                 type: file.mimetype.startsWith('video') ? 'video' : 'image',
                 event_id: event._id,
                 album_id: albumId,
+                sub_event_id: subEventTag,
                 owner: {
                     type: 'guest',
                     guest_id: guestSession._id.toString(),
