@@ -58,6 +58,13 @@ export const buildMediaQuery = (
         query.is_favorite = true;
     }
 
+    // Filename search (Phase 3): case-insensitive, escaped so user input can't
+    // inject regex metacharacters.
+    if (options.search && options.search.trim()) {
+        const escaped = options.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        query['original.filename'] = { $regex: escaped, $options: 'i' };
+    }
+
     // Sub-event (function) filter — Phase 1. 'none' = only untagged media (the
     // whole-event gallery); an id = that function; omitted = no filter (all).
     if (options.subEventId) {
@@ -141,7 +148,7 @@ export const getMediaByEventService = async (
         // Execute query
         const mediaItems = await Media.find(query)
             .select('_id type event_id album_id sub_event_id is_favorite original variants processing approval owner stats created_at updated_at')
-            .sort({ created_at: -1 })
+            .sort({ created_at: options.sort === 'oldest' ? 1 : -1 })
             .skip(skip)
             .limit(limit)
             .lean();

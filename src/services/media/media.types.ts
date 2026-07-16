@@ -30,6 +30,10 @@ export interface MediaQueryOptions {
     subEventId?: string;
     /** Favorites-only filter — Phase 3 (host curation / keepsake source). */
     favoritesOnly?: boolean;
+    /** Sort order — Phase 3. 'oldest' flips the default newest-first upload sort. */
+    sort?: 'newest' | 'oldest';
+    /** Case-insensitive filename search — Phase 3. */
+    search?: string;
 }
 
 export interface StatusUpdateOptions {
