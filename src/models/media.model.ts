@@ -106,6 +106,10 @@ const mediaSchema = new mongoose.Schema({
     // Approval
     approval: { type: approvalSchema, default: () => ({}) },
 
+    // Host curation (Phase 3): a starred/favorited photo. Powers the favorites
+    // filter and seeds best-shot selection for the future keepsake album.
+    is_favorite: { type: Boolean, default: false },
+
     // Face Metadata (Local Cache)
     faces: [{
         faceId: { type: String, required: true },
@@ -227,6 +231,7 @@ mediaSchema.methods.getProgressInfo = function (this: MediaDocument) {
 mediaSchema.index({ event_id: 1, album_id: 1 });
 mediaSchema.index({ event_id: 1, created_at: -1 }); // Optimized for Event Feed
 mediaSchema.index({ event_id: 1, sub_event_id: 1, created_at: -1 }); // Per-function gallery (Phase 1)
+mediaSchema.index({ event_id: 1, is_favorite: 1, created_at: -1 }); // Favorites filter (Phase 3)
 mediaSchema.index({ album_id: 1, created_at: -1 }); // Optimized for album view
 mediaSchema.index({ "owner.user_id": 1, created_at: -1 });
 mediaSchema.index({ "owner.guest_id": 1, event_id: 1 });

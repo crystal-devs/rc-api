@@ -28,6 +28,8 @@ export interface MediaQueryOptions {
      * (the whole-event / main gallery). Omit for every item in the event.
      */
     subEventId?: string;
+    /** Favorites-only filter — Phase 3 (host curation / keepsake source). */
+    favoritesOnly?: boolean;
 }
 
 export interface StatusUpdateOptions {

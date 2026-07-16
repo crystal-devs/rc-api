@@ -83,7 +83,7 @@ export const getMediaByEventController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { eventId } = req.params;
-        const { page, limit, status, quality, sub_event_id } = req.query;
+        const { page, limit, status, quality, sub_event_id, favorites } = req.query;
         const userId = req.user?._id?.toString();
 
         if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
@@ -149,7 +149,8 @@ export const getMediaByEventController: RequestHandler = async (
             status: effectiveStatus,
             quality: validatedQuality,
             // Sub-event filter chips: an id, or 'none' for untagged media
-            subEventId: typeof sub_event_id === 'string' ? sub_event_id : undefined
+            subEventId: typeof sub_event_id === 'string' ? sub_event_id : undefined,
+            favoritesOnly: favorites === 'true'
         };
 
         logger.info(`📱 Admin getting media for event ${eventId}`, {
@@ -438,6 +439,50 @@ export const updateMediaStatusController: RequestHandler = async (
 /**
  * Bulk update media status
  */
+/**
+ * Toggle a media's host-curation favorite flag (Phase 3).
+ * PATCH /media/:media_id/favorite  { favorite: boolean }
+ * Gated by mediaAccessMiddleware + authorize('media.approve'); scope-aware.
+ */
+export const toggleMediaFavoriteController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { media_id } = req.params;
+        const { favorite } = req.body;
+
+        if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
+            res.status(400).json({ status: false, code: 400, message: 'Invalid media ID', data: null });
+            return;
+        }
+
+        // A scoped co-host may only curate media within their functions.
+        if (!(await passesSubEventScope(req, res, [media_id]))) return;
+
+        const updated = await Media.findByIdAndUpdate(
+            media_id,
+            { $set: { is_favorite: Boolean(favorite), updated_at: new Date() } },
+            { new: true }
+        ).select('_id is_favorite').lean();
+
+        if (!updated) {
+            res.status(404).json({ status: false, code: 404, message: 'Media not found', data: null });
+            return;
+        }
+
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: updated.is_favorite ? 'Added to favorites' : 'Removed from favorites',
+            data: { media_id, is_favorite: updated.is_favorite }
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
 export const bulkUpdateMediaStatusController: RequestHandler = async (
     req: InjectedRequest,
     res: Response,

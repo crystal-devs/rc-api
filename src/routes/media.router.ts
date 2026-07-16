@@ -9,6 +9,7 @@ import {
     getMediaByAlbumController,
     deleteMediaController,
     updateMediaStatusController,
+    toggleMediaFavoriteController,
     bulkUpdateMediaStatusController,
     bulkSoftDeleteMediaController,
     getGuestMediaController,
@@ -138,6 +139,15 @@ mediaRouter.patch(
     mediaAccessMiddleware,
     authorize('media.approve'),
     updateMediaStatusController
+);
+
+// Toggle host-curation favorite (Phase 3)
+mediaRouter.patch(
+    "/:media_id/favorite",
+    authMiddleware,
+    mediaAccessMiddleware,
+    authorize('media.approve'),
+    toggleMediaFavoriteController
 );
 
 // Bulk media status update (approve/reject — moderation)

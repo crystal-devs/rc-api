@@ -53,6 +53,11 @@ export const buildMediaQuery = (
         query['processing.status'] = 'completed';
     }
 
+    // Favorites filter (Phase 3): host-curated / keepsake-album source.
+    if (options.favoritesOnly) {
+        query.is_favorite = true;
+    }
+
     // Sub-event (function) filter — Phase 1. 'none' = only untagged media (the
     // whole-event gallery); an id = that function; omitted = no filter (all).
     if (options.subEventId) {
@@ -135,7 +140,7 @@ export const getMediaByEventService = async (
 
         // Execute query
         const mediaItems = await Media.find(query)
-            .select('_id type event_id album_id sub_event_id original variants processing approval owner stats created_at updated_at')
+            .select('_id type event_id album_id sub_event_id is_favorite original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)
@@ -212,7 +217,7 @@ export const getMediaByAlbumService = async (
 
         // Get media with pagination
         const mediaItems = await Media.find(query)
-            .select('_id type event_id album_id sub_event_id original variants processing approval owner stats created_at updated_at')
+            .select('_id type event_id album_id sub_event_id is_favorite original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)
