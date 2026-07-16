@@ -57,6 +57,19 @@ const eventParticipantSchema = new mongoose.Schema({
         required: true
     },
 
+    // Per-function scope (Phase 1, RBAC_DESIGN.md §5). When non-empty, this
+    // co-host may only moderate/delete media belonging to these functions
+    // (event.sub_events). Empty = unrestricted (all functions + whole-event
+    // media) — the default, so existing co-hosts are unaffected. This narrows
+    // WHICH media a co-host acts on; it does NOT change the role's action policy
+    // (permissions.policy.ts stays authoritative). Ignored for creators and guests.
+    scope: {
+        sub_event_ids: {
+            type: [mongoose.Schema.Types.ObjectId],
+            default: []
+        }
+    },
+
     // Add to EventParticipant schema
     guest_session_id: {
         type: mongoose.Schema.Types.ObjectId,

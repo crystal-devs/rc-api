@@ -50,6 +50,10 @@ export interface EventAccess {
     // legacy boolean fields above are deprecated in favour of can().
     permissions?: ReadonlySet<Action>;
     can?: (action: Action) => boolean;
+    // Per-function scope (Phase 1): sub-event ids this co-host is limited to for
+    // media moderation/delete. undefined/empty = unrestricted. Enforced by
+    // enforceSubEventScope() in the media action controllers, not by policy.
+    subEventScope?: string[];
 }
 
 /**
@@ -179,7 +183,7 @@ export const eventAccessMiddleware = async (
             user_id: new mongoose.Types.ObjectId(userId),
             event_id: new mongoose.Types.ObjectId(event_id),
             status: 'active'
-        }).select('role join_method joined_at last_activity_at').lean();
+        }).select('role join_method joined_at last_activity_at scope').lean();
 
         if (!participant) {
             return sendResponse(res, {
@@ -192,7 +196,7 @@ export const eventAccessMiddleware = async (
             });
         }
 
-        req.eventAccess = attachPolicy(
+        const access = attachPolicy(
             baseEventAccess(event_id, normalizeRole(participant.role), {
                 participantId: participant._id?.toString(),
                 joinMethod: typeof participant.join_method === 'string' ? participant.join_method : undefined,
@@ -203,6 +207,10 @@ export const eventAccessMiddleware = async (
             }),
             event.permissions as EventGuestSettings
         );
+        // Per-function scope for media moderation/delete (Phase 1). Only meaningful
+        // for co-hosts; creators are never scoped.
+        access.subEventScope = (participant.scope?.sub_event_ids ?? []).map((id: any) => id.toString());
+        req.eventAccess = access;
         next();
     } catch (error: any) {
         logger.error(`[eventAccessMiddleware] ${error.message}`, { stack: error.stack });

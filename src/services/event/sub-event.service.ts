@@ -182,3 +182,60 @@ export const resolveSubEventTag = (
     }
     return new mongoose.Types.ObjectId(candidate);
 };
+
+/**
+ * Enforce a co-host's per-function scope on a set of media (Phase 1,
+ * RBAC_DESIGN.md §5). Creators and unrestricted co-hosts (empty scope) always
+ * pass. A scoped co-host may act only on media whose sub_event_id is one of
+ * their assigned functions — whole-event (untagged) media is out of scope for
+ * them. Returns { allowed:false } if ANY target is out of scope, so the caller
+ * can reject the whole action with a clear message.
+ */
+export const enforceSubEventScope = async (
+    actor: { role: string; subEventScope?: string[]; eventId: string },
+    mediaIds: string[]
+): Promise<{ allowed: boolean; message?: string }> => {
+    const scope = actor.subEventScope;
+    if (actor.role !== 'co_host' || !scope || scope.length === 0) {
+        return { allowed: true }; // creators + unrestricted co-hosts
+    }
+
+    const ids = (mediaIds ?? []).filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (ids.length === 0) return { allowed: true };
+
+    const scopeSet = new Set(scope);
+    const media = await Media.find({
+        _id: { $in: ids.map((id) => new mongoose.Types.ObjectId(id)) },
+        event_id: new mongoose.Types.ObjectId(actor.eventId),
+    }).select('sub_event_id').lean();
+
+    const outOfScope = media.some(
+        (m: any) => !m.sub_event_id || !scopeSet.has(m.sub_event_id.toString())
+    );
+    return outOfScope
+        ? { allowed: false, message: 'Some of these photos are outside your assigned functions.' }
+        : { allowed: true };
+};
+
+/**
+ * Validate + normalize a requested co-host scope against an event's functions.
+ * Drops ids that aren't functions of the event (so a stale/foreign id can't be
+ * stored). Returns the clean ObjectId[] to persist.
+ */
+export const sanitizeScopeSubEventIds = async (
+    eventId: string,
+    requested: unknown
+): Promise<mongoose.Types.ObjectId[]> => {
+    if (!Array.isArray(requested) || requested.length === 0) return [];
+    const event = await Event.findById(eventId).select('sub_events').lean();
+    const known = new Set((event?.sub_events ?? []).map((s: any) => s._id.toString()));
+    const seen = new Set<string>();
+    const clean: mongoose.Types.ObjectId[] = [];
+    for (const id of requested) {
+        if (typeof id === 'string' && mongoose.Types.ObjectId.isValid(id) && known.has(id) && !seen.has(id)) {
+            seen.add(id);
+            clean.push(new mongoose.Types.ObjectId(id));
+        }
+    }
+    return clean;
+};

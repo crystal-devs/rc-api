@@ -37,7 +37,11 @@ export {
     addSubEvent,
     updateSubEvent,
     deleteSubEvent,
-    isValidSubEventForEvent
+    isValidSubEventForEvent,
+    resolveSubEventTag,
+    enforceSubEventScope,
+    sanitizeScopeSubEventIds,
+    sortSubEvents
 } from './sub-event.service';
 
 // Export types

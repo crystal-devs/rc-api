@@ -9,6 +9,7 @@ import { ActivityLog } from "@models/activity-log.model";
 import mongoose from "mongoose";
 import { logger } from "@utils/logger";
 import { isAdminRole } from "@utils/role.utils";
+import { sanitizeScopeSubEventIds } from "@services/event/sub-event.service";
 
 // Service Response Type
 interface ServiceResponse<T> {
@@ -586,6 +587,9 @@ export const getEventCoHosts = async (eventId: string): Promise<ServiceResponse<
                     profile_pic: userInfo?.profile_pic
                 },
                 status: coHost.status,
+                // Per-function scope (Phase 1): the functions this co-host is
+                // limited to. Empty = full access.
+                sub_event_scope: (coHost.scope?.sub_event_ids ?? []).map((id: any) => id.toString()),
                 invited_by: inviterInfo ? {
                     id: inviterInfo._id,
                     name: inviterInfo.name
@@ -617,6 +621,53 @@ export const getEventCoHosts = async (eventId: string): Promise<ServiceResponse<
             data: null,
             error
         };
+    }
+};
+
+/**
+ * Set (or clear) a co-host's per-function scope (Phase 1, RBAC_DESIGN.md §5).
+ * Creator-only at the route (cohost.manage). Passing an empty array clears the
+ * scope, restoring full access. Ids that aren't functions of the event are
+ * dropped by sanitizeScopeSubEventIds, so a stale/foreign id can't be stored.
+ */
+export const setCoHostScope = async (
+    eventId: string,
+    targetUserId: string,
+    subEventIds: unknown
+): Promise<ServiceResponse<any>> => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(targetUserId)) {
+            return { status: false, message: 'Invalid user id', data: null };
+        }
+
+        const participant = await EventParticipant.findOne({
+            event_id: new mongoose.Types.ObjectId(eventId),
+            user_id: new mongoose.Types.ObjectId(targetUserId),
+            status: 'active'
+        });
+
+        if (!participant) {
+            return { status: false, message: 'Co-host not found for this event', data: null };
+        }
+        if (participant.role !== 'co_host') {
+            return { status: false, message: 'Scope can only be set for co-hosts', data: null };
+        }
+
+        const clean = await sanitizeScopeSubEventIds(eventId, subEventIds);
+        participant.scope = { sub_event_ids: clean } as any;
+        await participant.save();
+
+        return {
+            status: true,
+            message: clean.length ? 'Co-host functions updated' : 'Co-host given full access',
+            data: {
+                user_id: targetUserId,
+                sub_event_ids: clean.map((id) => id.toString())
+            }
+        };
+    } catch (error: any) {
+        logger.error(`[setCoHostScope] Error: ${error.message}`);
+        return { status: false, message: error.message || 'Failed to set co-host scope', data: null };
     }
 };
 

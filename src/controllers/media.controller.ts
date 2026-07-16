@@ -18,7 +18,7 @@ import {
     updateMediaStatusService,
 } from "@services/media";
 import { GuestSessionHelper } from "@services/guest/guest-session-helper";
-import { resolveSubEventTag } from "@services/event/sub-event.service";
+import { resolveSubEventTag, enforceSubEventScope } from "@services/event/sub-event.service";
 import { getOrCreateDefaultAlbum } from "@services/album";
 import { softDeleteMediaService, bulkSoftDeleteMediaService } from "@services/media/media-management.service";
 import sharp from "sharp";
@@ -44,6 +44,33 @@ interface InjectedRequest extends AuthenticatedRequest {
         role?: string;
         subscription?: any;
     };
+}
+
+/**
+ * Enforce a scoped co-host's per-function limits on a media action (Phase 1).
+ * Sends a 403 and returns false when the actor is a co-host restricted to
+ * certain functions and any target media falls outside them. Creators and
+ * unrestricted co-hosts always pass. req.eventAccess is attached by
+ * eventAccessMiddleware / mediaAccessMiddleware.
+ */
+async function passesSubEventScope(req: any, res: Response, mediaIds: string[]): Promise<boolean> {
+    const access = req.eventAccess;
+    const check = await enforceSubEventScope(
+        { role: access?.role ?? '', subEventScope: access?.subEventScope, eventId: access?.eventId ?? '' },
+        mediaIds
+    );
+    if (!check.allowed) {
+        res.status(403).json({
+            status: false,
+            code: 403,
+            message: check.message,
+            data: null,
+            error: { message: check.message, code: 'FORBIDDEN' },
+            other: null
+        });
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -337,7 +364,9 @@ export const updateMediaStatusController: RequestHandler = async (
             return;
         }
 
-        // Access gated by mediaAccessMiddleware + authorize('media.approve')
+        // Access gated by mediaAccessMiddleware + authorize('media.approve').
+        // A scoped co-host may only moderate media within their functions.
+        if (!(await passesSubEventScope(req, res, [media_id]))) return;
 
         if (!status) {
             res.status(400).json({
@@ -485,6 +514,9 @@ export const bulkUpdateMediaStatusController: RequestHandler = async (
             });
             return;
         }
+
+        // A scoped co-host may only moderate media within their functions.
+        if (!(await passesSubEventScope(req, res, media_ids))) return;
 
         logger.info('Bulk updating media status:', {
             event_id,
@@ -637,7 +669,10 @@ export const deleteMediaController: RequestHandler = async (
             return;
         }
 
-        // Access gated by mediaAccessMiddleware + authorize('media.delete')
+        // Access gated by mediaAccessMiddleware + authorize('media.delete').
+        // A scoped co-host may only delete media within their functions.
+        if (!(await passesSubEventScope(req, res, [media_id]))) return;
+
         logger.info('Deleting media:', {
             media_id,
             user_id: user_id.toString()
@@ -1160,6 +1195,9 @@ export const bulkSoftDeleteMediaController: RequestHandler = async (
             });
             return;
         }
+
+        // A scoped co-host may only delete media within their functions.
+        if (!(await passesSubEventScope(req, res, media_ids))) return;
 
         logger.info('Bulk soft deleting media:', {
             event_id,

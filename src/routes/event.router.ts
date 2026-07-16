@@ -245,6 +245,13 @@ eventRouter.patch('/:event_id/cohosts/:user_id',
     cohostController.manageCoHostController
 );
 
+// Set a co-host's per-function scope (Phase 1) — creator only
+eventRouter.patch('/:event_id/cohosts/:user_id/scope',
+    eventAccessMiddleware,
+    authorize('cohost.manage'),
+    cohostController.setCoHostScopeController
+);
+
 // ============= GUEST SESSION MANAGEMENT =============
 // Get active guest sessions (Host Dashboard)
 eventRouter.get("/:eventId/guest-sessions",
