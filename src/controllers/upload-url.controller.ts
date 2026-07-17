@@ -88,6 +88,7 @@ export const generateUploadUrlController = async (
       type: 'image',
       event_id: eventId,
       album_id: eventId,
+      source: req.user?.role === 'guest' ? 'guest' : 'official',
 
       owner: {
         type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
@@ -258,6 +259,8 @@ export const generateBatchUploadUrlsController = async (
             event_id: eventId,
             album_id: eventId,
             sub_event_id: subEventTag,
+            // Host/photographer uploads are "official"; a logged-in guest's are not.
+            source: req.user?.role === 'guest' ? 'guest' : 'official',
 
             owner: {
               type: req.user?.role === 'guest' ? 'guest' : 'registered_user',

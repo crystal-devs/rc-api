@@ -34,6 +34,8 @@ export interface MediaQueryOptions {
     sort?: 'newest' | 'oldest';
     /** Case-insensitive filename search — Phase 3. */
     search?: string;
+    /** Source filter — Phase 3. 'guest' contributions vs 'official' (host/photographer). */
+    source?: 'guest' | 'official';
 }
 
 export interface StatusUpdateOptions {

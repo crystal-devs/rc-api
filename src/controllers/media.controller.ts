@@ -83,7 +83,7 @@ export const getMediaByEventController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { eventId } = req.params;
-        const { page, limit, status, quality, sub_event_id, favorites, sort, search } = req.query;
+        const { page, limit, status, quality, sub_event_id, favorites, sort, search, source } = req.query;
         const userId = req.user?._id?.toString();
 
         if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
@@ -152,7 +152,8 @@ export const getMediaByEventController: RequestHandler = async (
             subEventId: typeof sub_event_id === 'string' ? sub_event_id : undefined,
             favoritesOnly: favorites === 'true',
             sort: sort === 'oldest' ? 'oldest' : 'newest',
-            search: typeof search === 'string' ? search : undefined
+            search: typeof search === 'string' ? search : undefined,
+            source: source === 'guest' || source === 'official' ? source : undefined
         };
 
         logger.info(`📱 Admin getting media for event ${eventId}`, {
@@ -847,6 +848,7 @@ export const guestUploadMediaController: RequestHandler = async (
                 event_id: event._id,
                 album_id: albumId,
                 sub_event_id: subEventTag,
+                source: 'guest',
                 owner: {
                     type: 'guest',
                     guest_id: guestSession._id.toString(),

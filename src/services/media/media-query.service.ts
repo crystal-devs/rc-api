@@ -58,6 +58,11 @@ export const buildMediaQuery = (
         query.is_favorite = true;
     }
 
+    // Source filter (Phase 3): guest contributions vs official (host/photographer).
+    if (options.source === 'guest' || options.source === 'official') {
+        query.source = options.source;
+    }
+
     // Filename search (Phase 3): case-insensitive, escaped so user input can't
     // inject regex metacharacters.
     if (options.search && options.search.trim()) {
@@ -147,7 +152,7 @@ export const getMediaByEventService = async (
 
         // Execute query
         const mediaItems = await Media.find(query)
-            .select('_id type event_id album_id sub_event_id is_favorite original variants processing approval owner stats created_at updated_at')
+            .select('_id type event_id album_id sub_event_id is_favorite source original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: options.sort === 'oldest' ? 1 : -1 })
             .skip(skip)
             .limit(limit)
@@ -224,7 +229,7 @@ export const getMediaByAlbumService = async (
 
         // Get media with pagination
         const mediaItems = await Media.find(query)
-            .select('_id type event_id album_id sub_event_id is_favorite original variants processing approval owner stats created_at updated_at')
+            .select('_id type event_id album_id sub_event_id is_favorite source original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)

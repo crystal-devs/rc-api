@@ -163,6 +163,8 @@ export interface MediaMetadata {
     sub_event_id: string | null;
     /** Host-curated favorite (Phase 3) */
     is_favorite: boolean;
+    /** Upload source (Phase 3): guest vs official (host/photographer) */
+    source: 'guest' | 'official';
     url: string;
     processing_status: string;
     processing?: {
@@ -339,6 +341,7 @@ async function getMediaMetadataWithCache(mediaItem: any, urlCache: Map<string, s
         type: mediaItem.type,
         sub_event_id: mediaItem.sub_event_id?.toString() || null,
         is_favorite: !!mediaItem.is_favorite,
+        source: mediaItem.source === 'official' ? 'official' : 'guest',
         url: mainUrl,
         processing_status: mediaItem.processing?.status || 'unknown',
         processing: {

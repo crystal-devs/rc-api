@@ -110,6 +110,11 @@ const mediaSchema = new mongoose.Schema({
     // filter and seeds best-shot selection for the future keepsake album.
     is_favorite: { type: Boolean, default: false },
 
+    // Upload source (Phase 3): 'guest' contributions vs 'official' (host /
+    // photographer) media. Set at upload time; drives the Guest/Official filter
+    // and is the prerequisite for photographer mode.
+    source: { type: String, enum: ['guest', 'official'], default: 'guest', index: true },
+
     // Face Metadata (Local Cache)
     faces: [{
         faceId: { type: String, required: true },
