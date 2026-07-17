@@ -369,7 +369,14 @@ export const getGuestMediaService = async (
             // Hide uploader info for privacy
             uploader_display_name: "Guest",
             // Ensure guest access context
-            guest_access: true
+            guest_access: true,
+            // Per-role download quality (Phase 3): guests never receive the
+            // original URL — cap it to the ~1600px "full" tier so a single-photo
+            // download can't pull an original. Hosts use the admin service, which
+            // keeps originals.
+            responsive_urls: item.responsive_urls
+                ? { ...item.responsive_urls, original: item.responsive_urls.full || item.responsive_urls.original }
+                : item.responsive_urls
         }));
 
         // Pagination info
