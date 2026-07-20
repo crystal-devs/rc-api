@@ -1,6 +1,7 @@
 import cron, { ScheduledTask } from 'node-cron';
 import { logger } from '@utils/logger';
 import { cleanupDeletedMedia } from '@services/media/media-management.service';
+import { cleanupExpiredFaceData } from '@services/privacy/face-retention.service';
 
 class CronService {
     private static instance: CronService;
@@ -26,6 +27,17 @@ class CronService {
                 logger.info('Scheduled media cleanup job completed successfully.');
             } catch (error) {
                 logger.error('Scheduled media cleanup job failed:', error);
+            }
+        });
+
+        // DPDP retention sweep: delete expired face collections daily at 03:30 AM
+        this.scheduleTask('30 3 * * *', async () => {
+            logger.info('Starting scheduled face-data retention sweep...');
+            try {
+                await cleanupExpiredFaceData();
+                logger.info('Face-data retention sweep completed successfully.');
+            } catch (error) {
+                logger.error('Face-data retention sweep failed:', error);
             }
         });
 

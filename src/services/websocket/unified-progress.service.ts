@@ -6,6 +6,7 @@
 import { getWebSocketService } from './websocket.service';
 import { Media } from '@models/media.model';
 import { logger } from '@utils/logger';
+import { sseService } from '../sse/sse.service';
 
 export type ProgressStage = 
   | 'queued'
@@ -261,26 +262,24 @@ export class UnifiedProgressService {
   }
 
   /**
-   * Broadcast progress update via WebSocket
+   * Broadcast progress update via SSE (to admins) and WebSocket (to guests)
    */
   private broadcastProgress(progress: ProgressData): void {
     const ws = this.getWebSocketService();
-    if (!ws) return;
+    const eventId = progress.eventId;
 
-    const adminRoom = `admin_${progress.eventId}`;
-    const guestRoom = `guest_${progress.eventId}`;
-
-    // Full details to admin
-    ws.io.to(adminRoom).emit('upload_progress', {
+    // 1. Full details to admin via SSE (NEW)
+    sseService.broadcast(eventId, 'upload_progress', {
       ...progress,
       timestamp: new Date().toISOString()
     });
 
-    // Limited info to guests (only show when ready)
-    if (progress.stage === 'preview_ready' || progress.stage === 'completed') {
+    // 2. Limited info to guests via WebSocket (Lightweight - only for UI triggers)
+    if (ws && (progress.stage === 'preview_ready' || progress.stage === 'completed')) {
+      const guestRoom = `guest_${eventId}`;
       ws.io.to(guestRoom).emit('upload_progress', {
         mediaId: progress.mediaId,
-        eventId: progress.eventId,
+        eventId,
         filename: progress.filename,
         stage: progress.stage,
         percentage: progress.percentage,
@@ -289,7 +288,7 @@ export class UnifiedProgressService {
       });
     }
 
-    logger.debug(`Progress broadcast: ${progress.mediaId.substring(0, 8)} - ${progress.stage} (${progress.percentage}%)`);
+    logger.debug(`Progress broadcast: ${progress.mediaId.substring(0, 8)} - ${progress.stage} (SSE + WS)`);
   }
 
   /**

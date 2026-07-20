@@ -5,3 +5,5 @@ export { signedUrlCache, SignedUrlCacheService } from './signed-url-cache.servic
 export { responseCacheService, ResponseCacheService } from './response-cache.service';
 export { photoCacheService, PhotoCacheService } from './photo-cache.service';
 export { cacheInvalidation, CacheInvalidationService } from './cache-invalidation.service';
+export { cachedFetch } from './cached-fetch.service';
+export type { CachedFetchOptions } from './cached-fetch.service';

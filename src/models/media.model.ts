@@ -86,6 +86,11 @@ const mediaSchema = new mongoose.Schema({
     event_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.EVENT, required: true },
     album_id: { type: mongoose.Schema.Types.ObjectId, ref: MODEL_NAMES.ALBUM, required: true },
 
+    // Optional sub-event (function) this media belongs to. null = the whole
+    // event / main gallery. References an embedded event.sub_events[]._id — kept
+    // nullable so existing single-function events need no migration. (Phase 1)
+    sub_event_id: { type: mongoose.Schema.Types.ObjectId, default: null },
+
     // Owner (unified)
     owner: { type: ownerSchema, required: true },
 
@@ -100,6 +105,15 @@ const mediaSchema = new mongoose.Schema({
 
     // Approval
     approval: { type: approvalSchema, default: () => ({}) },
+
+    // Host curation (Phase 3): a starred/favorited photo. Powers the favorites
+    // filter and seeds best-shot selection for the future keepsake album.
+    is_favorite: { type: Boolean, default: false },
+
+    // Upload source (Phase 3): 'guest' contributions vs 'official' (host /
+    // photographer) media. Set at upload time; drives the Guest/Official filter
+    // and is the prerequisite for photographer mode.
+    source: { type: String, enum: ['guest', 'official'], default: 'guest', index: true },
 
     // Face Metadata (Local Cache)
     faces: [{
@@ -221,6 +235,8 @@ mediaSchema.methods.getProgressInfo = function (this: MediaDocument) {
 // Indexes
 mediaSchema.index({ event_id: 1, album_id: 1 });
 mediaSchema.index({ event_id: 1, created_at: -1 }); // Optimized for Event Feed
+mediaSchema.index({ event_id: 1, sub_event_id: 1, created_at: -1 }); // Per-function gallery (Phase 1)
+mediaSchema.index({ event_id: 1, is_favorite: 1, created_at: -1 }); // Favorites filter (Phase 3)
 mediaSchema.index({ album_id: 1, created_at: -1 }); // Optimized for album view
 mediaSchema.index({ "owner.user_id": 1, created_at: -1 });
 mediaSchema.index({ "owner.guest_id": 1, event_id: 1 });

@@ -7,6 +7,7 @@ import { injectedRequest } from "types/injected-types";
 import mongoose from "mongoose";
 import { logger } from "@utils/logger";
 import { sendResponse, handleControllerError } from "@utils/express.util";
+import { normalizeRole } from "@utils/role.utils";
 import { EventInvitation } from "@models/event-invitations.model";
 import { Event } from "@models/event.model";
 
@@ -62,12 +63,12 @@ export const sendInvitationsController = async (
             }
         }
 
-        // Validate role
+        // Validate role (legacy values accepted, normalized to co_host/guest below)
         if (!['co_host', 'moderator', 'guest', 'viewer'].includes(role)) {
             return sendResponse(res, {
                 status: false,
                 code: 400,
-                message: 'Invalid role. Use: co_host, moderator, guest, viewer',
+                message: 'Invalid role. Use: co_host, guest',
                 data: null
             });
         }
@@ -104,7 +105,7 @@ export const sendInvitationsController = async (
                 invitation_type: 'email',
                 invitee_email: email,
                 invited_by: new mongoose.Types.ObjectId(invitedBy),
-                intended_role: role,
+                intended_role: normalizeRole(role),
                 expires_at: expiresAt,
                 personal_message: personalMessage || null
             });

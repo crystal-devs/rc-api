@@ -6,7 +6,8 @@
 export {
     createEventService,
     deleteEventService,
-    updateEventService
+    updateEventService,
+    toggleEventArchiveService
 } from './event-core.service';
 
 export {
@@ -22,7 +23,6 @@ export {
     processShareSettingsData,
     validateCoHosts,
     addCreatorAsParticipant,
-    checkUpdatePermission,
     getUserEventStats,
     recordEventActivity,
     handleVisibilityTransition
@@ -31,6 +31,18 @@ export {
 export {
     processEventUpdateData
 } from './event-management.service';
+
+export {
+    listSubEvents,
+    addSubEvent,
+    updateSubEvent,
+    deleteSubEvent,
+    isValidSubEventForEvent,
+    resolveSubEventTag,
+    enforceSubEventScope,
+    sanitizeScopeSubEventIds,
+    sortSubEvents
+} from './sub-event.service';
 
 // Export types
 export type {

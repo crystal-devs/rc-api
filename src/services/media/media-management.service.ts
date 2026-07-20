@@ -19,6 +19,7 @@ import { EventParticipant } from '@models/event-participants.model';
 import { mediaNotificationService } from '@services/websocket/notifications';
 import type { ServiceResponse, StatusUpdateOptions } from './media.types';
 import { getPhotoWallWebSocketService } from '@services/photoWallWebSocketService';
+import { getWebSocketService } from '@services/websocket/websocket.service';
 
 export const updateMediaStatusService = async (
     mediaId: string,
@@ -102,26 +103,51 @@ export const updateMediaStatusService = async (
 
         // Broadcast status change via WebSocket
         try {
+            // 1. Broadcast updated stats counts to admin
             mediaNotificationService.broadcastMediaStats(eventId);
 
-            // Notify PhotoWall if media was approved and we have share token
+            // 2. Emit guest-facing slim event (new_photos_available or photo_removed)
+            //    This is the primary path — done directly in the service for reliability.
+            const webSocketService = getWebSocketService();
+            if (webSocketService) {
+                type MediaStatus = 'pending' | 'approved' | 'rejected' | 'hidden' | 'deleted' | 'auto_approved';
+                webSocketService.emitStatusUpdate({
+                    mediaId,
+                    eventId,
+                    previousStatus: (previousStatus || 'pending') as MediaStatus,
+                    newStatus: status as MediaStatus,
+                    updatedBy: {
+                        name: options.adminId || 'admin',
+                        type: 'admin'
+                    },
+                    timestamp: new Date()
+                });
+            }
+
+            // 3. Notify PhotoWall if media was approved and we have share token
             if ((status === 'approved' || status === 'auto_approved') &&
-                shareToken &&
                 previousStatus !== 'approved' &&
                 previousStatus !== 'auto_approved') {
 
-                const photoWallService = getPhotoWallWebSocketService();
-                if (photoWallService) {
-                    await photoWallService.notifyNewMediaUpload(shareToken, updatedMedia);
+                try {
+                    const event = await Event.findById(eventId).select('share_token').lean();
+                    const shareToken = event?.share_token;
+                    if (shareToken) {
+                        const photoWallService = getPhotoWallWebSocketService();
+                        if (photoWallService) {
+                            await photoWallService.notifyNewMediaUpload(shareToken, updatedMedia);
+                        }
+                    }
+                } catch (eventError) {
+                    logger.warn('Could not fetch share token for PhotoWall notification', { eventId });
                 }
             }
 
-            logger.info('WebSocket status update and stats broadcasted', {
+            logger.info('✅ WebSocket status update broadcasted', {
                 mediaId: mediaId.substring(0, 8) + '...',
                 previousStatus,
                 newStatus: status,
                 eventId: eventId.substring(0, 8) + '...',
-                photoWallNotified: !!(shareToken && (status === 'approved' || status === 'auto_approved'))
             });
         } catch (wsError) {
             logger.error('Failed to broadcast via WebSocket:', wsError);

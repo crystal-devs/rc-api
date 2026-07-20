@@ -1,8 +1,9 @@
 import express from "express";
 import multer from "multer";
-import { loginWithFaceController } from "@controllers/guest/guest-auth.controller";
+import { loginWithFaceController, withdrawFaceConsentController } from "@controllers/guest/guest-auth.controller";
 import { getMyPhotosController } from "@controllers/guest/guest-media.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
+import { faceSearchRateLimiter } from "@configs/security.config";
 
 const guestRouter = express.Router();
 const wrap = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -18,8 +19,11 @@ const upload = multer({
 // === PUBLIC GUEST ROUTES ===
 
 // Face Login: Uploads a selfie -> Returns token + faceId
+// Rate-limited hard: unauthenticated endpoint that runs a Rekognition face
+// search (biometric oracle) and creates guest sessions.
 guestRouter.post(
     "/auth/face",
+    faceSearchRateLimiter,
     upload.single('selfie'),
     wrap(loginWithFaceController)
 );
@@ -34,6 +38,13 @@ guestRouter.get(
     "/media/mine",
     authMiddleware, // This will populate req.user with { sessionId, faceId, eventId }
     wrap(getMyPhotosController)
+);
+
+// DPDP: withdraw biometric consent — deletes the guest's face data
+guestRouter.post(
+    "/consent/withdraw",
+    authMiddleware,
+    wrap(withdrawFaceConsentController)
 );
 
 export default guestRouter;

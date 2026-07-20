@@ -3,6 +3,7 @@
 // ====================================
 
 import type { EventResponse, UserAccess } from './access.types';
+import { sortSubEvents } from '../sub-event.service';
 
 export class EventResponseService {
     /**
@@ -22,7 +23,11 @@ export class EventResponseService {
             location: event.location?.name ? {
                 name: event.location.name
             } : null,
-            styling_config: event.styling_config || {}
+            styling_config: event.styling_config || {},
+            // Functions in timeline order — drives the guest gallery's section
+            // dividers. Empty array for single-function events, so casual guests
+            // never see the concept. (Phase 1)
+            sub_events: sortSubEvents(event.sub_events)
         };
 
         // Add permissions only if user can join

@@ -4,8 +4,21 @@ import { trimObject } from "@utils/sanitizers.util";
 import { injectedRequest } from "types/injected-types";
 import { createBulkDownloadService, getBulkDownloadStatusService } from "@services/media/bulk-download.service";
 import { Event } from "@models/event.model";
+import { EventParticipant } from "@models/event-participants.model";
+import { isAdminRole } from "@utils/role.utils";
 import mongoose from "mongoose";
 import { logger } from "@utils/logger";
+
+// Per-role download quality (Phase 3). Hosts (creator/co-host) get originals;
+// everyone else is capped to the ~1600px "large" tier. Enforced server-side so a
+// guest can't request 'original'.
+const GUEST_MAX_QUALITY = 'large';
+const capQualityForRole = (requested: string, isHost: boolean): string => {
+    const q = requested || 'original';
+    if (isHost) return q;
+    // Non-hosts never receive originals.
+    return q === 'original' ? GUEST_MAX_QUALITY : q;
+};
 
 export const createBulkDownloadController = async (
     req: injectedRequest,
@@ -77,10 +90,20 @@ export const createBulkDownloadController = async (
         // Check if user is authenticated
         const userId = req.user?._id?.toString();
 
+        // Is the requester a host (creator/co-host)? Determines download quality.
+        let isHost = false;
+
         if (userId) {
             // Authenticated user - check if they have access to this event
             requestedById = userId;
             requestedByType = 'authenticated_user';
+
+            const participant = await EventParticipant.findOne({
+                user_id: new mongoose.Types.ObjectId(userId),
+                event_id: new mongoose.Types.ObjectId(eventId),
+                status: 'active'
+            }).select('role').lean();
+            isHost = !!participant && isAdminRole(participant.role);
 
             // For private events, verify user has access
             if (event.visibility === 'private') {
@@ -128,12 +151,18 @@ export const createBulkDownloadController = async (
             requestedByType = 'guest';
         }
 
+        // Cap the requested quality by role (guests never get originals).
+        const effectiveQuality = capQualityForRole(quality, isHost);
+        if (effectiveQuality !== quality) {
+            logger.info(`[createBulkDownloadController] Capped download quality '${quality}' -> '${effectiveQuality}' for non-host requester`);
+        }
+
         const response = await createBulkDownloadService({
             eventId,
             shareToken,
             requestedById,
             requestedByType,
-            quality
+            quality: effectiveQuality
         });
 
         sendResponse(res, response);

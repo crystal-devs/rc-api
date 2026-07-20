@@ -8,43 +8,8 @@ import { EventInvitation } from "@models/event-invitations.model";
 import { ActivityLog } from "@models/activity-log.model";
 import mongoose from "mongoose";
 import { logger } from "@utils/logger";
-
-// Role permissions template
-const ROLE_PERMISSIONS = {
-    creator: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: true,
-        can_moderate_content: true,
-        can_manage_participants: true,
-        can_edit_event: true,
-        can_delete_event: true,
-        can_transfer_ownership: true
-    },
-    co_host: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: true,
-        can_moderate_content: true,
-        can_manage_participants: true,
-        can_edit_event: true,
-        can_delete_event: false,
-        can_transfer_ownership: false
-    },
-    guest: {
-        can_view: true,
-        can_upload: false,
-        can_download: false,
-        can_invite_others: false,
-        can_moderate_content: false,
-        can_manage_participants: false,
-        can_edit_event: false,
-        can_delete_event: false,
-        can_transfer_ownership: false
-    }
-};
+import { isAdminRole } from "@utils/role.utils";
+import { sanitizeScopeSubEventIds } from "@services/event/sub-event.service";
 
 // Service Response Type
 interface ServiceResponse<T> {
@@ -66,15 +31,9 @@ export const checkParticipantManagementPermission = async (
             status: 'active'
         });
 
-        console.log(participant, userId, eventId, 'permissionsss');
-        if (
-            participant &&
-            participant.permissions &&
-            typeof participant.permissions.can_manage_participants === 'boolean'
-        ) {
-            return participant.permissions.can_manage_participants;
-        }
-        return false;
+        // Role-based check (policy: participants.manage = creator or co_host) —
+        // the stored permission blob is deprecated and no longer consulted.
+        return !!participant && isAdminRole(participant.role);
     } catch (error) {
         logger.error('Error checking participant management permission:', error);
         return false;
@@ -294,7 +253,6 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<Servi
                 // Update existing participant to co-host
                 existingParticipant.role = 'co_host';
                 existingParticipant.status = 'active';
-                existingParticipant.permissions = ROLE_PERMISSIONS.co_host;
                 existingParticipant.join_method = 'co_host_invite';
                 existingParticipant.invited_by = invitation.invited_by;
                 existingParticipant.invited_at = invitation.createdAt;
@@ -328,7 +286,6 @@ export const joinAsCoHost = async (token: string, userId: string): Promise<Servi
                 invited_at: invitation.createdAt,
                 joined_at: new Date(),
                 last_activity_at: new Date(),
-                permissions: ROLE_PERMISSIONS.co_host,
                 stats: {
                     uploads_count: 0,
                     downloads_count: 0,
@@ -630,7 +587,9 @@ export const getEventCoHosts = async (eventId: string): Promise<ServiceResponse<
                     profile_pic: userInfo?.profile_pic
                 },
                 status: coHost.status,
-                permissions: coHost.permissions,
+                // Per-function scope (Phase 1): the functions this co-host is
+                // limited to. Empty = full access.
+                sub_event_scope: (coHost.scope?.sub_event_ids ?? []).map((id: any) => id.toString()),
                 invited_by: inviterInfo ? {
                     id: inviterInfo._id,
                     name: inviterInfo.name
@@ -662,6 +621,53 @@ export const getEventCoHosts = async (eventId: string): Promise<ServiceResponse<
             data: null,
             error
         };
+    }
+};
+
+/**
+ * Set (or clear) a co-host's per-function scope (Phase 1, RBAC_DESIGN.md §5).
+ * Creator-only at the route (cohost.manage). Passing an empty array clears the
+ * scope, restoring full access. Ids that aren't functions of the event are
+ * dropped by sanitizeScopeSubEventIds, so a stale/foreign id can't be stored.
+ */
+export const setCoHostScope = async (
+    eventId: string,
+    targetUserId: string,
+    subEventIds: unknown
+): Promise<ServiceResponse<any>> => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(targetUserId)) {
+            return { status: false, message: 'Invalid user id', data: null };
+        }
+
+        const participant = await EventParticipant.findOne({
+            event_id: new mongoose.Types.ObjectId(eventId),
+            user_id: new mongoose.Types.ObjectId(targetUserId),
+            status: 'active'
+        });
+
+        if (!participant) {
+            return { status: false, message: 'Co-host not found for this event', data: null };
+        }
+        if (participant.role !== 'co_host') {
+            return { status: false, message: 'Scope can only be set for co-hosts', data: null };
+        }
+
+        const clean = await sanitizeScopeSubEventIds(eventId, subEventIds);
+        participant.scope = { sub_event_ids: clean } as any;
+        await participant.save();
+
+        return {
+            status: true,
+            message: clean.length ? 'Co-host functions updated' : 'Co-host given full access',
+            data: {
+                user_id: targetUserId,
+                sub_event_ids: clean.map((id) => id.toString())
+            }
+        };
+    } catch (error: any) {
+        logger.error(`[setCoHostScope] Error: ${error.message}`);
+        return { status: false, message: error.message || 'Failed to set co-host scope', data: null };
     }
 };
 

@@ -10,6 +10,7 @@ import { ActivityLog } from "@models/activity-log.model";
 import { User } from "@models/user.model";
 import mongoose from "mongoose";
 import { logger } from "@utils/logger";
+import { normalizeRole, type CanonicalRole } from "@utils/role.utils";
 
 // Service Response Type
 interface ServiceResponse<T> {
@@ -18,85 +19,6 @@ interface ServiceResponse<T> {
     data: T | null;
     error?: any;
 }
-
-// Role permissions template
-const ROLE_PERMISSIONS = {
-    creator: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: true,
-        can_moderate_content: true,
-        can_manage_participants: true,
-        can_edit_event: true,
-        can_delete_event: true,
-        can_transfer_ownership: true,
-        can_approve_content: true,
-        can_export_data: true,
-        can_view_analytics: true,
-        can_manage_settings: true
-    },
-    co_host: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: true,
-        can_moderate_content: true,
-        can_manage_participants: true,
-        can_edit_event: true,
-        can_delete_event: false,
-        can_transfer_ownership: false,
-        can_approve_content: true,
-        can_export_data: true,
-        can_view_analytics: true,
-        can_manage_settings: false
-    },
-    moderator: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: false,
-        can_moderate_content: true,
-        can_manage_participants: false,
-        can_edit_event: false,
-        can_delete_event: false,
-        can_transfer_ownership: false,
-        can_approve_content: true,
-        can_export_data: false,
-        can_view_analytics: false,
-        can_manage_settings: false
-    },
-    guest: {
-        can_view: true,
-        can_upload: true,
-        can_download: false,
-        can_invite_others: false,
-        can_moderate_content: false,
-        can_manage_participants: false,
-        can_edit_event: false,
-        can_delete_event: false,
-        can_transfer_ownership: false,
-        can_approve_content: false,
-        can_export_data: false,
-        can_view_analytics: false,
-        can_manage_settings: false
-    },
-    viewer: {
-        can_view: true,
-        can_upload: false,
-        can_download: false,
-        can_invite_others: false,
-        can_moderate_content: false,
-        can_manage_participants: false,
-        can_edit_event: false,
-        can_delete_event: false,
-        can_transfer_ownership: false,
-        can_approve_content: false,
-        can_export_data: false,
-        can_view_analytics: false,
-        can_manage_settings: false
-    }
-};
 
 // Get event participants with filtering and pagination
 export const getEventParticipants = async (
@@ -237,8 +159,7 @@ export const getEventParticipants = async (
                 last_activity_at: participant.last_activity_at,
                 removed_at: participant.removed_at,
 
-                // Permissions and stats
-                permissions: participant.permissions,
+                // Stats (capabilities are role-derived — see permissions.policy.ts)
                 stats: participant.stats
             };
         });
@@ -277,7 +198,7 @@ export const inviteParticipants = async (
         email?: string;
         phone?: string;
         name?: string;
-        role?: 'co_host' | 'moderator' | 'guest' | 'viewer';
+        role?: CanonicalRole;
     }>,
     invitedBy: string,
     options?: {
@@ -346,7 +267,7 @@ export const inviteParticipants = async (
                     invitee_phone: invite.phone,
                     invitee_name: invite.name,
                     invited_by: new mongoose.Types.ObjectId(invitedBy),
-                    intended_role: invite.role || 'guest',
+                    intended_role: normalizeRole(invite.role),
                     expires_at: new Date(Date.now() + (options?.expiresInHours || 168) * 60 * 60 * 1000),
                     personal_message: options?.personalMessage
                 }], { session });
@@ -426,7 +347,7 @@ export const updateParticipant = async (
     eventId: string,
     participantId: string,
     updates: {
-        role?: 'co_host' | 'moderator' | 'guest' | 'viewer';
+        role?: CanonicalRole;
         permissions?: Record<string, boolean>;
         status?: 'active' | 'pending' | 'blocked' | 'removed';
     },
@@ -458,25 +379,17 @@ export const updateParticipant = async (
         const updateData: any = {};
         let statsUpdate: any = {};
 
-        // Handle role change
-        if (updates.role && updates.role !== participant.role) {
-            updateData.role = updates.role;
-            updateData.permissions = ROLE_PERMISSIONS[updates.role];
+        // Handle role change (normalize legacy values before comparing/storing)
+        const normalizedRole = updates.role ? normalizeRole(updates.role) : undefined;
+        if (normalizedRole && normalizedRole !== participant.role) {
+            updateData.role = normalizedRole;
 
             // Update event stats for role changes
-            if (previousRole === 'co_host' && updates.role !== 'co_host') {
+            if (previousRole === 'co_host' && normalizedRole !== 'co_host') {
                 statsUpdate['stats.co_hosts_count'] = -1;
-            } else if (previousRole !== 'co_host' && updates.role === 'co_host') {
+            } else if (previousRole !== 'co_host' && normalizedRole === 'co_host') {
                 statsUpdate['stats.co_hosts_count'] = 1;
             }
-        }
-
-        // Handle custom permissions
-        if (updates.permissions) {
-            updateData.permissions = {
-                ...participant.permissions,
-                ...updates.permissions
-            };
         }
 
         // Handle status change
@@ -526,10 +439,9 @@ export const updateParticipant = async (
                 target_participant_id: participantId,
                 target_user_id: participant.user_id?.toString(),
                 changes: {
-                    role: { from: previousRole, to: updates.role },
+                    role: { from: previousRole, to: normalizedRole },
                     status: { from: previousStatus, to: updates.status }
-                },
-                updated_permissions: updates.permissions ? Object.keys(updates.permissions) : []
+                }
             }
         }], { session });
 
@@ -809,7 +721,6 @@ export const getParticipantStats = async (
                 last_activity_at: participant.last_activity_at,
                 stats: participant.stats,
                 activity_breakdown: activityStats,
-                permissions: participant.permissions,
                 invited_by: participant.invited_by
             }
         };

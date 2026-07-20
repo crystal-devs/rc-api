@@ -11,44 +11,10 @@ import { ServiceResponse } from "@services/media";
 import { EventType } from "./event.types";
 import { getPhotoWallWebSocketService } from "@services/photoWallWebSocketService";
 import { Media } from "@models/media.model";
+import { GuestSession } from "@models/guest-session.model";
+import { rekognitionService } from "@services/aws/rekognition.service";
 import { getEventDetailService } from "./event-query.service";
-
-// Role permissions template
-const ROLE_PERMISSIONS = {
-    creator: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: true,
-        can_moderate_content: true,
-        can_manage_participants: true,
-        can_edit_event: true,
-        can_delete_event: true,
-        can_transfer_ownership: true
-    },
-    co_host: {
-        can_view: true,
-        can_upload: true,
-        can_download: true,
-        can_invite_others: true,
-        can_moderate_content: true,
-        can_manage_participants: true,
-        can_edit_event: true,
-        can_delete_event: false,
-        can_transfer_ownership: false
-    },
-    guest: {
-        can_view: true,
-        can_upload: false,
-        can_download: false,
-        can_invite_others: false,
-        can_moderate_content: false,
-        can_manage_participants: false,
-        can_edit_event: false,
-        can_delete_event: false,
-        can_transfer_ownership: false
-    }
-};
+import { normalizeRole, isAdminRole } from "@utils/role.utils";
 
 export const createEventService = async (
     eventData: Partial<EventType>
@@ -81,7 +47,6 @@ export const createEventService = async (
             role: 'creator',
             join_method: 'created_event',
             status: 'active',
-            permissions: ROLE_PERMISSIONS.creator,
             joined_at: new Date(),
             last_activity_at: new Date()
         }], { session });
@@ -180,7 +145,9 @@ export const deleteEventService = async (
             status: 'active'
         }).session(session);
 
-        if (!userParticipant || !userParticipant.permissions.can_delete_event) {
+        // Role-based check (policy: event.delete is creator-only) — the stored
+        // permission blob is deprecated and no longer consulted.
+        if (!userParticipant || normalizeRole(userParticipant.role) !== 'creator') {
             await session.abortTransaction();
             return {
                 status: false,
@@ -233,6 +200,17 @@ export const deleteEventService = async (
         await session.commitTransaction();
         logger.info(`[deleteEventService] Successfully deleted event: ${eventId}`);
 
+        // DPDP: biometric data must not outlive the event. Runs after the
+        // commit (AWS calls can't join the Mongo transaction). A failure here
+        // only leaves an orphan AWS collection — logged for manual cleanup.
+        rekognitionService.deleteCollection(eventId)
+            .then(() => GuestSession.updateMany(
+                { event_id: new mongoose.Types.ObjectId(eventId) },
+                { $set: { aws_face_id: null, selfie_url: null, 'face_consent.withdrawn_at': new Date() } }
+            ))
+            .then(() => logger.info(`[deleteEventService] Face collection + guest face data cleared for event ${eventId}`))
+            .catch((err) => logger.error(`[deleteEventService] Face data cleanup failed for event ${eventId}:`, err));
+
         return {
             status: true,
             code: 200,
@@ -277,7 +255,9 @@ export const updateEventService = async (
             status: 'active'
         }).session(session);
 
-        if (!userParticipant || !userParticipant.permissions.can_edit_event) {
+        // Role-based check (policy: event.update = creator or co_host) — the
+        // stored permission blob is deprecated and no longer consulted.
+        if (!userParticipant || !isAdminRole(userParticipant.role)) {
             await session.abortTransaction();
             return {
                 status: false,
@@ -397,11 +377,74 @@ export const updateEventService = async (
     }
 };
 
+/**
+ * Close or reopen an event for guests (the `event.archive` action —
+ * see configs/permissions.policy.ts: "close/reopen for guests, creator only").
+ * Archiving deactivates the guest share link; uploaded media is untouched. This
+ * is the ONLY path that flips `share_settings.is_active`, so the generic event
+ * update no longer needs to special-case the creator-only close/reopen.
+ */
+export const toggleEventArchiveService = async (
+    eventId: string,
+    userId: string,
+    archive: boolean
+): Promise<ServiceResponse<EventType>> => {
+    try {
+        // The route's authorize('event.archive') gate already restricts this to
+        // the creator; keep an owner check as defense in depth.
+        const event = await Event.findById(eventId).select('created_by').lean();
+        if (!event) {
+            return { status: false, code: 404, message: 'Event not found', data: null, error: null, other: null };
+        }
+        if (event.created_by.toString() !== userId) {
+            return {
+                status: false,
+                code: 403,
+                message: 'Only the event creator can close or reopen the event',
+                data: null,
+                error: null,
+                other: null
+            };
+        }
+
+        const updated = await Event.findByIdAndUpdate(
+            eventId,
+            { $set: { 'share_settings.is_active': !archive, updated_at: new Date() } },
+            { new: true }
+        ).lean();
+
+        // Deleted between the owner check and the update — don't report success
+        // with a null event (the client would write null into its store).
+        if (!updated) {
+            return { status: false, code: 404, message: 'Event not found', data: null, error: null, other: null };
+        }
+
+        return {
+            status: true,
+            code: 200,
+            message: archive ? 'Event closed for guests' : 'Event reopened',
+            data: updated as EventType,
+            error: null,
+            other: null
+        };
+    } catch (error: any) {
+        logger.error(`[toggleEventArchiveService] ${error.message}`);
+        return {
+            status: false,
+            code: 500,
+            message: error.message || 'Failed to update event',
+            data: null,
+            error: null,
+            other: null
+        };
+    }
+};
+
 // Helper function to get user's role in an event
 export const getUserEventRole = async (
     userId: string,
     eventId: string
-): Promise<ServiceResponse<{ role: string; permissions: any }>> => {
+): Promise<ServiceResponse<{ role: string }>> => {
     try {
         const participant = await EventParticipant.findOne({
             user_id: new mongoose.Types.ObjectId(userId),
@@ -425,8 +468,7 @@ export const getUserEventRole = async (
             code: 200,
             message: "User role retrieved successfully",
             data: {
-                role: String(participant.role),
-                permissions: participant.permissions
+                role: String(participant.role)
             },
             error: null,
             other: {

@@ -7,6 +7,8 @@ import { keys } from '@configs/dotenv.config';
 import { logger } from '@utils/logger';
 import { Media } from '@models/media.model';
 import { validatePermissionsAndGetApproval } from '@utils/media.utils';
+import { isValidSubEventForEvent } from '@services/event/sub-event.service';
+import mongoose from 'mongoose';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -29,6 +31,8 @@ interface BatchUploadUrlRequest {
     fileName: string;
     fileType: string;
   }>;
+  /** Optional function (sub-event) to tag this batch with — Phase 1 */
+  subEventId?: string;
 }
 
 interface AuthenticatedRequest extends Request {
@@ -84,6 +88,7 @@ export const generateUploadUrlController = async (
       type: 'image',
       event_id: eventId,
       album_id: eventId,
+      source: req.user?.role === 'guest' ? 'guest' : 'official',
 
       owner: {
         type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
@@ -149,7 +154,7 @@ export const generateBatchUploadUrlsController = async (
   try {
     const userId = req.user
     console.log(userId, 'User ID');
-    const { eventId, files }: BatchUploadUrlRequest = req.body;
+    const { eventId, files, subEventId }: BatchUploadUrlRequest = req.body;
 
     // Validate required fields
     if (!eventId || !files || !Array.isArray(files)) {
@@ -178,11 +183,11 @@ export const generateBatchUploadUrlsController = async (
         });
       }
 
-      // Validate file type (only images allowed)
-      if (!file.fileType.startsWith('image/')) {
+      // Validate file type (images and videos allowed)
+      if (!file.fileType.startsWith('image/') && !file.fileType.startsWith('video/')) {
         return res.status(400).json({
           status: false,
-          message: `File at index ${i} must be an image type`
+          message: `File at index ${i} must be an image or video type`
         });
       }
     }
@@ -208,6 +213,16 @@ export const generateBatchUploadUrlsController = async (
     const uploaderId = req.user?._id;
     // @ts-ignore - Handle possible type mismatch in req.user
     const approvalResult = await validatePermissionsAndGetApproval(eventId, typeof uploaderId === 'string' ? uploaderId : uploaderId?._id);
+
+    // Resolve the function tag once for the whole batch (one query, not one per
+    // file). An id from another event — or a function since deleted — resolves
+    // to null (the whole-event gallery) rather than failing the upload. (Phase 1)
+    const subEventTag = subEventId && await isValidSubEventForEvent(eventId, subEventId)
+      ? new mongoose.Types.ObjectId(subEventId)
+      : null;
+    if (subEventId && !subEventTag) {
+      logger.warn(`Ignoring unknown sub_event_id '${subEventId}' for event ${eventId} — tagging batch to the whole event`);
+    }
 
     // Process files in batches to control concurrency
     for (let i = 0; i < files.length; i += CONCURRENT_LIMIT) {
@@ -237,11 +252,15 @@ export const generateBatchUploadUrlsController = async (
 
 
           // Create Media Record
+          const isVideo = file.fileType.startsWith('video/');
           const media = new Media({
             upload_id: uploadId,
-            type: 'image',
+            type: isVideo ? 'video' : 'image',
             event_id: eventId,
             album_id: eventId,
+            sub_event_id: subEventTag,
+            // Host/photographer uploads are "official"; a logged-in guest's are not.
+            source: req.user?.role === 'guest' ? 'guest' : 'official',
 
             owner: {
               type: req.user?.role === 'guest' ? 'guest' : 'registered_user',
@@ -253,8 +272,9 @@ export const generateBatchUploadUrlsController = async (
               public_id: key,
               filename: file.fileName,
               format: fileExtension,
-              width: 0,   // Placeholder
-              height: 0,  // Placeholder
+              width: isVideo ? undefined : 0,     // Placeholder — images only
+              height: isVideo ? undefined : 0,    // Placeholder — images only
+              duration: isVideo ? 0 : undefined,  // Placeholder — videos only
               size_mb: 0  // Placeholder
             },
 

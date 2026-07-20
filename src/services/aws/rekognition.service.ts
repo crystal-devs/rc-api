@@ -1,4 +1,5 @@
-import { RekognitionClient, CreateCollectionCommand, IndexFacesCommand, SearchFacesByImageCommand, FaceMatch, SearchFacesCommand, SearchFacesCommandOutput } from "@aws-sdk/client-rekognition";
+import { RekognitionClient, CreateCollectionCommand, IndexFacesCommand, SearchFacesByImageCommand, FaceMatch, SearchFacesCommand, SearchFacesCommandOutput, DeleteFacesCommand, DeleteCollectionCommand } from "@aws-sdk/client-rekognition";
+import { rekognitionQueue } from "@queues/rekognition.queue";
 import { keys } from "@configs/dotenv.config";
 import { logger } from "@utils/logger";
 
@@ -203,6 +204,69 @@ export const rekognitionService = {
                 return [];
             }
             throw error;
+        }
+    },
+    /**
+     * Delete specific faces from an event's collection.
+     * Used when a guest withdraws biometric consent (DPDP).
+     */
+    deleteFaces: async (faceIds: string[], eventId: string) => {
+        const collectionId = `event_${eventId}`;
+        if (!faceIds.length) return true;
+        try {
+            const command = new DeleteFacesCommand({
+                CollectionId: collectionId,
+                FaceIds: faceIds,
+            });
+            const response = await rekognitionClient.send(command);
+            logger.info(`Deleted ${response.DeletedFaces?.length || 0} face(s) from ${collectionId}`);
+            return true;
+        } catch (error: any) {
+            if (error.name === 'ResourceNotFoundException') {
+                return true; // Collection already gone — nothing to delete
+            }
+            logger.error(`Failed to delete faces from ${collectionId}:`, error);
+            throw error;
+        }
+    },
+
+    /**
+     * Delete an event's entire face collection.
+     * Called on event deletion and by the retention sweep (DPDP + cost control).
+     */
+    deleteCollection: async (eventId: string) => {
+        const collectionId = `event_${eventId}`;
+        try {
+            await rekognitionClient.send(new DeleteCollectionCommand({ CollectionId: collectionId }));
+            logger.info(`Deleted Rekognition collection: ${collectionId}`);
+            return true;
+        } catch (error: any) {
+            if (error.name === 'ResourceNotFoundException') {
+                return true; // Already gone
+            }
+            logger.error(`Failed to delete collection ${collectionId}:`, error);
+            throw error;
+        }
+    },
+
+    /**
+     * Queue a face indexing job for background processing
+     */
+    queueIndexFaces: async (bucket: string, key: string, mediaId: string, eventId: string) => {
+        try {
+            await rekognitionQueue.add('index-faces', {
+                bucket,
+                key,
+                mediaId,
+                eventId
+            });
+            logger.info(`📝 Queued indexing job for media ${mediaId} in event ${eventId}`);
+        } catch (error) {
+            logger.error(`❌ Failed to queue indexing job for ${mediaId}:`, error);
+            // Fallback to direct indexing if queueing fails (safest approach)
+            rekognitionService.indexFaces(bucket, key, mediaId, eventId).catch(e => 
+                logger.error(`Direct indexing fallback failed for ${mediaId}:`, e)
+            );
         }
     },
 };

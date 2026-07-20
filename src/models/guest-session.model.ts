@@ -1,6 +1,7 @@
 // models/GuestSession.ts
 import mongoose, { InferSchemaType, Model } from "mongoose";
 import { MODEL_NAMES } from "./names";
+import { generateSecureToken } from "../utils/secure-token.util";
 
 const guestSessionSchema = new mongoose.Schema({
     _id: {
@@ -24,6 +25,16 @@ const guestSessionSchema = new mongoose.Schema({
     selfie_url: {
         type: String,
         default: null
+    },
+
+    // DPDP: explicit per-guest consent for biometric processing. The selfie
+    // upload in face login is the opt-in act; withdrawal deletes aws_face_id
+    // from Rekognition and nulls selfie_url.
+    face_consent: {
+        given: { type: Boolean, default: false },
+        at: { type: Date, default: null },
+        version: { type: String, default: null },
+        withdrawn_at: { type: Date, default: null }
     },
 
     event_id: {
@@ -119,9 +130,7 @@ guestSessionSchema.index({ 'device_fingerprint.fingerprint_hash': 1, event_id: 1
 // Pre-save middleware
 guestSessionSchema.pre('save', function (next) {
     if (this.isNew && !this.session_id) {
-        const timestamp = Date.now().toString(36);
-        const random = Math.random().toString(36).substring(2, 10);
-        this.session_id = `gs_${timestamp}_${random}`;
+        this.session_id = generateSecureToken('gs');
     }
 
     if (this.isModified() && !this.isNew) {

@@ -219,7 +219,23 @@ export const WEBSOCKET_EVENTS = {
     // Error events
     ERROR: 'error',
     RATE_LIMIT_EXCEEDED: 'rate_limit_exceeded',
-    CONNECTION_TIMEOUT: 'connection_timeout'
+    CONNECTION_TIMEOUT: 'connection_timeout',
+
+    // ─────────────────────────────────────────────────────────────────────
+    // SLIM GUEST EVENTS (v2) — the only events guests should receive
+    // ─────────────────────────────────────────────────────────────────────
+    // Replaces: new_media_uploaded, media_approved, media_status_updated,
+    //           bulk_media_approved, bulk_individual_updates, etc.
+    NEW_PHOTOS_AVAILABLE: 'new_photos_available',  // N new photos approved — guest shows banner
+    PHOTO_REMOVED: 'photo_removed',               // A visible photo was removed
+    // Admin-room-only: pending moderation count changed
+    MODERATION_COUNT_UPDATED: 'moderation_count_updated',
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Slim admin bulk operation events (v2)
+    // ─────────────────────────────────────────────────────────────────────
+    BULK_OPERATION_STARTED: 'bulk_operation_started',
+    BULK_OPERATION_COMPLETE: 'bulk_operation_complete',
 } as const;
 
 export type WebSocketEventName = typeof WEBSOCKET_EVENTS[keyof typeof WEBSOCKET_EVENTS];

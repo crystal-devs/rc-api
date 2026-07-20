@@ -5,9 +5,11 @@ import multer from "multer";
 import {
     guestUploadMediaController,
     getMediaByEventController,
+    getEventMediaCountsController,
     getMediaByAlbumController,
     deleteMediaController,
     updateMediaStatusController,
+    toggleMediaFavoriteController,
     bulkUpdateMediaStatusController,
     bulkSoftDeleteMediaController,
     getGuestMediaController,
@@ -18,6 +20,9 @@ import {
     retryUploadController
 } from "@controllers/media.controller";
 import { authMiddleware } from "@middlewares/clicky-auth.middleware";
+import { eventAccessMiddleware } from "@middlewares/event-access.middleware";
+import { mediaAccessMiddleware } from "@middlewares/resource-access.middleware";
+import { authorize } from "@middlewares/authorize.middleware";
 import {
     checkStorageLimitMiddleware,
     checkEventPhotoLimitMiddleware,
@@ -30,6 +35,7 @@ import { getSignedUrlForKeyController } from "@controllers/signed-url.controller
 import { validateLambdaToken } from "@middlewares/validateLambdaToken.middleware";
 import { updateMediaController } from "@controllers/update-media.controller";
 import { searchFacesController } from "@controllers/media/search-faces.controller";
+import { mediaRateLimiter, uploadRateLimiter, faceSearchRateLimiter } from "@configs/security.config";
 
 const mediaRouter = express.Router();
 const wrap = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -63,16 +69,17 @@ const upload = multer({
 //     uploadMediaController as RequestHandler,
 // );
 
-mediaRouter.post('/upload-url', authMiddleware, wrap(generateBatchUploadUrlsController))
+mediaRouter.post('/upload-url', authMiddleware, uploadRateLimiter, wrap(generateBatchUploadUrlsController))
 mediaRouter.post('/upload-complete', authMiddleware, wrap(uploadCompleteController))
 mediaRouter.post('/upload-complete/batch', authMiddleware, wrap(uploadBatchCompleteController))
 mediaRouter.post('/signed-url/key', optionalAuthMiddleware, wrap(getSignedUrlForKeyController))
-mediaRouter.post('/update-photo', validateLambdaToken as RequestHandler, wrap(updateMediaController))
+mediaRouter.post('/update-photo', validateLambdaToken as RequestHandler, uploadRateLimiter, wrap(updateMediaController))
 
 // === GUEST UPLOADS ===
 mediaRouter.post(
     "/guest/:share_token/upload",
     optionalAuthMiddleware,        // Allow both auth and non-auth users
+    uploadRateLimiter,             // Rate limit uploads
     upload.array('files', 10),    // Support multiple files
     guestUploadMediaController
 );
@@ -82,13 +89,27 @@ mediaRouter.post(
 mediaRouter.get(
     "/event/:eventId",
     authMiddleware,
+    eventAccessMiddleware,
+    authorize('media.view'),
+    mediaRateLimiter,
     getMediaByEventController
+);
+
+// Get media counts by approval status (moderation tab badges — host surface)
+mediaRouter.get(
+    "/event/:eventId/counts",
+    authMiddleware,
+    eventAccessMiddleware,
+    authorize('media.approve'),
+    mediaRateLimiter,
+    getEventMediaCountsController
 );
 
 // Get media by album (authenticated)
 mediaRouter.get(
     "/album/:albumId",
     authMiddleware,
+    mediaRateLimiter,
     getMediaByAlbumController
 );
 
@@ -96,6 +117,7 @@ mediaRouter.get(
 mediaRouter.get(
     "/guest/:shareToken",
     optionalAuthMiddleware,
+    mediaRateLimiter,
     getGuestMediaController
 );
 
@@ -103,21 +125,37 @@ mediaRouter.get(
 mediaRouter.get(
     "/:media_id",
     authMiddleware,
+    mediaAccessMiddleware,
+    authorize('media.view'),
+    mediaRateLimiter,
     getMediaByIdController
 );
 
 // === MEDIA MANAGEMENT ===
-// Single media status update
+// Single media status update (approve/reject/hide — moderation)
 mediaRouter.patch(
     "/:media_id/status",
     authMiddleware,
+    mediaAccessMiddleware,
+    authorize('media.approve'),
     updateMediaStatusController
 );
 
-// Bulk media status update
+// Toggle host-curation favorite (Phase 3)
+mediaRouter.patch(
+    "/:media_id/favorite",
+    authMiddleware,
+    mediaAccessMiddleware,
+    authorize('media.approve'),
+    toggleMediaFavoriteController
+);
+
+// Bulk media status update (approve/reject — moderation)
 mediaRouter.patch(
     "/event/:event_id/bulk-status",
     authMiddleware,
+    eventAccessMiddleware,
+    authorize('media.approve'),
     bulkUpdateMediaStatusController
 );
 
@@ -125,6 +163,8 @@ mediaRouter.patch(
 mediaRouter.delete(
     "/:media_id",
     authMiddleware,
+    mediaAccessMiddleware,
+    authorize('media.delete'),
     deleteMediaController
 );
 
@@ -132,6 +172,8 @@ mediaRouter.delete(
 mediaRouter.post(
     "/event/:event_id/bulk-delete",
     authMiddleware,
+    eventAccessMiddleware,
+    authorize('media.delete'),
     bulkSoftDeleteMediaController
 );
 
@@ -140,6 +182,8 @@ mediaRouter.post(
 mediaRouter.get(
     "/:mediaId/variants",
     authMiddleware,
+    mediaAccessMiddleware,
+    authorize('media.view'),
     getMediaVariantsController
 );
 
@@ -174,6 +218,7 @@ mediaRouter.post(
 mediaRouter.post(
     "/search/faces",
     optionalAuthMiddleware,
+    faceSearchRateLimiter,
     upload.single('image'),
     wrap(searchFacesController)
 );

@@ -7,6 +7,7 @@ import { injectedRequest } from "types/injected-types";
 import mongoose from "mongoose";
 import { logger } from "@utils/logger";
 import { sendResponse, handleControllerError } from "@utils/express.util";
+import { normalizeRole } from "@utils/role.utils";
 import * as participantService from "@services/participant.service";
 
 // Input validation helper
@@ -133,9 +134,13 @@ export const inviteParticipantsController = async (
             if (invite.role && !['co_host', 'moderator', 'guest', 'viewer'].includes(invite.role)) {
                 return sendResponse(res, {
                     status: false,
-                    message: 'Invalid role. Use: co_host, moderator, guest, viewer',
+                    message: 'Invalid role. Use: co_host, guest',
                     data: null
                 });
+            }
+            // Normalize legacy values (moderator -> co_host, viewer -> guest)
+            if (invite.role) {
+                invite.role = normalizeRole(invite.role);
             }
         }
 
@@ -179,7 +184,7 @@ export const updateParticipantController = async (
 ): Promise<void> => {
     try {
         const { event_id, participant_id } = req.params;
-        const { role, permissions, status } = req.body;
+        const { role, status } = req.body;
         const updatedBy = req.user._id.toString();
 
         validateObjectId(event_id, 'event ID');
@@ -192,23 +197,16 @@ export const updateParticipantController = async (
             if (!['co_host', 'moderator', 'guest', 'viewer'].includes(role)) {
                 return sendResponse(res, {
                     status: false,
-                    message: 'Invalid role. Use: co_host, moderator, guest, viewer',
+                    message: 'Invalid role. Use: co_host, guest',
                     data: null
                 });
             }
-            updates.role = role;
+            // Normalize legacy values (moderator -> co_host, viewer -> guest)
+            updates.role = normalizeRole(role);
         }
 
-        if (permissions) {
-            if (typeof permissions !== 'object' || Array.isArray(permissions)) {
-                return sendResponse(res, {
-                    status: false,
-                    message: 'Permissions must be an object with boolean values',
-                    data: null
-                });
-            }
-            updates.permissions = permissions;
-        }
+        // Per-participant permission overrides are not accepted (RBAC Phase 3,
+        // no-overrides decision 2026-07-11): capabilities follow the role.
 
         if (status) {
             if (!['active', 'pending', 'blocked', 'removed'].includes(status)) {
@@ -224,7 +222,7 @@ export const updateParticipantController = async (
         if (Object.keys(updates).length === 0) {
             return sendResponse(res, {
                 status: false,
-                message: 'At least one field (role, permissions, status) must be provided',
+                message: 'At least one field (role, status) must be provided',
                 data: null
             });
         }

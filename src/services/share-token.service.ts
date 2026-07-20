@@ -48,7 +48,7 @@ export const getShareTokenDetailsService = async ({
         const event = await Event.findOne({
             share_token: tokenId
         })
-            .select('_id title description start_date location cover_image visibility share_settings permissions created_by co_hosts')
+            .select('_id title description start_date location cover_image visibility permissions created_by co_hosts share_settings.is_active share_settings.expires_at share_settings.has_password')
             .lean();
 
         if (!event) {

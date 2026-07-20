@@ -18,10 +18,14 @@ import {
     updateMediaStatusService,
 } from "@services/media";
 import { GuestSessionHelper } from "@services/guest/guest-session-helper";
+import { resolveSubEventTag, enforceSubEventScope } from "@services/event/sub-event.service";
+import { getOrCreateDefaultAlbum } from "@services/album";
 import { softDeleteMediaService, bulkSoftDeleteMediaService } from "@services/media/media-management.service";
 import sharp from "sharp";
 import { queueImageProcessing } from "@services/upload/shared/queue-processing.service";
 import { unifiedProgressService } from "@services/websocket/unified-progress.service";
+import { uploadFileToS3, cleanupFile } from "@utils/file.util";
+import { getCachedSignedUrl } from "@utils/cloudfront-url.util";
 
 // Enhanced interface for authenticated requests
 interface AuthenticatedRequest extends Request {
@@ -43,6 +47,33 @@ interface InjectedRequest extends AuthenticatedRequest {
 }
 
 /**
+ * Enforce a scoped co-host's per-function limits on a media action (Phase 1).
+ * Sends a 403 and returns false when the actor is a co-host restricted to
+ * certain functions and any target media falls outside them. Creators and
+ * unrestricted co-hosts always pass. req.eventAccess is attached by
+ * eventAccessMiddleware / mediaAccessMiddleware.
+ */
+async function passesSubEventScope(req: any, res: Response, mediaIds: string[]): Promise<boolean> {
+    const access = req.eventAccess;
+    const check = await enforceSubEventScope(
+        { role: access?.role ?? '', subEventScope: access?.subEventScope, eventId: access?.eventId ?? '' },
+        mediaIds
+    );
+    if (!check.allowed) {
+        res.status(403).json({
+            status: false,
+            code: 403,
+            message: check.message,
+            data: null,
+            error: { message: check.message, code: 'FORBIDDEN' },
+            other: null
+        });
+        return false;
+    }
+    return true;
+}
+
+/**
  * Get all media for a specific event with enhanced variant support
  */
 export const getMediaByEventController: RequestHandler = async (
@@ -52,7 +83,7 @@ export const getMediaByEventController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { eventId } = req.params;
-        const { page, limit, status, quality } = req.query;
+        const { page, limit, status, quality, sub_event_id, favorites, sort, search, source } = req.query;
         const userId = req.user?._id?.toString();
 
         if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
@@ -116,7 +147,13 @@ export const getMediaByEventController: RequestHandler = async (
             page: parseInt(page as string) || 1,
             limit: parseInt(limit as string) || 20,
             status: effectiveStatus,
-            quality: validatedQuality
+            quality: validatedQuality,
+            // Sub-event filter chips: an id, or 'none' for untagged media
+            subEventId: typeof sub_event_id === 'string' ? sub_event_id : undefined,
+            favoritesOnly: favorites === 'true',
+            sort: sort === 'oldest' ? 'oldest' : 'newest',
+            search: typeof search === 'string' ? search : undefined,
+            source: source === 'guest' || source === 'official' ? source : undefined
         };
 
         logger.info(`📱 Admin getting media for event ${eventId}`, {
@@ -141,6 +178,95 @@ export const getMediaByEventController: RequestHandler = async (
             status: false,
             code: 500,
             message: 'Failed to get event media',
+            data: null,
+            error: { message: error.message }
+        });
+    }
+};
+
+/**
+ * Get media counts by approval status for the moderation tabs
+ * (Published/Pending/Rejected/Hidden badges)
+ */
+export const getEventMediaCountsController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { eventId } = req.params;
+        const userId = req.user?._id?.toString();
+
+        if (!eventId || !mongoose.Types.ObjectId.isValid(eventId)) {
+            res.status(400).json({
+                status: false,
+                code: 400,
+                message: 'Invalid event ID',
+                data: null,
+                error: { message: 'A valid event ID is required' }
+            });
+            return;
+        }
+
+        const event = await Event.findById(eventId).select('created_by').lean();
+        if (!event) {
+            res.status(404).json({
+                status: false,
+                code: 404,
+                message: 'Event not found',
+                data: null,
+                error: { message: 'Event not found' }
+            });
+            return;
+        }
+
+        let isPrivilegedUser = event.created_by.toString() === userId;
+        if (!isPrivilegedUser && userId) {
+            const participant = await EventParticipant.findOne({
+                user_id: new mongoose.Types.ObjectId(userId),
+                event_id: new mongoose.Types.ObjectId(eventId),
+                role: 'co_host',
+                status: 'active'
+            }).lean();
+            isPrivilegedUser = !!participant;
+        }
+
+        if (!isPrivilegedUser) {
+            res.status(403).json({
+                status: false,
+                code: 403,
+                message: 'Only the event creator or co-hosts can view moderation counts',
+                data: null,
+                error: { message: 'Permission denied' }
+            });
+            return;
+        }
+
+        const grouped = await Media.aggregate([
+            { $match: { event_id: new mongoose.Types.ObjectId(eventId), deletedAt: null } },
+            { $group: { _id: '$approval.status', count: { $sum: 1 } } }
+        ]);
+
+        const byStatus: Record<string, number> = {};
+        grouped.forEach(g => { byStatus[g._id || 'pending'] = g.count; });
+
+        const approved = (byStatus.approved || 0) + (byStatus.auto_approved || 0);
+        const pending = byStatus.pending || 0;
+        const rejected = byStatus.rejected || 0;
+        const hidden = byStatus.hidden || 0;
+
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: 'Media counts retrieved successfully',
+            data: { approved, pending, rejected, hidden, total: approved + pending + rejected + hidden }
+        });
+    } catch (error: any) {
+        logger.error('❌ Error in getEventMediaCountsController:', error);
+        res.status(500).json({
+            status: false,
+            code: 500,
+            message: 'Failed to get media counts',
             data: null,
             error: { message: error.message }
         });
@@ -242,17 +368,9 @@ export const updateMediaStatusController: RequestHandler = async (
             return;
         }
 
-        // Block guest users
-        if (req.user?.role === 'guest') {
-            res.status(403).json({
-                status: false,
-                code: 403,
-                message: 'Guest users are not allowed to update media status',
-                data: null,
-                error: { message: 'Permission denied' }
-            });
-            return;
-        }
+        // Access gated by mediaAccessMiddleware + authorize('media.approve').
+        // A scoped co-host may only moderate media within their functions.
+        if (!(await passesSubEventScope(req, res, [media_id]))) return;
 
         if (!status) {
             res.status(400).json({
@@ -292,47 +410,11 @@ export const updateMediaStatusController: RequestHandler = async (
             reason
         });
 
-        // Send HTTP response first
+        // Note: WebSocket notification for guests (photo_removed / new_photos_available)
+        // is handled directly in updateMediaStatusService for reliability.
+        // The controller does not need to emit an additional event.
+
         res.status(response.code).json(response);
-
-        // Then handle WebSocket updates (non-blocking)
-        if (response.status && response.data) {
-            try {
-                const webSocketService = getWebSocketService();
-
-                const statusUpdatePayload = {
-                    mediaId: media_id,
-                    eventId: response.data.event_id.toString(),
-                    previousStatus: response.other?.previousStatus || 'unknown',
-                    newStatus: status,
-                    updatedBy: {
-                        name: userName,
-                        type: 'admin' // You can determine this based on user role
-                    },
-                    timestamp: new Date(),
-                    mediaData: {
-                        url: response.data.original?.public_id || response.data.url,
-                        thumbnail: (response.data.type === 'image' ? response.data.variants?.images?.small?.public_id : response.data.variants?.thumbnails?.preview?.public_id) || response.data.original?.public_id,
-                        filename: response.data.original?.filename || response.data.upload_id
-                    }
-                };
-
-                // Emit status update to appropriate rooms
-                webSocketService.emitStatusUpdate(statusUpdatePayload);
-
-                logger.info('✅ Status update broadcasted via WebSocket:', {
-                    mediaId: media_id,
-                    eventId: response.data.event_id,
-                    from: statusUpdatePayload.previousStatus,
-                    to: status,
-                    by: userName
-                });
-
-            } catch (wsError: any) {
-                logger.error('❌ WebSocket broadcast failed:', wsError.message);
-                // Don't fail the main operation if WebSocket fails
-            }
-        }
 
         logger.info('✅ Media status updated:', {
             mediaId: media_id,
@@ -360,6 +442,50 @@ export const updateMediaStatusController: RequestHandler = async (
 /**
  * Bulk update media status
  */
+/**
+ * Toggle a media's host-curation favorite flag (Phase 3).
+ * PATCH /media/:media_id/favorite  { favorite: boolean }
+ * Gated by mediaAccessMiddleware + authorize('media.approve'); scope-aware.
+ */
+export const toggleMediaFavoriteController: RequestHandler = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { media_id } = req.params;
+        const { favorite } = req.body;
+
+        if (!media_id || !mongoose.Types.ObjectId.isValid(media_id)) {
+            res.status(400).json({ status: false, code: 400, message: 'Invalid media ID', data: null });
+            return;
+        }
+
+        // A scoped co-host may only curate media within their functions.
+        if (!(await passesSubEventScope(req, res, [media_id]))) return;
+
+        const updated = await Media.findByIdAndUpdate(
+            media_id,
+            { $set: { is_favorite: Boolean(favorite), updated_at: new Date() } },
+            { new: true }
+        ).select('_id is_favorite').lean();
+
+        if (!updated) {
+            res.status(404).json({ status: false, code: 404, message: 'Media not found', data: null });
+            return;
+        }
+
+        res.status(200).json({
+            status: true,
+            code: 200,
+            message: updated.is_favorite ? 'Added to favorites' : 'Removed from favorites',
+            data: { media_id, is_favorite: updated.is_favorite }
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
 export const bulkUpdateMediaStatusController: RequestHandler = async (
     req: InjectedRequest,
     res: Response,
@@ -436,6 +562,9 @@ export const bulkUpdateMediaStatusController: RequestHandler = async (
             });
             return;
         }
+
+        // A scoped co-host may only moderate media within their functions.
+        if (!(await passesSubEventScope(req, res, media_ids))) return;
 
         logger.info('Bulk updating media status:', {
             event_id,
@@ -588,18 +717,9 @@ export const deleteMediaController: RequestHandler = async (
             return;
         }
 
-        // Block guest users
-        if (req.user?.role === 'guest') {
-            res.status(403).json({
-                status: false,
-                code: 403,
-                message: "Guest users are not allowed to delete media",
-                data: null,
-                error: { message: "Permission denied" },
-                other: null
-            });
-            return;
-        }
+        // Access gated by mediaAccessMiddleware + authorize('media.delete').
+        // A scoped co-host may only delete media within their functions.
+        if (!(await passesSubEventScope(req, res, [media_id]))) return;
 
         logger.info('Deleting media:', {
             media_id,
@@ -632,7 +752,7 @@ export const guestUploadMediaController: RequestHandler = async (
     try {
         const { share_token } = req.params;
         const files = (req.files as Express.Multer.File[]) || [];
-        const { guest_name, guest_email, guest_phone } = req.body;
+        const { guest_name, guest_email, guest_phone, sub_event_id } = req.body;
 
         if (!share_token || !files.length) {
             res.status(400).json({
@@ -656,6 +776,11 @@ export const guestUploadMediaController: RequestHandler = async (
             return;
         }
 
+        // Which function (sub-event) these photos belong to. The event is already
+        // loaded, so this validates without another query; unknown/absent tags
+        // fall back to the whole-event gallery. (Phase 1)
+        const subEventTag = resolveSubEventTag(event.sub_events, sub_event_id);
+
         // Get or create guest session
         const guestInfo = {
             name: guest_name || '',
@@ -671,6 +796,23 @@ export const guestUploadMediaController: RequestHandler = async (
 
         GuestSessionHelper.setCookie(res, guestSession.session_id);
 
+        // Guest uploads always land in the event's default album
+        const albumResult = await getOrCreateDefaultAlbum(
+            event._id.toString(),
+            event.created_by.toString()
+        );
+        if (!albumResult.status || !albumResult.data) {
+            await cleanupFiles(files);
+            res.status(500).json({
+                status: false,
+                code: 500,
+                message: "Failed to resolve event album",
+                data: null
+            });
+            return;
+        }
+        const albumId = albumResult.data._id;
+
         // Process files
         const processPromises = files.map(async (file) => {
             const mediaId = new mongoose.Types.ObjectId();
@@ -684,6 +826,11 @@ export const guestUploadMediaController: RequestHandler = async (
             } catch (err) {
                 logger.warn(`Failed to get metadata for file ${file.originalname}`, err);
             }
+
+            // Upload the actual file to S3 — without this, the media record
+            // points at an object that doesn't exist and never renders
+            const s3Key = await uploadFileToS3(file, event._id.toString(), mediaId.toString());
+            await cleanupFile(file);
 
             // Initialize progress
             unifiedProgressService.initializeUpload(
@@ -699,32 +846,16 @@ export const guestUploadMediaController: RequestHandler = async (
                 upload_id: mediaId.toString(),
                 type: file.mimetype.startsWith('video') ? 'video' : 'image',
                 event_id: event._id,
-                album_id: new mongoose.Types.ObjectId(event.template), // Assuming template is mapped to album or default album logic needed. 
-                // Wait, event.template is a string? event.album_id?
-                // The event model has 'template' but maybe not 'album_id' directly linked?
-                // Usually events have a default album.
-                // Let's assume we can use a placeholder or find it.
-                // Re-checking Guest Upload Service usage: it used `event._id` and `albumId`.
-                // For now, I will use `event._id` as album_id if not present, OR look up standard album.
-                // But to be safe, I'll use `event._id` cast to ObjectId if no album_id.
-                // Actually, let's just use event._id for album_id as a fallback.
-                // Correct logic: Events usually have a one-to-one or one-to-many relationship.
-                // If I don't have album_id, I might fail validation if schema requires it.
-                // Schema says: album_id: { type: ObjectId, required: true }.
-                // `uploadMediaController` gets `album_id` from body.
-                // Guest upload doesn't pass `album_id`.
-                // I will assume `event._id` serves as `album_id` or find the default album.
-                // Let's create a new ObjectId for now or query? Querying is better.
-                // `const defaultAlbum = await Album.findOne({ event_id: event._id, is_default: true });`
-                // I don't have Album imported.
-                // I will use `event._id` as album_id for now as is common in some setups.
+                album_id: albumId,
+                sub_event_id: subEventTag,
+                source: 'guest',
                 owner: {
                     type: 'guest',
                     guest_id: guestSession._id.toString(),
                     display_name: guest_name || 'Guest'
                 },
                 original: {
-                    public_id: `upload_${mediaId.toString()}`,
+                    public_id: s3Key,
                     filename: file.originalname,
                     width,
                     height,
@@ -737,7 +868,7 @@ export const guestUploadMediaController: RequestHandler = async (
                     stage: 'uploading',
                     progress: 0
                 },
-                approval: { status: (event as any).default_guest_permissions?.upload ? 'approved' : 'pending' },
+                approval: { status: event.permissions?.require_approval ? 'pending' : 'auto_approved' },
                 deleteGroup: `event-${event._id.toString()}-upload-${mediaId.toString()}`
             });
 
@@ -748,7 +879,7 @@ export const guestUploadMediaController: RequestHandler = async (
                 file,
                 mediaId.toString(),
                 event._id.toString(),
-                event._id.toString(), // albumId
+                albumId.toString(),
                 {
                     userId: 'guest',
                     userName: guest_name || 'Guest',
@@ -761,9 +892,11 @@ export const guestUploadMediaController: RequestHandler = async (
                 await media.save();
             }
 
+            const originalUrl = await getCachedSignedUrl(s3Key);
+
             return {
                 mediaId: mediaId.toString(),
-                originalUrl: `https://dummy-s3-url/${media.original.public_id}`, // Placeholder until processed. Frontend needs handling or real URL.
+                originalUrl,
                 width,
                 height,
                 approval: media.approval
@@ -800,9 +933,10 @@ export const guestUploadMediaController: RequestHandler = async (
 };
 
 /**
- * 🚀 NEW: Cleanup multiple files utility (if not already available)
+ * Cleanup multiple local (multer temp) files
  */
 const cleanupFiles = async (files: Express.Multer.File[]): Promise<void> => {
+    await Promise.all(files.map(file => cleanupFile(file)));
 };
 
 /**
@@ -815,7 +949,7 @@ export const getGuestMediaController: RequestHandler = async (
 ): Promise<void> => {
     try {
         const { shareToken } = req.params;
-        const { page, limit, quality } = req.query;
+        const { page, limit, quality, sub_event_id } = req.query;
 
         if (!shareToken) {
             res.status(400).json({
@@ -831,7 +965,9 @@ export const getGuestMediaController: RequestHandler = async (
         const options = {
             page: parseInt(page as string) || 1,
             limit: Math.min(parseInt(limit as string) || 20, 50), // Limit guests to 50
-            quality: quality as string || 'medium'
+            quality: quality as string || 'medium',
+            // Optional per-function view; the gallery otherwise groups client-side
+            subEventId: typeof sub_event_id === 'string' ? sub_event_id : undefined
         };
 
         logger.info(`🔗 Guest accessing media:`, {
@@ -1108,6 +1244,9 @@ export const bulkSoftDeleteMediaController: RequestHandler = async (
             });
             return;
         }
+
+        // A scoped co-host may only delete media within their functions.
+        if (!(await passesSubEventScope(req, res, media_ids))) return;
 
         logger.info('Bulk soft deleting media:', {
             event_id,

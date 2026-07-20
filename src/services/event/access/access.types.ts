@@ -26,6 +26,8 @@ export interface EventResponse {
         require_approval: boolean;
     };
     styling_config?: any;
+    /** Functions in timeline order; empty for single-function events (Phase 1) */
+    sub_events?: Array<{ _id: any; name: string; date: Date | null; order: number }>;
 }
 
 export interface ShareTokenValidation {

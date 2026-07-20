@@ -9,16 +9,21 @@ import { sendResponse } from "@utils/express.util";
 import { Event, EventType } from "@models/event.model";
 import {
     addCreatorAsParticipant,
-    checkUpdatePermission,
     createEventService,
     deleteEventService,
     getEventDetailService,
     getUserEventsService,
     processEventUpdateData,
-    updateEventService
+    updateEventService,
+    toggleEventArchiveService,
+    listSubEvents,
+    addSubEvent,
+    updateSubEvent,
+    deleteSubEvent
 } from "@services/event";
 import { createDefaultAlbumForEvent } from "@services/album";
 import { eventCacheService } from "@services/cache/event-cache.service";
+import { getTemplateDefaults } from "@services/event/template-defaults";
 
 interface InjectedRequest extends Request {
     user: {
@@ -60,6 +65,9 @@ interface EventCreationInput {
         password?: string;
         expires_at?: string | Date;
     };
+    face_recognition?: {
+        enabled?: boolean;
+    };
     co_hosts?: Array<{
         user_id: string | mongoose.Types.ObjectId;
         invited_by: string | mongoose.Types.ObjectId;
@@ -81,7 +89,7 @@ export const createEventController = async (req: injectedRequest, res: Response,
             throw new Error('User authentication required');
         }
 
-        const { title, template, start_date, end_date } = trimObject(req.body) as EventCreationInput;
+        const { title, template, start_date, end_date, face_recognition } = trimObject(req.body) as EventCreationInput;
 
         // Validation
         if (!title?.trim()) throw new Error('Event title is required');
@@ -100,16 +108,25 @@ export const createEventController = async (req: injectedRequest, res: Response,
         if (startDate && endDate && startDate >= endDate)
             throw new Error('End date must be after start date');
 
-        // Prepare event data (minimal, relying on schema defaults)
+        // Template-driven defaults (Phase 1.1): the server applies visibility
+        // and permissions per template so clients can't skip policy. Biometrics
+        // (face_recognition) are enabled only on an explicit boolean opt-in.
+        const templateDefaults = getTemplateDefaults(template);
+
         const eventData: Partial<EventType> = {
             title: title.trim(),
             template,
             created_by: new mongoose.Types.ObjectId(req.user._id), // Set created_by explicitly
             start_date: startDate,
             end_date: endDate,
-            // Other fields (description, timezone, location, cover_image, visibility, permissions, share_settings, co_hosts, stats)
+            visibility: templateDefaults.visibility,
+            permissions: templateDefaults.permissions,
+            face_recognition: {
+                enabled: face_recognition?.enabled === true,
+            },
+            // Other fields (description, timezone, location, cover_image, share_settings, co_hosts, stats)
             // are omitted to use schema defaults
-        };
+        } as Partial<EventType>;
 
         const response = await createEventService(eventData);
 
@@ -219,6 +236,36 @@ export const getEventController = async (req: injectedRequest, res: Response, ne
     }
 };
 
+/**
+ * GET /event/:event_id/my-access
+ * The client's single source of truth for role-based UI. Returns the caller's
+ * role and computed permission set for this event — resolved by the exact same
+ * policy the authorize() middleware enforces, so client and server can never
+ * disagree. See rc-frontend/docs/RBAC_DESIGN.md.
+ */
+export const getMyAccessController = async (req: injectedRequest, res: Response): Promise<void> => {
+    const access = req.eventAccess;
+
+    if (!access) {
+        res.status(500).json({
+            status: false,
+            message: 'Access context missing — eventAccessMiddleware must run first',
+            data: null
+        });
+        return;
+    }
+
+    res.status(200).json({
+        status: true,
+        message: 'Access resolved',
+        data: {
+            event_id: access.eventId,
+            role: access.role,
+            permissions: Array.from(access.permissions ?? [])
+        }
+    });
+};
+
 export const updateEventController = async (req: injectedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
         const { event_id } = trimObject(req.params);
@@ -229,27 +276,6 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             res.status(400).json({
                 status: false,
                 message: 'Valid event ID is required',
-                data: null
-            });
-            return;
-        }
-
-        // Block guest users
-        if ((req.user as any)?.role === 'guest') {
-            res.status(403).json({
-                status: false,
-                message: "Guests are not allowed to update events",
-                data: null
-            });
-            return;
-        }
-
-        // Validate update permissions
-        const hasPermission = await checkUpdatePermission(event_id, userId);
-        if (!hasPermission) {
-            res.status(403).json({
-                status: false,
-                message: "You don't have permission to update this event",
                 data: null
             });
             return;
@@ -269,7 +295,11 @@ export const updateEventController = async (req: injectedRequest, res: Response,
             'styling_config'
         ];
 
-        // Process and validate update data
+        // Process and validate update data. Closing/reopening the event
+        // (share_settings.is_active) is NOT handled here — it is a creator-only
+        // action owned by PATCH /:event_id/archive, and processShareSettingsData
+        // ignores is_active — so the generic update no longer needs to special-
+        // case it or re-fetch the event to detect a flip.
         const currentEvent = await Event.findById(event_id);
         const processedUpdateData = await processEventUpdateData(updateData, currentEvent);
         const response = await updateEventService(event_id, processedUpdateData, userId);
@@ -308,16 +338,8 @@ export const deleteEventController = async (req: injectedRequest, res: Response,
             throw new Error("Valid event ID is required");
         }
 
-        // Block guest users
-        if ((req.user as any)?.role === 'guest') {
-            res.status(403).json({
-                status: false,
-                message: "Guests are not allowed to delete events",
-                data: null
-            });
-            return;
-        }
-
+        // Route-level authorize('event.delete') gates this to the creator;
+        // deleteEventService keeps its own owner check as defense in depth.
         const response = await deleteEventService(event_id, userId);
         // Invalidate caches regardless of response status to be safe
         try {
@@ -532,8 +554,89 @@ export const toggleEventArchiveController = async (req: injectedRequest, res: Re
             throw new Error("Valid event ID is required");
         }
 
-        // const response = await eventService.toggleEventArchiveService(event_id, userId, archive);
-        // sendResponse(res, response);
+        // Route-level authorize('event.archive') already gated this to the creator.
+        const response = await toggleEventArchiveService(event_id, userId, Boolean(archive));
+
+        if (response.status) {
+            try {
+                await Promise.all([
+                    eventCacheService.invalidateEventCaches(event_id),
+                    eventCacheService.invalidateUserCaches(userId)
+                ]);
+            } catch (e) {
+                console.warn('Cache invalidation failed after archive toggle:', e);
+            }
+        }
+        sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ============= SUB-EVENTS (multi-function structure) =============
+
+const invalidateEventCachesQuietly = async (eventId: string, userId: string) => {
+    try {
+        await Promise.all([
+            eventCacheService.invalidateEventCaches(eventId),
+            eventCacheService.invalidateUserCaches(userId)
+        ]);
+    } catch (e) {
+        console.warn('Cache invalidation failed after sub-event change:', e);
+    }
+};
+
+export const getSubEventsController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+        sendResponse(res, await listSubEvents(event_id));
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const createSubEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id } = trimObject(req.params);
+        const { name, date, order } = trimObject(req.body);
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+        const response = await addSubEvent(event_id, { name, date, order });
+        if (response.status) await invalidateEventCachesQuietly(event_id, req.user._id.toString());
+        sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const updateSubEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id, sub_event_id } = trimObject(req.params);
+        const { name, date, order } = trimObject(req.body);
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+        const response = await updateSubEvent(event_id, sub_event_id, { name, date, order });
+        if (response.status) await invalidateEventCachesQuietly(event_id, req.user._id.toString());
+        sendResponse(res, response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const deleteSubEventController = async (req: injectedRequest, res: Response, next: NextFunction) => {
+    try {
+        const { event_id, sub_event_id } = trimObject(req.params);
+        if (!event_id || !mongoose.Types.ObjectId.isValid(event_id)) {
+            throw new Error("Valid event ID is required");
+        }
+        const response = await deleteSubEvent(event_id, sub_event_id);
+        if (response.status) await invalidateEventCachesQuietly(event_id, req.user._id.toString());
+        sendResponse(res, response);
     } catch (error) {
         next(error);
     }

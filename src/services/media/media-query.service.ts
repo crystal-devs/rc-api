@@ -53,6 +53,35 @@ export const buildMediaQuery = (
         query['processing.status'] = 'completed';
     }
 
+    // Favorites filter (Phase 3): host-curated / keepsake-album source.
+    if (options.favoritesOnly) {
+        query.is_favorite = true;
+    }
+
+    // Source filter (Phase 3): guest contributions vs official (host/photographer).
+    if (options.source === 'guest' || options.source === 'official') {
+        query.source = options.source;
+    }
+
+    // Filename search (Phase 3): case-insensitive, escaped so user input can't
+    // inject regex metacharacters.
+    if (options.search && options.search.trim()) {
+        const escaped = options.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        query['original.filename'] = { $regex: escaped, $options: 'i' };
+    }
+
+    // Sub-event (function) filter — Phase 1. 'none' = only untagged media (the
+    // whole-event gallery); an id = that function; omitted = no filter (all).
+    if (options.subEventId) {
+        if (options.subEventId === 'none') {
+            query.sub_event_id = null;
+        } else if (mongoose.Types.ObjectId.isValid(options.subEventId)) {
+            query.sub_event_id = new mongoose.Types.ObjectId(options.subEventId);
+        } else {
+            logger.warn('Ignoring invalid subEventId filter:', options.subEventId);
+        }
+    }
+
     // Apply date filter
     if (options.since) {
         try {
@@ -123,8 +152,8 @@ export const getMediaByEventService = async (
 
         // Execute query
         const mediaItems = await Media.find(query)
-            .select('_id type event_id album_id original variants processing approval owner stats created_at updated_at')
-            .sort({ created_at: -1 })
+            .select('_id type event_id album_id sub_event_id is_favorite source original variants processing approval owner stats created_at updated_at')
+            .sort({ created_at: options.sort === 'oldest' ? 1 : -1 })
             .skip(skip)
             .limit(limit)
             .lean();
@@ -200,7 +229,7 @@ export const getMediaByAlbumService = async (
 
         // Get media with pagination
         const mediaItems = await Media.find(query)
-            .select('_id type event_id album_id original variants processing approval owner stats created_at updated_at')
+            .select('_id type event_id album_id sub_event_id is_favorite source original variants processing approval owner stats created_at updated_at')
             .sort({ created_at: -1 })
             .skip(skip)
             .limit(limit)
@@ -265,7 +294,7 @@ export const getGuestMediaService = async (
         // Find event by share token
         const event = await Event.findOne({
             share_token: shareToken
-        }).select('_id title permissions share_settings').lean();
+        }).select('_id title permissions share_settings.is_active share_settings.expires_at share_settings.has_password').lean();
 
         if (!event) {
             logger.warn(`❌ Event not found for share token: ${shareToken}`);
@@ -299,12 +328,22 @@ export const getGuestMediaService = async (
             };
         }
 
-        // Query only approved photos for guests
-        const query = {
+        // Query approved media for guests (photos and videos)
+        const query: any = {
             event_id: event._id,
-            'approval.status': { $in: ['approved', 'auto_approved'] },
-            type: 'image'
+            'approval.status': { $in: ['approved', 'auto_approved'] }
         };
+
+        // Sub-event (function) filter — same semantics as the host gallery.
+        // The guest gallery groups by sub_event_id for section dividers, so this
+        // is optional; it exists for per-function views.
+        if (options.subEventId) {
+            if (options.subEventId === 'none') {
+                query.sub_event_id = null;
+            } else if (mongoose.Types.ObjectId.isValid(options.subEventId)) {
+                query.sub_event_id = new mongoose.Types.ObjectId(options.subEventId);
+            }
+        }
 
         // Get total count
         const totalCount = await Media.countDocuments(query);
@@ -330,7 +369,14 @@ export const getGuestMediaService = async (
             // Hide uploader info for privacy
             uploader_display_name: "Guest",
             // Ensure guest access context
-            guest_access: true
+            guest_access: true,
+            // Per-role download quality (Phase 3): guests never receive the
+            // original URL — cap it to the ~1600px "full" tier so a single-photo
+            // download can't pull an original. Hosts use the admin service, which
+            // keeps originals.
+            responsive_urls: item.responsive_urls
+                ? { ...item.responsive_urls, original: item.responsive_urls.full || item.responsive_urls.original }
+                : item.responsive_urls
         }));
 
         // Pagination info

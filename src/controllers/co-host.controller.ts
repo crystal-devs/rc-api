@@ -140,6 +140,35 @@ export const manageCoHostController = async (
     }
 };
 
+/**
+ * Set a co-host's per-function scope (Phase 1). Route is creator-gated by
+ * authorize('cohost.manage'). Body: { sub_event_ids: string[] } — empty clears
+ * the scope (full access).
+ */
+export const setCoHostScopeController = async (
+    req: injectedRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
+    try {
+        const { event_id, user_id } = req.params;
+        const { sub_event_ids } = req.body;
+
+        validateObjectId(event_id, 'event ID');
+        validateObjectId(user_id, 'user ID');
+
+        const response = await cohostService.setCoHostScope(event_id, user_id, sub_event_ids);
+        res.status(response.status ? 200 : 400).json(response);
+    } catch (error) {
+        logger.error('Error in setCoHostScopeController:', error);
+        res.status(400).json({
+            status: false,
+            message: error.message || 'Bad request',
+            data: null
+        });
+    }
+};
+
 // Get event co-hosts
 export const getEventCoHostsController = async (
     req: injectedRequest,

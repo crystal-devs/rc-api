@@ -7,8 +7,13 @@ import path from 'path';
 // Load env vars
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
-// Force connection string to ensure we hit the right DB
-const MONGODB_URI = "mongodb+srv://crystalinsiders:Upm2gbQ8Oco1g6NW@crystal-cluster.xjaeb.mongodb.net/rose-click";
+const MONGODB_URI = process.env.MONGO_URI;
+const MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'rose-click';
+
+if (!MONGODB_URI) {
+    console.error('MONGO_URI is not set in .env');
+    process.exit(1);
+}
 
 // Target Event
 const EVENT_ID = "68d2bc87196092f05224c2dd";
@@ -17,7 +22,7 @@ const USER_FACE_ID = "1bbb78d6-68ba-4d6e-9940-1460196e3675";
 async function run() {
     try {
         console.log("Connecting...");
-        await mongoose.connect(MONGODB_URI);
+        await mongoose.connect(MONGODB_URI, { dbName: MONGO_DB_NAME });
 
         console.log(`Updating Media for Event: ${EVENT_ID}`);
 

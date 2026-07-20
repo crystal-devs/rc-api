@@ -22,6 +22,20 @@ export interface MediaQueryOptions {
     quality?: 'small' | 'medium' | 'large' | 'original'
     format?: 'webp' | 'jpeg' | 'auto';
     context?: 'mobile' | 'desktop' | 'lightbox';
+    /**
+     * Sub-event (function) filter — Phase 1. An ObjectId limits results to that
+     * function; the literal 'none' returns only media not tagged to any function
+     * (the whole-event / main gallery). Omit for every item in the event.
+     */
+    subEventId?: string;
+    /** Favorites-only filter — Phase 3 (host curation / keepsake source). */
+    favoritesOnly?: boolean;
+    /** Sort order — Phase 3. 'oldest' flips the default newest-first upload sort. */
+    sort?: 'newest' | 'oldest';
+    /** Case-insensitive filename search — Phase 3. */
+    search?: string;
+    /** Source filter — Phase 3. 'guest' contributions vs 'official' (host/photographer). */
+    source?: 'guest' | 'official';
 }
 
 export interface StatusUpdateOptions {

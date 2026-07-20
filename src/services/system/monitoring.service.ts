@@ -1,7 +1,7 @@
 // services/monitoring.service.ts
 import { logger } from '@utils/logger';
 import { MonitoringService } from '@utils/monitoring';
-import { getImageQueue } from 'queues/imageQueue';
+
 
 // Security monitoring data
 interface SecurityEvent {
@@ -87,21 +87,7 @@ export class ProductionMonitoringService {
                 }
 
                 // Image processing stats
-                const imageQueue = getImageQueue();
-                if (imageQueue) {
-                    const waiting = await imageQueue.getWaiting();
-                    const active = await imageQueue.getActive();
-                    const completed = await imageQueue.getCompleted();
-                    const failed = await imageQueue.getFailed();
 
-                    logger.info('Image Queue Stats:', {
-                        waiting: waiting.length,
-                        active: active.length,
-                        completed: completed.length,
-                        failed: failed.length,
-                        timestamp: new Date().toISOString()
-                    });
-                }
 
                 // Bulk download stats
                 try {

@@ -1,42 +1,24 @@
-
-import { Event } from '@models/event.model';
 import { logger } from '@utils/logger';
+import { determineApprovalStatus } from './user.utils';
 
 export const validatePermissionsAndGetApproval = async (eventId: string, userId?: string) => {
-    const event = await Event.findById(eventId)
-        .select('permissions created_by')
-        .lean();
-
-    if (!event) {
-        throw new Error('Event not found');
-    }
-
-    const creatorId = event.created_by?.toString();
-    const uploaderId = userId?.toString();
-
     logger.info('🔍 Media Upload Permission Check:', {
         eventId,
-        creatorId,
-        uploaderId,
-        isMatch: creatorId === uploaderId
+        uploaderId: userId
     });
 
-    // Auto-approve if uploader is the event creator
-    if (creatorId && uploaderId && creatorId === uploaderId) {
-        logger.info(`✅ Auto-approving upload for event creator: ${uploaderId}`);
-        return {
-            status: 'approved',
-            auto_approval_reason: 'event_creator',
-            approved_by: userId,
-            approved_at: new Date()
-        };
+    const result = await determineApprovalStatus(eventId, userId);
+
+    if (result.status === 'auto_approved') {
+        logger.info(`✅ Auto-approving upload: ${result.autoApprovalReason}`);
+    } else if (result.status === 'pending') {
+        logger.info(`⏳ Setting upload status to pending`);
     }
 
-    logger.info(`⏳ Setting upload status to pending for user: ${uploaderId}`);
     return {
-        status: 'pending',
-        auto_approval_reason: null,
-        approved_by: null,
-        approved_at: null
+        status: result.status === 'auto_approved' ? 'approved' : result.status,
+        auto_approval_reason: result.autoApprovalReason,
+        approved_by: result.approvedBy,
+        approved_at: result.approvedAt
     };
 };
